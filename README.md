@@ -1,4 +1,4 @@
-# myapp
+# Aurex
 
 A new Flutter project.
 
