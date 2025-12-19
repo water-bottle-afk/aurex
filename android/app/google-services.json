@@ -1,0 +1,98 @@
+{
+  "project_info": {
+    "project_number": "821885695604",
+    "project_id": "aurex-blockchain-transactions",
+    "storage_bucket": "aurex-blockchain-transactions.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:821885695604:android:2970af6d19174567218321",
+        "android_client_info": {
+          "package_name": "com.aurex.trading"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "821885695604-g3576do204vi9pos45412mjf0dn1vped.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aurex.trading",
+            "certificate_hash": "bbbe8724a13b9b8f7c9bbcd89332fe9a5cba793a"
+          }
+        },
+        {
+          "client_id": "821885695604-f5rmh64jhffljl8pn41uepcf1jp2cioi.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBgUdDR0GUSw-X-vv96DsooxTulEh-uF_E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "821885695604-f5rmh64jhffljl8pn41uepcf1jp2cioi.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "821885695604-b9dg08llqs0f80ggvprd5hv0r4iaka41.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.aurex"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:821885695604:android:a6675f78ddf1ffff218321",
+        "android_client_info": {
+          "package_name": "com.example.aurex"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "821885695604-1mrurumsqa3kdd22mp7j7gvh9hac4od3.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.aurex",
+            "certificate_hash": "bbbe8724a13b9b8f7c9bbcd89332fe9a5cba793a"
+          }
+        },
+        {
+          "client_id": "821885695604-f5rmh64jhffljl8pn41uepcf1jp2cioi.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBgUdDR0GUSw-X-vv96DsooxTulEh-uF_E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "821885695604-f5rmh64jhffljl8pn41uepcf1jp2cioi.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "821885695604-b9dg08llqs0f80ggvprd5hv0r4iaka41.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.aurex"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
