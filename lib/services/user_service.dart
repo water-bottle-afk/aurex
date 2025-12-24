@@ -158,6 +158,34 @@ class UserService {
     return newUser;
   }
 
+  /// Create new user with Google sign-in (no password required)
+  Future<UserModel> createUserWithGoogle({
+    required String email,
+    required String username,
+    required String googleId,
+  }) async {
+    // Check if user already exists by Google ID
+    var user = await getUserByGoogleId(googleId);
+    if (user != null) {
+      return user;
+    }
+
+    // Create new user with empty password for Google-only accounts
+    final newUser = UserModel(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      email: email,
+      username: username,
+      password: '', // Empty password for Google-only accounts
+      googleId: googleId,
+      createdAt: DateTime.now(),
+    );
+
+    final users = await _loadUsers();
+    users.add(newUser);
+    await _saveUsers(users);
+    return newUser;
+  }
+
   /// Update user password
   Future<void> updateUserPassword(String email, String newPassword) async {
     final users = await _loadUsers();

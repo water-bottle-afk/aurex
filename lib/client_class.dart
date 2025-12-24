@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart'; // For ChangeNotifier
 
 class Client extends ChangeNotifier {
   SecureSocket? _socket;
-  final String host = "10.100.102.50";  // Server IP on local network
+  final String host = "172.16.64.109";  // Server IP on local network
   final int port = 23456;
   final Logger _logger = Logger('Client');
   bool _isConnected = false;
@@ -16,12 +16,21 @@ class Client extends ChangeNotifier {
     try {
       print("Attempting to connect...");  // Temporary debug print
       // Create a secure socket connection for TLS, ignoring cert errors for self-signed
-      _socket = await SecureSocket.connect(host, port, onBadCertificate: (certificate) => true);
+      // Add timeout of 5 seconds to prevent hanging
+      _socket = await SecureSocket.connect(host, port, onBadCertificate: (certificate) => true)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () {
+              throw Exception('Connection timeout - server not responding after 5 seconds');
+            },
+          );
       _isConnected = true;
       notifyListeners();
       _logger.info("Connected to server");
+      print("DEBUG: Connected successfully to $host:$port");
     } catch (e) {
       _logger.severe("Connection failed: $e");
+      print("DEBUG: Connection error: $e");
       rethrow;
     }
   }
@@ -36,7 +45,10 @@ class Client extends ChangeNotifier {
   Future<String> receiveMessage() async {
     if (_socket != null) {
       final data = await _socket!.first; // Read first chunk
-      return utf8.decode(data);
+      final message = utf8.decode(data);
+      _logger.info("Received from server: $message");
+      print("DEBUG: Server message received: $message"); // Log for debugging
+      return message;
     }
     return "";
   }

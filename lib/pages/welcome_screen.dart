@@ -23,7 +23,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Image.asset('assets/images/logo.png'),
+        child: Image.asset('assets/icons/icon_white.png'),
       ),
     );
   }
