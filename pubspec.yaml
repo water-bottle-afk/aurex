@@ -20,6 +20,7 @@ dependencies:
   shimmer: ^3.0.0
   provider: ^6.1.2
   cloud_firestore: ^4.17.5
+  shared_preferences: ^2.2.2
 
 dev_dependencies:
   flutter_test:
@@ -32,10 +33,16 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/images/
+    - assets/images/google_logo.png
+    - assets/images/welcome_background.png
+    - assets/images/leather_jacket.png
+    - assets/images/sunglasses.png
+    - assets/images/wristwatch.png
+    - assets/icons/icon_white.png
+    - assets/icons/icon_black.png
 
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: assets/images/logo.png
+  image_path: assets/icons/icon_black.png
 
