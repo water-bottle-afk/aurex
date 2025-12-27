@@ -1,0 +1,180 @@
+{
+  "users": {
+    "550e8400-e29b-41d4-a716-446655440000": {
+      "user_id": "550e8400-e29b-41d4-a716-446655440000",
+      "username": "david123",
+      "email": "david@example.com",
+      "password_hash": "$2y$10$abc123hashvalue",
+      "registration_date": "2025-01-10T14:32:20Z",
+      "profile_image_path": "/images/users/david.jpg",
+      "is_active": true
+    },
+    "660e8400-e29b-41d4-a716-446655440111": {
+      "user_id": "660e8400-e29b-41d4-a716-446655440111",
+      "username": "sarah_artist",
+      "email": "sarah@example.com",
+      "password_hash": "$2y$10$def456hashvalue",
+      "registration_date": "2025-01-15T10:15:30Z",
+      "profile_image_path": "/images/users/sarah.jpg",
+      "is_active": true
+    },
+    "770e8400-e29b-41d4-a716-446655440222": {
+      "user_id": "770e8400-e29b-41d4-a716-446655440222",
+      "username": "mike_collector",
+      "email": "mike@example.com",
+      "password_hash": "$2y$10$ghi789hashvalue",
+      "registration_date": "2025-01-20T09:45:00Z",
+      "profile_image_path": "/images/users/mike.jpg",
+      "is_active": true
+    }
+  },
+  "wallets": {
+    "a3f1c5c2-7b98-4d2a-9f55-12ab44c9e771": {
+      "wallet_id": "a3f1c5c2-7b98-4d2a-9f55-12ab44c9e771",
+      "user_id": "550e8400-e29b-41d4-a716-446655440000",
+      "balance": "1543.75000000",
+      "last_update": "2025-11-29T19:12:45Z"
+    },
+    "b4g2d6d3-8c99-5e3b-0g66-23bc55d0f882": {
+      "wallet_id": "b4g2d6d3-8c99-5e3b-0g66-23bc55d0f882",
+      "user_id": "660e8400-e29b-41d4-a716-446655440111",
+      "balance": "5200.50000000",
+      "last_update": "2025-11-29T18:30:20Z"
+    },
+    "c5h3e7e4-9d00-6f4c-1h77-34cd66e1g993": {
+      "wallet_id": "c5h3e7e4-9d00-6f4c-1h77-34cd66e1g993",
+      "user_id": "770e8400-e29b-41d4-a716-446655440222",
+      "balance": "8750.25000000",
+      "last_update": "2025-11-29T17:05:15Z"
+    }
+  },
+  "images": {
+    "b112cc33-dd44-ee55-ff66-aa77bb88cc99": {
+      "image_id": "b112cc33-dd44-ee55-ff66-aa77bb88cc99",
+      "owner_id": "660e8400-e29b-41d4-a716-446655440111",
+      "original_owner_id": "660e8400-e29b-41d4-a716-446655440111",
+      "title": "Sunset",
+      "description": "A beautiful sunset over the mountains",
+      "file_path": "/images/full/b112cc33-dd44-ee55-ff66-aa77bb88cc99.png",
+      "thumbnail_path": "/images/thumbs/b112cc33-dd44-ee55-ff66-aa77bb88cc99.png",
+      "image_hash": "sha256_1234abcdef5678901234567890abcdef",
+      "file_size": 1024000,
+      "mime_type": "image/png",
+      "width": 1920,
+      "height": 1080,
+      "upload_date": "2025-11-10T12:00:00Z",
+      "price": "10.00000000",
+      "currency": "TOKEN",
+      "status": "active"
+    },
+    "c223dd44-ee55-ff66-aa77-bb88cc99dd00": {
+      "image_id": "c223dd44-ee55-ff66-aa77-bb88cc99dd00",
+      "owner_id": "770e8400-e29b-41d4-a716-446655440222",
+      "original_owner_id": "660e8400-e29b-41d4-a716-446655440111",
+      "title": "Mountain Peak",
+      "description": "Snow-covered mountain peak at dawn",
+      "file_path": "/images/full/c223dd44-ee55-ff66-aa77-bb88cc99dd00.png",
+      "thumbnail_path": "/images/thumbs/c223dd44-ee55-ff66-aa77-bb88cc99dd00.png",
+      "image_hash": "sha256_2345bcdefg6789012345678901bcdefg",
+      "file_size": 2048000,
+      "mime_type": "image/jpeg",
+      "width": 2560,
+      "height": 1440,
+      "upload_date": "2025-11-12T14:30:00Z",
+      "price": "25.50000000",
+      "currency": "TOKEN",
+      "status": "active"
+    },
+    "d334ee55-ff66-aa77-bb88-cc99dd00ee11": {
+      "image_id": "d334ee55-ff66-aa77-bb88-cc99dd00ee11",
+      "owner_id": "550e8400-e29b-41d4-a716-446655440000",
+      "original_owner_id": "550e8400-e29b-41d4-a716-446655440000",
+      "title": "Ocean Waves",
+      "description": "Peaceful ocean waves on a sunny day",
+      "file_path": "/images/full/d334ee55-ff66-aa77-bb88-cc99dd00ee11.png",
+      "thumbnail_path": "/images/thumbs/d334ee55-ff66-aa77-bb88-cc99dd00ee11.png",
+      "image_hash": "sha256_3456cdefgh7890123456789012cdefgh",
+      "file_size": 1536000,
+      "mime_type": "image/png",
+      "width": 1600,
+      "height": 900,
+      "upload_date": "2025-11-15T10:20:00Z",
+      "price": "15.75000000",
+      "currency": "TOKEN",
+      "status": "active"
+    }
+  },
+  "transactions": {
+    "91c2a1e4-59f0-4d8d-9b22-cc912ab4ff11": {
+      "tx_id": "91c2a1e4-59f0-4d8d-9b22-cc912ab4ff11",
+      "buyer_id": "770e8400-e29b-41d4-a716-446655440222",
+      "seller_id": "660e8400-e29b-41d4-a716-446655440111",
+      "image_id": "b112cc33-dd44-ee55-ff66-aa77bb88cc99",
+      "amount": "10.00000000",
+      "currency": "TOKEN",
+      "tx_hash": "4f3c129ab9d8e2a44a92bb11d1fce8c4a2b51d998cc49911e0a7f3be1f6a22d1",
+      "status": "confirmed",
+      "timestamp": "2025-11-29T19:25:12Z",
+      "confirmed_date": "2025-11-29T19:26:01Z"
+    },
+    "a2d3b2f5-60g1-5e9e-0c33-dd023bc5gg22": {
+      "tx_id": "a2d3b2f5-60g1-5e9e-0c33-dd023bc5gg22",
+      "buyer_id": "550e8400-e29b-41d4-a716-446655440000",
+      "seller_id": "770e8400-e29b-41d4-a716-446655440222",
+      "image_id": "c223dd44-ee55-ff66-aa77-bb88cc99dd00",
+      "amount": "25.50000000",
+      "currency": "TOKEN",
+      "tx_hash": "5g4d230bca0e9f3b55c03cc22e2gdf5d9a62ce609a99502f1b8h4cf2g7b33e2",
+      "status": "confirmed",
+      "timestamp": "2025-11-29T18:45:30Z",
+      "confirmed_date": "2025-11-29T18:47:15Z"
+    },
+    "b3e4c3g6-71h2-6f0f-1d44-ee134cd6hh33": {
+      "tx_id": "b3e4c3g6-71h2-6f0f-1d44-ee134cd6hh33",
+      "buyer_id": "660e8400-e29b-41d4-a716-446655440111",
+      "seller_id": "550e8400-e29b-41d4-a716-446655440000",
+      "image_id": "d334ee55-ff66-aa77-bb88-cc99dd00ee11",
+      "amount": "15.75000000",
+      "currency": "TOKEN",
+      "tx_hash": "6h5e341cdb1fa0g4c66d04dd33f3he6e0b73df71b0a06613g2c5dg3h8c44f3",
+      "status": "pending",
+      "timestamp": "2025-11-29T17:30:45Z",
+      "confirmed_date": null
+    }
+  },
+  "blocks": {
+    "e445ff66-7788-99aa-bbcc-ddeeff001122": {
+      "block_id": "e445ff66-7788-99aa-bbcc-ddeeff001122",
+      "block_number": 1,
+      "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "block_hash": "1234abcdef567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      "timestamp": "2025-11-10T14:25:00Z",
+      "nonce": 1024,
+      "transactions_root": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0",
+      "miner_id": "550e8400-e29b-41d4-a716-446655440000",
+      "difficulty": 5
+    },
+    "f556gg77-8899-00bb-ccdd-eeff112233aa": {
+      "block_id": "f556gg77-8899-00bb-ccdd-eeff112233aa",
+      "block_number": 2,
+      "previous_hash": "1234abcdef567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      "block_hash": "2345bcdefg678901bcdefg2345678901bcdefg2345678901bcdefg2345678901",
+      "timestamp": "2025-11-15T10:45:30Z",
+      "nonce": 2048,
+      "transactions_root": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+      "miner_id": "660e8400-e29b-41d4-a716-446655440111",
+      "difficulty": 5
+    },
+    "g667hh88-9900-11cc-ddee-ff223344bbcc": {
+      "block_id": "g667hh88-9900-11cc-ddee-ff223344bbcc",
+      "block_number": 3,
+      "previous_hash": "2345bcdefg678901bcdefg2345678901bcdefg2345678901bcdefg2345678901",
+      "block_hash": "3456cdefgh789012cdefgh3456789012cdefgh3456789012cdefgh3456789012",
+      "timestamp": "2025-11-20T16:15:45Z",
+      "nonce": 3072,
+      "transactions_root": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+      "miner_id": "770e8400-e29b-41d4-a716-446655440222",
+      "difficulty": 6
+    }
+  }
+}

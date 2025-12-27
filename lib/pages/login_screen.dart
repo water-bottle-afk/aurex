@@ -7,7 +7,6 @@ import '../main.dart';
 import '../providers/user_provider.dart';
 import '../providers/client_provider.dart';
 import '../services/user_service.dart';
-import '../models/user_model.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -68,7 +67,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
         if (existingUser == null) {
           // New user - create an entry in the database
-          final newUser = await userService.createUserWithGoogle(
+          await userService.createUserWithGoogle(
             email: googleUser.email,
             username: googleUser.displayName ?? 'User',
             googleId: googleUser.id,

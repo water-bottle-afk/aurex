@@ -1,299 +1,245 @@
-from classes import UDPClient
-
+from classes import PROTO, CustomLogger
 import threading
-from classes import PROTO, Func, CustomLogger
-import time
 
 
-
-class Client():
+class Client:
+    """
+    Blockchain Protocol Client - handles TLS communication with server.
+    All UI is handled by the Flutter/Dart application.
+    """
 
     def __init__(self, ip, port, logging_level):
-
-        self.game = None
         self.logger = CustomLogger("Client", logging_level)
         self.Print = self.logger.Print
         self.logging_level = logging_level
         self.PROTO = PROTO("Client", logging_level=logging_level)
-        self.PROTO.connect(ip, port)
+        
+        # Connect to server with TLS
+        try:
+            self.PROTO.connect(ip, port, use_tls=True)
+            self._send_start_message()
+        except Exception as e:
+            self.Print(f"Failed to connect to server: {e}", 40)
+            raise
 
-        # Functions dictionary
-        self.function_dict = {
-            "Login": self.login_clicked,
-            "Sign up": self.signup_clicked,
-            "Get verification code": self.get_verification_code,
-            "Verify code": self.verify_code,
-            "Update password": self.update_user_password
+        # Message handlers for protocol responses
+        self.message_handlers = {
+            "LOGED": self._handle_login_response,
+            "SIGND": self._handle_signup_response,
+            "SENTM": self._handle_verification_code_sent,
+            "VRFYD": self._handle_code_verified,
+            "UPDTD": self._handle_password_updated,
+            "EXTLG": self._handle_logout,
         }
 
-        self.dict_of_operations = {"LOGED": self.process_login, "SIGND": self.proccess_signup,
-                                   "SENTM": self.process_get_verification_code, 'VRFYD': self.process_verify_code,
-                                   'UPDTD': self.process_update_user_password, 'ANSPB': self.show_problem_info,
-                                   "FUNCT": self.process_func, "LISTD": self.process_start_lobby,
-                                   "CACLD": self.process_cancel,
-                                   'EXTLG': self.process_logout}
+        self.is_encrypted = True  # TLS is always encrypted
+        self.is_connected = True
 
-        # Add these new instance variables for GIF animation control
-        self.animating = False
-        self.gif_frames = []
-        self.gif_frame_index = 0
-        self.animation_job = None  # Store the after() job ID
+        # Start receive loop in background thread
+        threading.Thread(target=self._recv_loop, daemon=True).start()
 
-        self.is_encrypted = False
-
-        self.set_window()
-        self.window.mainloop()
-        self.ready_for_game = False
-
-        self.username_for_game = ""
-
-    def recv_loop(self):
+    def _send_start_message(self):
         """
-        starting only after the encryption phase
+        Send initial START message to establish connection.
+        Protocol message 1: START (client → server)
         """
-        while True:
+        msg = b"START|Client_Connect"
+        self.PROTO.send_one_message(msg)
+        
+        # Wait for ACCPT (Accept connection) response
+        response = self.PROTO.recv_one_message()
+        if response is None:
+            raise Exception("No response from server")
+        
+        try:
+            query = response[:5].decode().strip()
+            if query == "ACCPT":
+                self.Print("Connection accepted by server", 20)
+            else:
+                raise Exception(f"Unexpected response: {query}")
+        except Exception as e:
+            self.Print(f"Error in connection handshake: {e}", 40)
+            raise
+
+    def _recv_loop(self):
+        """
+        Continuously receive and process messages from server.
+        Processes protocol messages and calls appropriate handlers.
+        """
+        while self.is_connected:
             try:
                 bin_content = self.PROTO.recv_one_message()
-                query, data = bin_content.decode().split('|', maxsplit=1)
+                if bin_content is None:
+                    self.Print("Connection closed by server", 20)
+                    self.is_connected = False
+                    break
+                
+                # Parse message: first 5 bytes are query code, then '|', then data
+                try:
+                    query = bin_content[:5].decode().strip()
+                    data = bin_content[6:].decode() if len(bin_content) > 6 else ""
+                except Exception as decode_error:
+                    self.Print(f"Error decoding message: {decode_error}", 40)
+                    continue
+                
+                # Handle error messages
                 if "ERR" in query:
-                    threading.Thread(
-                        target=self.show_problem_info, args=(query, data), daemon=True).start()  # close after ending
-                elif query in self.dict_of_operations:
-                    threading.Thread(target=self.dict_of_operations[query], args=(data,), daemon=True).start()
+                    self.Print(f"Server error {query}: {data}", 40)
+                # Handle registered message handlers
+                elif query in self.message_handlers:
+                    handler = self.message_handlers[query]
+                    threading.Thread(target=handler, args=(data,), daemon=True).start()
                 else:
                     self.Print(f"Unrecognized query: {query}", 40)
+                    
             except Exception as e:
                 self.Print(f"Error in recv_loop: {e}", 50)
+                break
 
-    
+    # ====== PROTOCOL METHODS ======
 
-    def login_clicked(self, val_after1=None):
-        """ login process """
-        msg = f"CONCT|{self.username.get()}|{self.password.get()}"
-        if len(msg) <= 60000:  # the size field is two bytes
-            self.PROTO.send_one_message(msg.encode())
-        else:
-            showinfo(title="Information", message="At least ONE fields is too long!!")
-
-    def process_login(self, data):
-        showinfo(title="Information", message=data)
-        self.username_for_game = self.username.get()
-        self.clear()
-        self.window.after(0, self.until_game_tab)
-
-    def signup_clicked(self):
-        msg = f"SGNUP|{self.username.get()}|{self.password.get()}|{self.validate_password.get()}|{self.email.get()}"
-        if len(msg) <= 60000:  # the size field is two bytes
-            self.PROTO.send_one_message(msg.encode())
-        else:
-            showinfo(title="Information", message="At least ONE field is too long!!")
-
-    def proccess_signup(self, data):
-        showinfo(title="Information", message=data)
-        self.clear()
-
-    def get_verification_code(self):
-        """ email vericifcation code process"""
-        email_receiver = self.email.get()
-        msg = f"SCODE|{email_receiver}"
-        if len(msg) <= 60000:  # the size field is two bytes
-            self.PROTO.send_one_message(msg.encode())
-        else:
-            showinfo(title="Information", message="At least ONE fields is too long!!")
-
-    def process_get_verification_code(self, data):
-        showinfo(title="Information", message=data)
-        self.email_entry.configure(state="disabled")
-        self.send_code_button.configure(state="disabled")
-        # Show verification code widgets
-        self.verification_code_label.grid()
-        self.verification_code_entry.grid()
-        self.verify_code_button.grid()
-
-    def verify_code(self):
-        code = self.email_entered_code.get()
-        email_receiver = self.email.get()
-        msg = f"VRFYC|{email_receiver}|{code}"
-        if len(msg) <= 60000:  # the size field is two bytes
-            self.PROTO.send_one_message(msg.encode())
-        else:
-            showinfo(title="Information", message="At least ONE fields is too long!!")
-
-    def process_verify_code(self, data):
-        showinfo(title="Information", message=data)
-        self.verification_code_label.grid_remove()
-        self.verification_code_entry.grid_remove()
-        self.verify_code_button.grid_remove()
-
-        # Show update password widgets
-        self.new_password_label.grid()
-        self.new_password_entry.grid()
-        self.confirm_password_label.grid()
-        self.confirm_password_entry.grid()
-        self.change_password_button.grid()
-
-    def update_user_password(self):
-        new_pass = self.new_password.get()
-        confirm_pass = self.confirm_new_password.get()
-        email_receiver = self.email.get()
-        msg = f"UPDTE|{email_receiver}|{new_pass}|{confirm_pass}"
-        if len(msg) <= 60000:  # the size field is two bytes
-            self.PROTO.send_one_message(msg.encode())
-        else:
-            showinfo(title="Information", message="At least ONE fields is too long!!")
-
-    def process_update_user_password(self, data):
-        showinfo(title="Information", message=data)
-
-        # Hide password update widgets
-        self.new_password_label.grid_remove()
-        self.new_password_entry.grid_remove()
-        self.confirm_password_label.grid_remove()
-        self.confirm_password_entry.grid_remove()
-        self.change_password_button.grid_remove()
-
-        self.notebook.set("Login")
-
-    def clear_forgot_password(self):
-        """ Resets all fields and hides verification/update widgets """
-        self.email.set("")
-        self.email_entered_code.set("")
-        self.new_password.set("")
-        self.confirm_new_password.set("")
-
-        self.verification_code_label.grid_remove()
-        self.verification_code_entry.grid_remove()
-        self.verify_code_button.grid_remove()
-
-        self.new_password_label.grid_remove()
-        self.new_password_entry.grid_remove()
-        self.confirm_password_label.grid_remove()
-        self.confirm_password_entry.grid_remove()
-        self.change_password_button.grid_remove()
-
-        self.email_entry.configure(state="normal")
-        self.send_code_button.configure(state="normal")
-
-    def clear(self):
-        self.username.set("")
-        self.password.set("")
-        self.email.set("")
-        self.validate_password.set("")
-
-        self.clear_forgot_password()  # reuse reset logic
-
-    def create_thread(self, func_name):
-        """ for each function the client side is making a thread """
-        func = self.function_dict[func_name]
-        t = threading.Thread(target=func, args=())
-        t.start()
-
-    def set_window(self):
-        """ set the general client interface"""
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-        self.window = ctk.CTk()
-        self.window.geometry("600x500")
-        self.window.title("Shesh-Besh System")
-
-        self.set_encryption_selection_page()
-
-    def set_encryption_selection_page(self):
-        """ page for choosing encryption method """
-        self.encryption_selection_frame = ctk.CTkFrame(self.window)
-        self.encryption_selection_frame.pack(expand=True)
-
-        # Title label
-        title = ctk.CTkLabel(self.encryption_selection_frame, text="Select Encryption Method", font=("Arial", 18))
-        title.pack(pady=20)
-
-        # Variable for the encryption method
-        self.encryption_method = ctk.StringVar(value="DH")  # Default is Diffie-Hellman
-
-        # Diffie-Hellman radio button
-        dh_radio = ctk.CTkRadioButton(
-            self.encryption_selection_frame, text="Diffie-Hellman", variable=self.encryption_method, value="DH")
-        dh_radio.pack(pady=10)
-
-        # RSA radio button
-        rsa_radio = ctk.CTkRadioButton(
-            self.encryption_selection_frame, text="RSA", variable=self.encryption_method, value="RSA")
-        rsa_radio.pack(pady=10)
-
-        # Continue button; upon click, proceed to the login page
-        continue_button = ctk.CTkButton(
-            self.encryption_selection_frame,
-            text="Continue",
-            command=self.encryption_selected
-        )
-        continue_button.pack(pady=20)
-
-    def encryption_selected(self):
-        """ setting the encryption between client and server"""
-        prot_to_use = self.encryption_method.get()
-        self.PROTO.send_first_proto_message(prot_to_use)
-        ans = self.PROTO.recv_one_message(encryption=False)
+    def login(self, username, password):
+        """
+        Login process - sends LOGIN message to server.
+        Protocol message 6: LOGIN (client → server)
+        """
         try:
-            query, value = ans.split(b"|")
-            if query == "ERR02":
-                showinfo(title="Information", message="Server Doesn't support this method.")
+            msg = f"LOGIN|{username}|{password}"
+            
+            if len(msg) <= 60000:  # the size field is two bytes (max 65535)
+                self.PROTO.send_one_message(msg.encode())
+                self.Print(f"Sent: {msg}", 20)
             else:
-                threading.Thread(target=self.start_encryption, args=(prot_to_use,), daemon=True).start()
-
-                while not self.is_encrypted:
-                    self.window.update()  # Process ALL events including Windows messages
-                    time.sleep(0.1)  # Shorter sleep for better responsiveness
-
-                if self.is_encrypted:
-                    self.encryption_selection_frame.destroy()
-                    self.set_environment()
-                    threading.Thread(target=self.recv_loop, daemon=True).start()
+                self.Print("Login data is too long!", 40)
         except Exception as e:
-            self.Print(f"ERROR with encryption stage!: {e}", 50)
+            self.Print(f"Error in login: {e}", 40)
 
-    def start_encryption(self, prot_to_use):
-        if prot_to_use == "DH":
-            self.contact_with_DH()
-        else:
-            self.contant_with_RSA()
+    def _handle_login_response(self, data):
+        """Handle login response from server"""
+        self.Print(f"Login response: {data}", 20)
 
-    def contact_with_DH(self):
-        """DH encryption method"""
-        self.PROTO.create_DH_keys()
-        msg = b"CRTDH|" + self.PROTO.get_dh_parameters()
-        self.PROTO.send_one_message(msg, False)
-        ans = self.PROTO.recv_one_message(encryption=False)
-        query, value = ans.split(b"|")
+    def signup(self, username, password, confirm_password, email):
+        """
+        Sign up process - sends SGNUP message to server.
+        Protocol message 5: SGNUP (client → server)
+        """
+        try:
+            msg = f"SGNUP|{username}|{password}|{confirm_password}|{email}"
+            
+            if len(msg) <= 60000:
+                self.PROTO.send_one_message(msg.encode())
+                self.Print(f"Sent: {msg}", 20)
+            else:
+                self.Print("Signup data is too long!", 40)
+        except Exception as e:
+            self.Print(f"Error in signup: {e}", 40)
 
-        if value.decode() == "yes":
-            msg = b"GTKEY|" + self.PROTO.get_public_key_dh()
-            self.PROTO.send_one_message(msg, False)
-            ans = self.PROTO.recv_one_message(encryption=False)
-            query, srv_public_key = ans.split(b"|")
-            self.PROTO.create_shared_key_dh(srv_public_key)
-            self.is_encrypted = True
+    def _handle_signup_response(self, data):
+        """Handle signup response from server"""
+        self.Print(f"Signup response: {data}", 20)
 
-    def contant_with_RSA(self):
-        """RSA encryption method"""
-        msg = b"CRTKY"
-        self.PROTO.send_one_message(msg, False)
-        ans = self.PROTO.recv_one_message(encryption=False)
-        query, value = ans.split(b"|")  # query = GETKY
-        if query == b"GETKY":
-            self.PROTO.set_RSA_public_key(value)
-            msg = b"GETKY|" + self.PROTO.encrypt_AES_key_by_RSA_public_key()
-            self.PROTO.send_one_message(msg, False)
-            bin_data = self.PROTO.recv_one_message()
-            self.is_encrypted = True
+    def send_verification_code(self, email):
+        """
+        Email verification code request - sends SCODE message to server.
+        Protocol message 9: SCODE (client → server)
+        """
+        try:
+            msg = f"SCODE|{email}"
+            
+            if len(msg) <= 60000:
+                self.PROTO.send_one_message(msg.encode())
+                self.Print(f"Sent: {msg}", 20)
+            else:
+                self.Print("Email is too long!", 40)
+        except Exception as e:
+            self.Print(f"Error in send_verification_code: {e}", 40)
 
+    def _handle_verification_code_sent(self, data):
+        """Handle verification code sent response"""
+        self.Print(f"Verification code sent: {data}", 20)
+
+    def verify_code(self, email, code):
+        """
+        Verify code process - sends VRFYC message to server.
+        Protocol message 10: VRFYC (client → server)
+        """
+        try:
+            msg = f"VRFYC|{email}|{code}"
+            
+            if len(msg) <= 60000:
+                self.PROTO.send_one_message(msg.encode())
+                self.Print(f"Sent: {msg}", 20)
+            else:
+                self.Print("Verification data is too long!", 40)
+        except Exception as e:
+            self.Print(f"Error in verify_code: {e}", 40)
+
+    def _handle_code_verified(self, data):
+        """Handle code verification response"""
+        self.Print(f"Code verified: {data}", 20)
+
+    def update_password(self, email, new_password, confirm_password):
+        """
+        Update password process - sends UPDTE message to server.
+        Protocol message 11: UPDTE (client → server)
+        """
+        try:
+            msg = f"UPDTE|{email}|{new_password}|{confirm_password}"
+            
+            if len(msg) <= 60000:
+                self.PROTO.send_one_message(msg.encode())
+                self.Print(f"Sent: {msg}", 20)
+            else:
+                self.Print("Password update data is too long!", 40)
+        except Exception as e:
+            self.Print(f"Error in update_password: {e}", 40)
+
+    def _handle_password_updated(self, data):
+        """Handle password update response"""
+        self.Print(f"Password updated: {data}", 20)
+
+    def logout(self):
+        """
+        Logout process - sends LGOUT message to server.
+        Protocol message 7: LGOUT (client → server)
+        """
+        try:
+            msg = "LGOUT|"
+            self.PROTO.send_one_message(msg.encode())
+            self.Print(f"Sent: {msg}", 20)
+        except Exception as e:
+            self.Print(f"Error in logout: {e}", 40)
+
+    def _handle_logout(self, data):
+        """Handle logout response"""
+        self.Print(f"Logout response: {data}", 20)
+
+    def close(self):
+        """Close connection to server"""
+        try:
+            self.is_connected = False
+            self.PROTO.close()
+            self.Print("Connection closed", 20)
+        except Exception as e:
+            self.Print(f"Error closing connection: {e}", 40)
+
+
+# Example usage
+if __name__ == "__main__":
+    import time
     
-
-logging_level = 10
-UDP_PORT = 57071
-
-udp_cln = UDPClient(UDP_PORT, logging_level)
-tcp_ip, tcp_port = udp_cln.run()
-
-# run actual client
-cln = Client(tcp_ip, tcp_port, logging_level)
+    logging_level = 10
+    
+    try:
+        # Connect to server
+        client = Client("172.16.64.109", 23456, logging_level)
+        
+        # Keep client running to receive messages
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        client.close()
+    except Exception as e:
+        print(f"Error: {e}")
 
