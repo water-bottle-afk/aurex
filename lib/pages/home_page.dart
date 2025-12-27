@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
@@ -19,6 +20,7 @@ class _HomePageState extends State<HomePage> {
   int _currentPageIndex = 0;
   final UserService _userService = UserService();
   final GoogleSignIn _googleSignIn = GoogleSignIn();
+  String? _firebaseUsername;
 
   late List<Widget> _pages;
 
@@ -30,6 +32,20 @@ class _HomePageState extends State<HomePage> {
       const ProfilePage(),
       const AboutPage(),
     ];
+    _loadUsername();
+  }
+
+  /// Load username from Firebase based on current user's email
+  Future<void> _loadUsername() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user?.email != null) {
+      final username = await _userService.getUsernameFromFirebase(user!.email!);
+      if (mounted) {
+        setState(() {
+          _firebaseUsername = username;
+        });
+      }
+    }
   }
 
   Future<void> _logout() async {
@@ -174,7 +190,7 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    user?.displayName ?? 'Guest',
+                    _firebaseUsername ?? user?.displayName ?? 'Guest',
                     style: const TextStyle(
                       color: Colors.black,
                       fontSize: 18,

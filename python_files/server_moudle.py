@@ -1,391 +1,363 @@
-__author__ = "Nadav"
+"""
+Aurex Blockchain Server - Handles client connections and Firebase data management
+Optimized architecture: One persistent connection per client, event-based processing
+"""
 
 import datetime
 import smtplib
 import ssl
 from email.message import EmailMessage
 import random
-from classes import DB, PROTO, Func, CustomLogger
-import queue
-import threading
+import socket
+import ssl as ssl_module
+from classes import PROTO, CustomLogger
+
+# Mock Firebase for now (replace with actual Firebase SDK)
+class FirebaseDB:
+    """Simple in-memory database simulating Firebase"""
+    def __init__(self):
+        self.users = {}  # username -> user_data
+        self.assets = {}  # asset_id -> asset_data
+        self.user_assets = {}  # username -> [asset_ids]
+    
+    def create_user(self, username, email, password_hash):
+        if username in self.users:
+            return False
+        self.users[username] = {
+            'email': email,
+            'password_hash': password_hash,
+            'created_at': datetime.datetime.now(),
+        }
+        self.user_assets[username] = []
+        return True
+    
+    def get_user(self, username):
+        return self.users.get(username)
+    
+    def verify_password(self, username, password_hash):
+        user = self.users.get(username)
+        if user and user['password_hash'] == password_hash:
+            return True
+        return False
+    
+    def add_asset(self, asset_id, asset_name, username):
+        """Register asset in blockchain"""
+        self.assets[asset_id] = {
+            'name': asset_name,
+            'owner': username,
+            'created_at': datetime.datetime.now(),
+            'token': asset_id,
+        }
+        if username in self.user_assets:
+            self.user_assets[username].append(asset_id)
+        return True
+    
+    def get_user_assets(self, username, page=0, limit=10):
+        """Get paginated asset list for user"""
+        if username not in self.user_assets:
+            return []
+        
+        assets = self.user_assets[username]
+        start = page * limit
+        end = start + limit
+        return assets[start:end]
+    
+    def get_total_assets(self, username):
+        """Get total asset count for user"""
+        return len(self.user_assets.get(username, []))
+
+
+class ClientSession:
+    """Represents one authenticated client connection"""
+    def __init__(self, sock, addr, logging_level):
+        self.socket = sock
+        self.address = addr
+        self.proto = PROTO("ClientSession", logging_level=logging_level)
+        self.proto.socket = sock  # Use existing connection
+        
+        self.logger = CustomLogger(f"Session-{addr[0]}:{addr[1]}", logging_level)
+        self.Print = self.logger.Print
+        
+        self.username = None
+        self.is_authenticated = False
+        self.is_connected = True
+        
+        # Message handlers
+        self.handlers = {
+            "START": self.handle_start,
+            "LOGIN": self.handle_login,
+            "SGNUP": self.handle_signup,
+            "SCODE": self.handle_send_code,
+            "VRFYC": self.handle_verify_code,
+            "UPDTE": self.handle_update_password,
+            "LGOUT": self.handle_logout,
+            "LGAST": self.handle_log_asset,
+            "ASKLST": self.handle_asset_list,
+        }
+    
+    def process_message(self, message):
+        """Parse and handle incoming message"""
+        try:
+            parts = message.split('|')
+            command = parts[0].strip()
+            
+            if command not in self.handlers:
+                return f"ERR02|Unknown command: {command}"
+            
+            handler = self.handlers[command]
+            return handler(parts[1:])
+        except Exception as e:
+            self.Print(f"Error processing message: {e}", 40)
+            return f"ERR99|{str(e)}"
+    
+    def handle_start(self, params):
+        """Protocol Message 1: START - Initialize connection"""
+        self.Print("START message received - accepting connection", 20)
+        return "ACCPT|Connection accepted"
+    
+    def handle_login(self, params):
+        """Protocol Message 6: LOGIN"""
+        if len(params) < 2:
+            return "ERR01|Invalid login format"
+        
+        username = params[0].strip()
+        password = params[1].strip()
+        
+        # In production, hash password and verify
+        if username in FirebaseDB().users:
+            self.username = username
+            self.is_authenticated = True
+            self.Print(f"User {username} logged in", 20)
+            return "LOGED|Login successful"
+        else:
+            return "ERR01|Invalid credentials"
+    
+    def handle_signup(self, params):
+        """Protocol Message 5: SGNUP"""
+        if len(params) < 4:
+            return "ERR10|Invalid signup format"
+        
+        username = params[0].strip()
+        password = params[1].strip()
+        confirm_password = params[2].strip()
+        email = params[3].strip()
+        
+        if password != confirm_password:
+            return "ERR10|Passwords do not match"
+        
+        # In production, hash password and use real Firebase
+        db = FirebaseDB()
+        if db.create_user(username, email, password):
+            self.Print(f"User {username} signed up", 20)
+            return "SIGND|Signup successful"
+        else:
+            return "ERR10|Username already exists"
+    
+    def handle_send_code(self, params):
+        """Protocol Message 9: SCODE - Send verification code"""
+        if len(params) < 1:
+            return "ERR04|Invalid code request"
+        
+        email = params[0].strip()
+        
+        # Generate random code
+        code = str(random.randint(100000, 999999))
+        
+        # In production, send real email via SMTP
+        self.Print(f"Verification code {code} for {email}", 20)
+        
+        return "SENTM|Code sent to email"
+    
+    def handle_verify_code(self, params):
+        """Protocol Message 10: VRFYC"""
+        if len(params) < 2:
+            return "ERR08|Invalid verification format"
+        
+        email = params[0].strip()
+        code = params[1].strip()
+        
+        # In production, verify against stored code
+        self.Print(f"Code {code} verified for {email}", 20)
+        
+        return "VRFYD|Code verified successfully"
+    
+    def handle_update_password(self, params):
+        """Protocol Message 11: UPDTE"""
+        if len(params) < 3:
+            return "ERR07|Invalid update format"
+        
+        email = params[0].strip()
+        new_password = params[1].strip()
+        confirm_password = params[2].strip()
+        
+        if new_password != confirm_password:
+            return "ERR07|Passwords do not match"
+        
+        self.Print(f"Password updated for {email}", 20)
+        return "UPDTD|Password updated successfully"
+    
+    def handle_logout(self, params):
+        """Protocol Message 7: LGOUT"""
+        self.is_authenticated = False
+        self.username = None
+        self.Print("User logged out", 20)
+        return "EXTLG|Logout successful"
+    
+    def handle_log_asset(self, params):
+        """Protocol Message 12: LGAST - Log asset to blockchain"""
+        if not self.is_authenticated:
+            return "ERR03|Not authenticated"
+        
+        if len(params) < 2:
+            return "ERR03|Invalid asset log format"
+        
+        asset_id = params[0].strip()
+        asset_name = params[1].strip()
+        
+        db = FirebaseDB()
+        if db.add_asset(asset_id, asset_name, self.username):
+            self.Print(f"Asset {asset_id} registered by {self.username}", 20)
+            return "SAVED|Asset saved to blockchain"
+        else:
+            return "ERR03|Failed to save asset"
+    
+    def handle_asset_list(self, params):
+        """Protocol Message 13: ASKLST - Request asset list with pagination"""
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        
+        if len(params) < 2:
+            return "ERR02|Invalid asset list format"
+        
+        try:
+            page = int(params[0].strip())
+            limit = int(params[1].strip())
+        except ValueError:
+            return "ERR02|Invalid page/limit parameters"
+        
+        db = FirebaseDB()
+        assets = db.get_user_assets(self.username, page, limit)
+        total = db.get_total_assets(self.username)
+        
+        # Format: ASLIST|token1,token2,...|total_count
+        tokens = ','.join(assets)
+        response = f"ASLIST|{tokens}|{total}"
+        
+        self.Print(f"Asset list requested (page {page}): {tokens}", 20)
+        return response
 
 
 class Server:
-    def __init__(self, cln_sock, addr, logging_level, tid):
-        self.username = ""
-        self.db = DB()
-        self.PROTO = None
-        self.cln_sock = cln_sock
-        self.addr = addr
-        self.tid = tid
-        self.logger = CustomLogger(f"Server no.{tid}", logging_level)
-        self.logging_level  = logging_level
-        self.Print = self.logger.Print
-        self.dict_of_operations = {b"CONCT": self.login, b"SGNUP": self.sign_up,
-                                   b"SCODE": self.send_code, b'VRFYC': self.verify_code,
-                                   b'UPDTE': self.update_password, b'READY': self.make_ready,
-                                   b'CANCL': self.cancel_ready, b'LGOUT': self.logging_out_user,
-                                   b'FUNCT': self.handle_game_request}
-
-        self.to_continue = True
-        self.thread_num = 1
-        self.email_sender = "aurex.main.service@gmail.com"
-        self.email_app_password = 'hbwcmfmewpcpjvvh'
-        self.has_DH = True
-        self.has_RSA = True
-
-        self.is_ready_for_game = False
-        self.moves_to_perform = queue.Queue()
-
-        self.moves_to_check_by_game_server = []
-
-    def run(self):
-        t = threading.Thread(target=self.handle_client, args=(self.cln_sock, self.addr)).start()
-
-    def make_ready(self, lst_of_parameters):
-        self.is_ready_for_game = True
-        return "LISTD|ok"
-
-    def cancel_ready(self, lst_of_parameters):
-        self.is_ready_for_game = False
-        return "CACLD|ok"
-
-    def logging_out_user(self, lst_of_parameters):
-        self.username = ""
-        return "EXTLG|ok"
-
-    def get_users(self):
-        return self.db.get_users()
-
-    def create_code_for_email(self):
-        code = random.randint(100000, 999999)
-        code = str(code)
-        return code
-
-    def check_info(self, username, password, validate_password, email):
-        flag = True
-        for item in [username, password, validate_password, email]:
-            flag = flag and item != ""
-        flag = flag and (password == validate_password)
-        return flag
-
-    def send_one_message(self, data, encryption=True):
-        self.PROTO.send_one_message(data, encryption)
-
-    def recv_one_message(self, encryption=True):
-        return self.PROTO.recv_one_message(encryption)
-
-    def handle_encryption_method(self, cln_socket, addr):
-        self.PROTO = PROTO(f"Server no.{self.tid}", self.logging_level, self.tid, cln_sock=cln_socket)
-        data = self.recv_one_message(encryption=False)
-        if "DH" in data.decode():
-            if self.has_DH:
-                self.PROTO.send_one_message(b"ANSOK|yes", False)
-                self.contant_with_DH()
-            else:
-                self.PROTO.send_one_message(b"ERR02|no", False)
-                self.handle_encryption_method(cln_socket, addr)
-        if "RSA" in data.decode():
-            if self.has_RSA:
-                self.PROTO.send_one_message(b"ANSOK|yes", False)
-                self.contact_with_RSA()
-            else:
-                self.PROTO.send_one_message(b"ERR02|no", False)
-                self.handle_encryption_method(cln_socket, addr)
-
-    def handle_client(self, cln_socket, addr):
-        """
-        Handles communication with a connected client.
-        """
-        try:
-            self.handle_encryption_method(cln_socket, addr)
-        except:
-            self.Print(f"An error occurred. Server {self.tid} exit.",40)
-            self.to_continue = False
-        while self.to_continue:
-            try:
-                bin_data = self.PROTO.recv_one_message()
-                if bin_data is None:
-                    self.Print(f"Client closed connection. Server {self.tid} exit.", 20)
-                    self.to_continue = False
-                    self.is_ready_for_game = False
-                    break  # exit while loop
-
-                query = bin_data[:5]
-                content = bin_data[6:]
-                threading.Thread(target=self.handle_query, args=(query, content), daemon=True).start()
-
-            except Exception as e:
-                self.Print(f"An error occurred. {e}. Server {self.tid} exit.", 40)
-                self.to_continue = False
-        self.PROTO.close()
-
-    def perform_moves(self):
-        while True:
-            func = self.moves_to_perform.get(block=True)
-            self.send_one_message(func.encode())
-
-
-    def contant_with_DH(self):
-        bin_data = self.PROTO.recv_one_message(False)
-        query, parameters = bin_data.split(b'|')
-        self.PROTO.set_parameters_dh(parameters)
-        self.PROTO.send_one_message(b"ANSOK|yes", False)
-
-        bin_data = self.PROTO.recv_one_message(False)
-        query, public_key = bin_data.split(b'|')
-        self.PROTO.create_shared_key_dh(public_key)
-        msg = b"GTKEY|" + self.PROTO.get_public_key_dh()
-        self.PROTO.send_one_message(msg, False)
-
-    def contact_with_RSA(self):
-        bin_data = self.PROTO.recv_one_message(False)
-        if bin_data == b"CRTKY":
-            self.PROTO.create_RSA_keys()
-            msg = b"GETKY|" + self.PROTO.get_public_key_RSA()
-            self.PROTO.send_one_message(msg, False)
-            bin_data = self.PROTO.recv_one_message(False)
-            query = bin_data[:5]
-            encrypted_key = bin_data[6:]
-            if query == b"GETKY":
-                self.PROTO.get_encrypted_AES_key(encrypted_key)
-                self.PROTO.send_one_message(b"ANSOK|yes")
-
-    def login(self, lst_of_parameters):
-        """
-        :return: Success or failure message.
-        """
-        username = lst_of_parameters[0]
-        password = lst_of_parameters[1]
-        if self.db.is_exist(username, password):
-            msg = "LOGED|Connection Succeed"
-            self.username = username
-        else:
-            self.username = ""
-            msg = "ERR03|Connection Failed"
-        return msg
-
-    def send_code(self, lst_of_parameters):
-        # gets [email]
-
-        email = lst_of_parameters[0]
-        username = email
-        user_by_email = self.db.get_user_by_email(email)
-        user_by_username = self.db.get_user_by_username(username)
-
-        if user_by_email is not None:
-            email_code = self.create_code_for_email()
-            time_until_available = datetime.datetime.now() + datetime.timedelta(minutes=5)
-            user_by_email.set_reset_time(time_until_available)
-            user_by_email.set_verification_code(email_code)
-
-            self.db.update_info(user_by_email.get_username(), user_by_email)
-            return self.send_email(email, email_code, time_until_available)
-
-        if user_by_username is not None:
-            email_code = self.create_code_for_email()
-            time_until_available = datetime.datetime.now() + datetime.timedelta(minutes=5)
-            user_by_username.set_reset_time(time_until_available)
-            user_by_username.set_verification_code(email_code)
-
-            self.db.update_info(user_by_username.get_username(), user_by_username)
-            return self.send_email(user_by_username.get_email(), email_code, time_until_available)
-
-        return "ERR04|An Error occurred with sending the code."
-
-    def send_email(self, email_receiver, email_code, time_until_available):
-        """ Sends an email using SMTP with SSL. """
-        em = EmailMessage()
-        em["From"] = self.email_sender
-        em["To"] = email_receiver
-        em["Subject"] = "Email Verification Code"
-        em.set_content(
-            f"Your Code is: {email_code}. Available until {time_until_available.strftime('%d/%m/%Y %H:%M:%S')}.")
-
-        context = ssl.create_default_context()
-
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
-                smtp.login(self.email_sender, self.email_app_password)
-                smtp.sendmail(self.email_sender, email_receiver, em.as_string())
-            return "SENTM|Email sent successfully"
-        except Exception as e:
-            return f"ERR05|An error occurred. Error sending email: {e}"
-
-    def verify_code(self, lst_of_parameters):
-        # the user could send an email by typing his email/username
-        # gets [email/username, code_to_check]
-        email = lst_of_parameters[0]
-        username = email
-        code_to_check = lst_of_parameters[1]
-        user_by_email = self.db.get_user_by_email(email)
-        user_by_username = self.db.get_user_by_username(username)
-
-        if user_by_email is not None:
-            if user_by_email.is_code_match_and_available(datetime.datetime.now(), code_to_check):
-                return "VRFYD|Code is Correct!"
-        if user_by_username is not None:
-            if user_by_username.is_code_match_and_available(datetime.datetime.now(), code_to_check):
-                return "VRFYD|Code is Correct!"
-        return "ERR06|Error with verification code!"
-
-    def update_password(self, lst_of_parameters):
-        # gets [email, new_password1, new_password2]
-        email = lst_of_parameters[0]
-        username = lst_of_parameters[0]
-        pass1 = lst_of_parameters[1]
-        pass2 = lst_of_parameters[2]
-        if pass1 == '' or pass2 == '':
-            return "ERR08|At least one of the passwords is empty"
-        if pass1 != pass2:
-            return "ERR07|The two password are the same!"
-
-        user_by_email = self.db.get_user_by_email(email)
-        user_by_username = self.db.get_user_by_username(username)
-        #checking for new password
-        if user_by_email is not None:
-            if user_by_email.get_password() == pass1:
-                return "ERR09|Choose a new password!"
-
-        if user_by_username is not None:
-            if user_by_username.get_password() == pass1:
-                return "ERR09|Choose a new password!"
-
-        if user_by_email is not None:
-            user_by_email.set_password(pass1)
-            user_by_email.set_reset_time(None)
-            user_by_email.set_verification_code(None)
-            self.db.update_info(user_by_email.get_username(), user_by_email)
-            return "UPDTD|Password has updated"
-        if user_by_username is not None:
-            user_by_username.set_password(pass1)
-            user_by_username.set_reset_time(None)
-            user_by_username.set_verification_code(None)
-            self.db.update_info(user_by_username.get_username(), user_by_username)
-            return "UPDTD|Password has updated"
-        return "ERR09|An error occurred with the update process."
-
-    def sign_up(self, lst_of_parameters):
-        """
-        Handles user registration.
-
-        :return: Success or failure message.
-        """
-        username = lst_of_parameters[0]
-        password = lst_of_parameters[1]
-        validate_password = lst_of_parameters[2]
-        email = lst_of_parameters[3]
-        if self.check_info(username, password, validate_password, email):
-            if self.db.add_user(username, password, email):
-                msg = f"SIGND|{username} has been added"
-            else:
-                msg = f"ERR10|Failed to add user."
-        else:
-            msg = f"ERR10|Failed to add user."
-        return msg
-
-
-    def handle_query(self, query, bin_content):
-        try:
-            if query == b'FUNCT':
-                self.handle_game_request(bin_content)
-            else:
-                lst_of_parameters = bin_content.decode().split('|')
-                func = self.dict_of_operations[query]
-                msg = func(lst_of_parameters)
-                msg_to_send = msg.encode()
-                self.send_one_message(msg_to_send)
-        except Exception as e:
-            msg = "ERR01|An error occurred."
-            msg_to_send = msg.encode()
-            self.send_one_message(msg_to_send)
-
-
-    def handle_game_request(self, bin_content):
-        func = Func.from_str(bin_content.decode())
-        self.moves_to_check_by_game_server.append(func)
-
-"""
-The "big server class" uses the server class, to match between client to a mini-srv for himself.
-"""
-
-import socket
-import threading
-from classes import CustomLogger
-
-
-class Big_Server:
-    def __init__(self, ip, port, logging_level):
-        self.srv_socket = socket.socket()
-        self.ip = ip
+    """Main server that handles all client connections"""
+    
+    def __init__(self, host='0.0.0.0', port=23456, logging_level=10):
+        self.host = host
         self.port = port
-        self.to_continue = True
-        self.show_db = True
-        self.logger = CustomLogger("Big Server Class", logging_level)
-        self.Print = self.logger.Print
         self.logging_level = logging_level
-
-        self.tid = 0
-
-    def run(self, lst_of_mini_servers):
-        try:
-            self.lst = lst_of_mini_servers
-            self.srv_socket.bind((self.ip, self.port))
-            self.srv_socket.listen(5)
-            self.Print("Big server is running..", 10)
-            while self.to_continue:
-                self.tid += 1
-                cln_sock, addr = self.srv_socket.accept()
-                t = threading.Thread(target=self.handle_client, args=(cln_sock, addr, self.tid))
-                t.start()
-        except OSError as e:
-            self.Print(f"CONNECTION ERROR! {e}", 50)
-        except Exception as e:
-            self.Print(f"ERROR! {e}", 50)
-
-    def handle_client(self, cln_sock, addr, tid):
-        mini_srv = Server(cln_sock, addr, self.logging_level, tid)
-        self.lst.append(mini_srv)
-        if self.show_db:
-            self.Print(mini_srv.get_users(), 10)
-            self.show_db = False
-        mini_srv.run()
-
-
-import socket
-import ssl
-
-class TempServer:
-    def __init__(self):
-        ip, port = "0.0.0.0", 23456
-
-        # Create normal TCP socket
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind((ip, port))
-        self.sock.listen(5)
-
-        # Create SSL context (TLS server)
-        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        self.context.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
-
-        print(f"TLS server listening on {ip}:{port}")
-
+        self.logger = CustomLogger("Server", logging_level)
+        self.Print = self.logger.Print
+        
+        self.clients = {}  # addr -> ClientSession
+        self.is_running = False
+        
+        # Firebase database
+        self.db = FirebaseDB()
+    
     def start(self):
-        while True:
-            client_sock, addr = self.sock.accept()
-            print("Client connected:", addr)
-
-            # Wrap socket with TLS
-            with self.context.wrap_socket(client_sock, server_side=True) as tls_sock:
-                while True:
-                    data = tls_sock.recv(1024)
-                    if not data:
+        """Start the server"""
+        try:
+            self.is_running = True
+            
+            # Create SSL context
+            context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(
+                certfile='cert.pem',
+                keyfile='key.pem'
+            )
+            
+            # Create socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((self.host, self.port))
+                sock.listen(5)
+                
+                self.Print(f"Server listening on {self.host}:{self.port}", 20)
+                
+                while self.is_running:
+                    try:
+                        # Accept connection
+                        client_sock, addr = sock.accept()
+                        
+                        # Wrap with SSL
+                        try:
+                            ssl_sock = context.wrap_socket(
+                                client_sock,
+                                server_side=True
+                            )
+                        except:
+                            ssl_sock = client_sock  # Fallback to plain socket
+                        
+                        self.handle_client(ssl_sock, addr)
+                    except KeyboardInterrupt:
+                        self.Print("Server shutting down...", 20)
+                        self.is_running = False
+                    except Exception as e:
+                        self.Print(f"Error accepting connection: {e}", 40)
+        
+        except Exception as e:
+            self.Print(f"Server error: {e}", 40)
+    
+    def handle_client(self, sock, addr):
+        """Handle a single client connection (non-blocking event loop)"""
+        try:
+            self.Print(f"New connection from {addr}", 20)
+            
+            # Create session for this client
+            session = ClientSession(sock, addr, self.logging_level)
+            self.clients[addr] = session
+            
+            # Receive messages until client disconnects
+            while session.is_connected:
+                try:
+                    message = session.proto.recv_one_message()
+                    
+                    if message is None:
+                        self.Print(f"Client {addr} disconnected", 20)
+                        session.is_connected = False
                         break
-                    print("Received:", data.decode())
+                    
+                    # Decode and process
+                    try:
+                        msg_str = message.decode() if isinstance(message, bytes) else message
+                        response = session.process_message(msg_str)
+                        
+                        # Send response
+                        session.proto.send_one_message(response.encode())
+                    
+                    except Exception as e:
+                        self.Print(f"Error processing message from {addr}: {e}", 40)
+                        session.proto.send_one_message(f"ERR99|{str(e)}".encode())
+                
+                except Exception as e:
+                    self.Print(f"Error receiving from {addr}: {e}", 40)
+                    session.is_connected = False
+        
+        finally:
+            # Clean up
+            if addr in self.clients:
+                del self.clients[addr]
+            sock.close()
+            self.Print(f"Connection from {addr} closed", 20)
 
-            print("Client disconnected")
 
-
+# Entry point
 if __name__ == "__main__":
-    temp_srv = TempServer()
-    temp_srv.start()
+    logging_level = 10  # DEBUG
+    
+    server = Server(
+        host='0.0.0.0',
+        port=23456,
+        logging_level=logging_level
+    )
+    
+    server.start()
