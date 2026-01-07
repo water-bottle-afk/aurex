@@ -140,26 +140,29 @@ class PROTO:
             Message as bytes or None if connection closed
         """
         try:
+            self.Print(f"⏳ Waiting to receive message length header...", 20)
+            
             # Receive length header (2 bytes)
             len_data = self._recv_exact(2)
             if not len_data:
-                self.Print("Connection closed by remote host", 20)
+                self.Print("❌ Connection closed by remote host (no length data)", 20)
                 return None
             
             # Unpack message length
             msg_len, = struct.unpack('!H', len_data)
+            self.Print(f"📊 Message length: {msg_len} bytes", 20)
             
             # Receive message
             message = self._recv_exact(msg_len)
             if not message:
-                self.Print("Connection closed while receiving message", 20)
+                self.Print("❌ Connection closed while receiving message", 20)
                 return None
             
             self._log_message('recv', message)
             return message
             
         except Exception as e:
-            self.Print(f"Error receiving message: {e}", 40)
+            self.Print(f"❌ Error receiving message: {e}", 40)
             return None
     
     def _recv_exact(self, num_bytes):
@@ -175,17 +178,25 @@ class PROTO:
         buffer = b''
         remaining = num_bytes
         
+        self.Print(f"🔄 _recv_exact: waiting for {num_bytes} bytes", 10)
+        
         while remaining > 0:
             try:
+                self.Print(f"   Calling sock.recv({remaining})...", 10)
                 chunk = self.sock.recv(remaining)
+                
                 if not chunk:
+                    self.Print(f"   ❌ sock.recv returned empty (socket closed), got {len(buffer)}/{num_bytes} bytes", 40)
                     return buffer if buffer else None
+                
+                self.Print(f"   ✅ Received {len(chunk)} bytes", 10)
                 buffer += chunk
                 remaining -= len(chunk)
             except Exception as e:
-                self.Print(f"Error in _recv_exact: {e}", 40)
+                self.Print(f"   ❌ Error in _recv_exact: {e}", 40)
                 return None
         
+        self.Print(f"✅ _recv_exact completed: got {len(buffer)} bytes", 10)
         return buffer
     
     def close(self):

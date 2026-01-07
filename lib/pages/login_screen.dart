@@ -6,7 +6,6 @@ import 'package:provider/provider.dart';
 import '../main.dart';
 import '../providers/user_provider.dart';
 import '../providers/client_provider.dart';
-import '../services/user_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -21,6 +20,59 @@ class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
+
+  Future<void> _signInWithEmail() async {
+    if (!mounted) return;
+
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+
+    if (email.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please fill in all fields')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+
+      // Login via server protocol - sends LOGIN|email|password
+      // Server responds with LOGED or ERR01
+      final result = await clientProvider.client.login(email, password);
+
+      if (result == "success") {
+        // Set user in provider
+        Provider.of<UserProvider>(context, listen: false).setLocalUser(
+          email: email,
+          username: email.split('@')[0], // Use email prefix as username
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Login successful!')),
+          );
+          context.go('/marketplace');
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid email or password')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
 
   Future<void> _signInWithGoogle() async {
     if (!mounted) return;
@@ -61,27 +113,9 @@ class _LoginScreenState extends State<LoginScreen> {
         // Clear cache on successful login
         await clearAppCache();
 
-        // Check if user exists in local database
-        final userService = UserService();
-        final existingUser = await userService.getUserByGoogleId(googleUser.id);
-
-        if (existingUser == null) {
-          // New user - create an entry in the database
-          await userService.createUserWithGoogle(
-            email: googleUser.email,
-            username: googleUser.displayName ?? 'User',
-            googleId: googleUser.id,
-          );
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Welcome! New account created.')),
-          );
-        } else {
-          // Existing user
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Welcome back!')),
-          );
-        }
-
+        // Set user in provider (Firebase user)
+        Provider.of<UserProvider>(context, listen: false).setUser(userCredential.user);
+        
         // Initialize client connection to server
         try {
           final clientProvider = Provider.of<ClientProvider>(context, listen: false);
@@ -94,7 +128,6 @@ class _LoginScreenState extends State<LoginScreen> {
           );
         }
 
-        Provider.of<UserProvider>(context, listen: false).setUser(userCredential.user);
         context.go('/marketplace');
       }
     } catch (e) {
@@ -194,11 +227,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           padding: const EdgeInsets.symmetric(vertical: 16),
                         ),
-                        onPressed: _isLoading ? null : () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Email login not yet implemented')),
-                          );
-                        },
+                        onPressed: _isLoading ? null : _signInWithEmail,
                         child: _isLoading
                             ? const SizedBox(
                                 height: 20,

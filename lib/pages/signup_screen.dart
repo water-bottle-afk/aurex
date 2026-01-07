@@ -6,7 +6,6 @@ import 'package:provider/provider.dart';
 import '../main.dart';
 import '../providers/user_provider.dart';
 import '../providers/client_provider.dart';
-import '../services/user_service.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -22,6 +21,75 @@ class _SignupScreenState extends State<SignupScreen> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
+
+  Future<void> _signUpWithEmail() async {
+    if (!mounted) return;
+
+    final username = _usernameController.text.trim();
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+
+    if (username.isEmpty || email.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please fill in all fields')),
+      );
+      return;
+    }
+
+    if (!email.contains('@')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid email')),
+      );
+      return;
+    }
+
+    if (password.length < 6) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Password must be at least 6 characters')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+
+      // Sign up via server protocol
+      // Sends: SGNUP|username|password|verify_password|email
+      // Server responds with SIGND or ERR10
+      final result = await clientProvider.client.signUp(username, password, password, email);
+
+      if (result == "success") {
+        // Set user in provider
+        Provider.of<UserProvider>(context, listen: false).setLocalUser(
+          email: email,
+          username: username,
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Account created successfully!')),
+          );
+          context.go('/login');
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Signup failed. Please try again.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
 
   Future<void> _signUpWithGoogle() async {
     if (!mounted) return;
@@ -62,27 +130,9 @@ class _SignupScreenState extends State<SignupScreen> {
         // Clear cache on successful signup
         await clearAppCache();
 
-        // Check if user already exists in database
-        final userService = UserService();
-        final existingUser = await userService.getUserByGoogleId(googleUser.id);
-
-        if (existingUser != null) {
-          // User already exists
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Account already exists! Logging in...')),
-          );
-        } else {
-          // Create new user
-          await userService.createUserWithGoogle(
-            email: googleUser.email,
-            username: googleUser.displayName ?? 'User',
-            googleId: googleUser.id,
-          );
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Account created successfully!')),
-          );
-        }
-
+        // Set user in provider (Firebase user)
+        Provider.of<UserProvider>(context, listen: false).setUser(userCredential.user);
+        
         // Initialize client connection to server
         try {
           final clientProvider = Provider.of<ClientProvider>(context, listen: false);
@@ -95,7 +145,6 @@ class _SignupScreenState extends State<SignupScreen> {
           );
         }
 
-        Provider.of<UserProvider>(context, listen: false).setUser(userCredential.user);
         context.go('/marketplace');
       }
     } catch (e) {
@@ -227,11 +276,7 @@ class _SignupScreenState extends State<SignupScreen> {
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                               padding: const EdgeInsets.symmetric(vertical: 16),
                             ),
-                            onPressed: _isLoading ? null : () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Email signup not yet implemented')),
-                              );
-                            },
+                            onPressed: _isLoading ? null : _signUpWithEmail,
                             child: _isLoading
                                 ? const SizedBox(
                                     height: 20,
