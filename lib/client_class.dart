@@ -39,7 +39,7 @@ class Client extends ChangeNotifier {
   bool get isAuthenticated => _isAuthenticated;
   List<MessageEvent> get messageHistory => List.unmodifiable(_messageHistory);
 
-  Client({this.host = "172.16.64.109", this.port = 23456});
+  Client({this.host = "192.168.1.61", this.port = 23456});
 
   /// Push message to screen (helper function to reduce code duplication)
   void pushMessageToScreen({
@@ -83,12 +83,14 @@ class Client extends ChangeNotifier {
 
       pushMessageToScreen(
         type: 'system',
-        message: 'TLS Connected to server',
+        message: '🔒 TLS Connected to server',
         status: 'success',
       );
 
       // Send START message for connection initialization
       await _sendStartMessage();
+      
+      print('✅ Connection successful and handshake complete');
     } catch (e) {
       pushMessageToScreen(
         type: 'system',
@@ -116,9 +118,11 @@ class Client extends ChangeNotifier {
       );
 
       await sendMessage(startMsg);
+      print('📤 START message sent');
 
       // Wait for ACCPT response
       final response = await receiveMessage();
+      print('📥 Received response: $response');
 
       if (response.startsWith("ACCPT")) {
         pushMessageToScreen(
@@ -126,6 +130,7 @@ class Client extends ChangeNotifier {
           message: response,
           status: 'success',
         );
+        print('✅ ACCPT received - connection established!');
       } else {
         throw Exception("Unexpected response to START: $response");
       }
@@ -135,6 +140,7 @@ class Client extends ChangeNotifier {
         message: 'START message failed: $e',
         status: 'error',
       );
+      print('❌ START handshake failed: $e');
       rethrow;
     }
   }
@@ -155,12 +161,15 @@ class Client extends ChangeNotifier {
       _socket!.add(messageBytes);
       await _socket!.flush();
 
+      print('📤 Sent: $message');
+
       pushMessageToScreen(
         type: 'sent',
         message: message,
         status: 'success',
       );
     } catch (e) {
+      print('❌ Send failed: $e');
       pushMessageToScreen(
         type: 'sent',
         message: message,
@@ -195,6 +204,8 @@ class Client extends ChangeNotifier {
 
       final message = utf8.decode(messageBytes);
 
+      print('📥 Received: $message');
+
       pushMessageToScreen(
         type: 'received',
         message: message,
@@ -203,6 +214,7 @@ class Client extends ChangeNotifier {
 
       return message;
     } catch (e) {
+      print('❌ Receive failed: $e');
       pushMessageToScreen(
         type: 'system',
         message: 'Error receiving message: $e',
@@ -218,10 +230,23 @@ class Client extends ChangeNotifier {
     int remaining = numBytes;
 
     try {
-      await for (final data in _socket!) {
+      while (remaining > 0) {
+        // Use .first with timeout to read data without closing stream
+        final data = await _socket!.first.timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            _logger.warning("Timeout reading from socket");
+            return Uint8List(0);
+          },
+        );
+
+        if (data.isEmpty) {
+          _logger.warning("Socket returned empty data");
+          break;
+        }
+
         buffer.add(data);
         remaining -= data.length;
-        if (remaining <= 0) break;
       }
     } catch (e) {
       _logger.severe("Error in _readExact: $e");
