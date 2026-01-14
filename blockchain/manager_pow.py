@@ -28,8 +28,9 @@ class ManagerPoW:
         """Initialize PoW Manager"""
         self.node_id = node_id
         self.port = port
+        self.difficulty = difficulty
         self.peers = []
-        self.node = PoWNode(node_id, difficulty=difficulty)
+        self.node = PoWNode(host='127.0.0.1', port=port, difficulty=difficulty)
         self.socket = None
         self.is_running = False
         logger.info(f"[{self.node_id}] PoW Manager initialized (port={port})")
@@ -139,7 +140,11 @@ class ManagerPoW:
                     logger.error(f"[{self.node_id}] Accept error: {e}", exc_info=True)
     
     def _handle_message(self, client, addr):
-        """Handle incoming message from peer"""
+        """
+        Handle incoming message from peer
+        
+        DEBUG: Logs message type, sender, and handling result
+        """
         try:
             data = client.recv(SOCKET_BUFFER_SIZE).decode()
             if not data:
@@ -147,51 +152,82 @@ class ManagerPoW:
             
             message = json.loads(data)
             msg_type = message.get(MSG_FIELD_TYPE)
+            sender = message.get(MSG_FIELD_SENDER, "unknown")
+            
+            logger.debug(f"[{self.node_id}] 📥 Message from {sender}: {msg_type}")
+            print(f"[{self.node_id}] 📥 Received {msg_type} from {sender}")
             
             if msg_type == MSG_TYPE_BLOCK_FOUND:
-                self._handle_block_found(message)
+                self._handle_block_found(message, sender)
             elif msg_type == MSG_TYPE_NEW_TRANSACTION:
-                self._handle_transaction(message)
+                self._handle_transaction(message, sender)
             else:
                 logger.warning(f"[{self.node_id}] Unknown message type: {msg_type}")
+                print(f"[{self.node_id}] ❌ Unknown message type: {msg_type}")
             
             client.close()
         except json.JSONDecodeError as e:
             logger.error(f"[{self.node_id}] JSON error from {addr}: {e}")
+            print(f"[{self.node_id}] ❌ JSON decode error from {addr}")
             client.close()
         except Exception as e:
             logger.error(f"[{self.node_id}] Message handler error: {e}", exc_info=True)
+            print(f"[{self.node_id}] ❌ Handler error: {e}")
             try:
                 client.close()
             except:
                 pass
     
-    def _handle_block_found(self, message):
-        """Handle BLOCK_FOUND message"""
+    def _handle_block_found(self, message, sender="unknown"):
+        """
+        Handle BLOCK_FOUND message
+        
+        DEBUG: Logs validation, addition, and broadcast results
+        """
         block = message.get(MSG_FIELD_CONTENT)
         if not block:
-            logger.warning(f"[{self.node_id}] Empty block in message")
+            logger.warning(f"[{self.node_id}] Empty block in message from {sender}")
+            print(f"[{self.node_id}] ❌ Empty block from {sender}")
             return
+        
+        block_hash = block.get(BLOCK_FIELD_HASH, "unknown")[:16]
+        print(f"[{self.node_id}] 🔗 Processing block: {block_hash}...")
         
         if self.validate_block(block):
+            print(f"[{self.node_id}] ✅ Block validation passed")
             if self.node.add_block(block):
+                print(f"[{self.node_id}] ✅ Block added to chain")
                 self.broadcast_block(block)
+                print(f"[{self.node_id}] 📡 Block broadcasted to peers")
             else:
                 logger.warning(f"[{self.node_id}] Failed to add validated block")
+                print(f"[{self.node_id}] ❌ Failed to add block to chain")
+        else:
+            print(f"[{self.node_id}] ❌ Block validation failed")
+            logger.warning(f"[{self.node_id}] Block validation failed from {sender}")
     
-    def _handle_transaction(self, message):
-        """Handle NEW_TRANSACTION message"""
+    def _handle_transaction(self, message, sender="unknown"):
+        """
+        Handle NEW_TRANSACTION message
+        
+        DEBUG: Logs transaction receipt, mining progress, and block creation
+        """
         tx_data = message.get(MSG_FIELD_DATA)
         if not tx_data:
-            logger.warning(f"[{self.node_id}] Empty transaction")
+            logger.warning(f"[{self.node_id}] Empty transaction from {sender}")
+            print(f"[{self.node_id}] ❌ Empty transaction from {sender}")
             return
         
-        logger.info(f"[{self.node_id}] Mining transaction: {tx_data[:30]}...")
+        tx_short = str(tx_data)[:30]
+        print(f"[{self.node_id}] 💳 Transaction received: {tx_short}...")
+        logger.info(f"[{self.node_id}] Mining transaction from {sender}: {tx_short}...")
+        
         self.node.is_mining = True
         hash_result, nonce = self.node.solve(tx_data)
         self.node.is_mining = False
         
         if hash_result:
+            print(f"[{self.node_id}] ✅ Transaction mined successfully")
             block = {
                 BLOCK_FIELD_HASH: hash_result,
                 BLOCK_FIELD_NONCE: nonce,
@@ -200,10 +236,15 @@ class ManagerPoW:
                 BLOCK_FIELD_TIMESTAMP: __import__('time').time(),
             }
             if self.node.add_block(block):
+                print(f"[{self.node_id}] ✅ Block added to chain")
                 self.broadcast_block(block)
+                print(f"[{self.node_id}] 📡 Block broadcasted to all peers")
             else:
                 logger.error(f"[{self.node_id}] Failed to add mined block")
-    
+                print(f"[{self.node_id}] ❌ Failed to add mined block")
+        else:
+            logger.warning(f"[{self.node_id}] Mining failed for transaction")
+            print(f"[{self.node_id}] ❌ Mining failed for transaction")
     def stop(self):
         """Stop the PoW Manager"""
         try:
