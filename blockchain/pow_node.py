@@ -12,17 +12,22 @@ import threading
 from datetime import datetime
 import sys
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
+from json_ledger import get_ledger
+
 try:
     from db_init import get_db_connection
 except:
-    print("⚠️ db_init not available, creating minimal version")
-    def get_db_connection():
-        import sqlite3
-        return sqlite3.connect('database.sqlite3')
+    print("⚠️ db_init not available")
+
+from key_manager import NodeKeyManager
+
 
 class PoWNode:
     """
@@ -32,13 +37,14 @@ class PoWNode:
     - Spreads information (gossip protocol)
     """
     
-    def __init__(self, host='0.0.0.0', port=11111):
+    def __init__(self, host='0.0.0.0', port=11111, difficulty=2):
         """
         Initialize PoW Node (miner + validator)
         
         Args:
             host: Listening host (0.0.0.0 = all interfaces)
             port: Listening port (11111, 22222, 33333, 44444, 55555)
+            difficulty: Number of leading zeros required in hash
         """
         self.node_id = str(uuid.uuid4())  # Unique node identifier
         self.host = host
@@ -46,13 +52,16 @@ class PoWNode:
         # Each node is both miner and validator
         self.is_running = False
         
+        # Digital signatures - each node has its own key pair
+        self.key_manager = NodeKeyManager(self.node_id)
+        
         # P2P network
         self.known_nodes = {}  # node_id -> (host, port)
         self.connected_nodes = {}  # node_id -> socket
         
         # Blockchain
         self.current_block_hash = None
-        self.difficulty = 4  # Number of leading zeros required
+        self.difficulty = difficulty  # Number of leading zeros required
         self.mining = False
         self.validated_blocks = []  # Blocks validated by this node
         
@@ -60,6 +69,7 @@ class PoWNode:
         self._register_node()
         
         print(f"🚀 PoW Node initialized (Miner + Validator)")
+        print(f"   🔑 Digital Signatures: ENABLED")
         print(f"   Node ID: {self.node_id}")
         print(f"   Listening: {self.host}:{self.port}")
     
@@ -110,12 +120,11 @@ class PoWNode:
         server_socket.bind((self.host, self.port))
         server_socket.listen(5)
         
-        print(f"👂 Listening for P2P connections on {self.host}:{self.port}")
+        print(f"👂 Listening on {self.host}:{self.port}")
         
         while self.is_running:
             try:
                 client_socket, (client_host, client_port) = server_socket.accept()
-                print(f"📥 New connection from {client_host}:{client_port}")
                 
                 # Handle connection in separate thread
                 thread = threading.Thread(
@@ -126,7 +135,7 @@ class PoWNode:
                 thread.start()
             except Exception as e:
                 if self.is_running:
-                    print(f"❌ Error accepting connection: {e}")
+                    pass
         
         server_socket.close()
     
@@ -136,23 +145,27 @@ class PoWNode:
             data = client_socket.recv(4096)
             message = json.loads(data.decode())
             
-            print(f"📬 Received message: {message.get('type', 'unknown')}")
-            
-            # Handle different message types
             msg_type = message.get('type')
             
             if msg_type == 'ping':
                 self._send_pong(client_socket)
+                client_socket.close()
             elif msg_type == 'node_discovery':
                 self._send_node_list(client_socket)
+                client_socket.close()
             elif msg_type == 'new_block':
                 self._handle_new_block(message)
-            elif msg_type == 'new_transaction':
-                self._handle_new_transaction(message)
-            
-            client_socket.close()
+                client_socket.close()
+            elif msg_type == 'NEW_TRANSACTION':
+                # Keep socket open and mine the transaction
+                self._handle_new_transaction(message, client_socket)
+            else:
+                client_socket.close()
         except Exception as e:
-            print(f"❌ Error handling P2P connection: {e}")
+            try:
+                client_socket.close()
+            except:
+                pass
     
     def _send_pong(self, socket):
         """Respond to ping"""
@@ -195,10 +208,82 @@ class PoWNode:
         else:
             print(f"❌ Block validation failed: {block_hash}")
     
-    def _handle_new_transaction(self, message):
-        """Handle incoming transaction"""
-        tx_hash = message.get('tx_hash')
-        print(f"💳 New transaction received: {tx_hash}")
+    def _handle_new_transaction(self, message, client_socket):
+        """Handle incoming transaction and start mining in background thread"""
+        try:
+            tx_data = message.get('data', {})
+            asset_name = tx_data.get('asset', 'unknown')
+            
+            # Extract confirmation details from app server
+            confirmation_host = message.get('confirmation_host', '127.0.0.1')
+            confirmation_port = message.get('confirmation_port', 13290)
+            
+            # Send immediate acknowledgment to client
+            ack_response = {
+                'type': 'MINING_STARTED',
+                'miner': self.node_id,
+                'message': 'Mining started'
+            }
+            client_socket.send(json.dumps(ack_response).encode())
+            
+            # Close client socket
+            client_socket.close()
+            
+            # Create block data from transaction
+            block_data = json.dumps(tx_data)
+            
+            # Start mining in background thread
+            mining_thread = threading.Thread(
+                target=self._mine_and_broadcast,
+                args=(block_data, asset_name, confirmation_host, confirmation_port),
+                daemon=True
+            )
+            mining_thread.start()
+            
+        except Exception as e:
+            try:
+                error_response = {
+                    'type': 'ERROR',
+                    'error': str(e),
+                    'miner': self.node_id
+                }
+                client_socket.send(json.dumps(error_response).encode())
+            except:
+                pass
+            finally:
+                try:
+                    client_socket.close()
+                except:
+                    pass
+    
+    def _mine_and_broadcast(self, block_data, asset_name, confirmation_host='127.0.0.1', confirmation_port=13290):
+        """Mine block in background and send confirmation to app server"""
+        try:
+            # Mine the block (broadcasts automatically inside mine_block)
+            block_hash, nonce = self.mine_block(block_data)
+            
+            if block_hash:
+                # Send block confirmation to app server
+                confirmation = {
+                    'type': 'block_confirmation',
+                    'miner_node_id': self.node_id,
+                    'block_hash': block_hash,
+                    'asset': asset_name,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(5)
+                    sock.connect((confirmation_host, confirmation_port))
+                    sock.send(json.dumps(confirmation).encode())
+                    sock.close()
+                    print(f"📢 Block confirmation sent to app server")
+                except Exception as e:
+                    print(f"⚠️ Could not send confirmation: {e}")
+            
+        except Exception as e:
+            print(f"❌ Error in mining: {e}")
     
     def broadcast_message(self, message_type, data):
         """Broadcast message to all known nodes"""
@@ -215,15 +300,21 @@ class PoWNode:
                 sock.connect((host, port))
                 sock.send(json.dumps(message).encode())
                 sock.close()
-                print(f"📤 Broadcast to {node_id}")
             except Exception as e:
-                print(f"⚠️ Failed to reach {node_id}: {e}")
+                pass
     
     def validate_block(self, block_hash, nonce):
         """
         Validate block by checking if hash meets difficulty requirement
+        
+        DEBUG OUTPUT:
+        - Block hash (first 16 chars)
+        - Nonce value
+        - Difficulty requirement
+        - Validation result
         """
         if not block_hash or not isinstance(block_hash, str):
+            print(f"❌ [{self.node_id}] Invalid block hash type: {type(block_hash)}")
             return False
         
         # Check if hash starts with required leading zeros
@@ -231,11 +322,40 @@ class PoWNode:
         is_valid = block_hash.startswith(difficulty_target)
         
         if is_valid:
-            print(f"✅ Block hash valid: {block_hash[:16]}...")
+            print(f"\n✅ [{self.node_id}] BLOCK VALIDATED")
+            print(f"   Hash: {block_hash}")
+            print(f"   Nonce: {nonce}")
+            print(f"   Difficulty: {self.difficulty} zeros ✓\n")
+            
+            # Store validation in database
+            self._store_validation_in_db(block_hash, nonce)
         else:
-            print(f"❌ Block hash invalid (not enough leading zeros): {block_hash[:16]}...")
+            print(f"\n❌ [{self.node_id}] BLOCK INVALID")
+            print(f"   Hash: {block_hash[:16]}...")
+            print(f"   Expected: {difficulty_target}...")
+            print(f"   Got: {block_hash[:self.difficulty]}...")
+            print(f"   Nonce: {nonce}\n")
         
         return is_valid
+    
+    def _store_validation_in_db(self, block_hash, nonce):
+        """Store block validation in database"""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Check if block exists
+            cursor.execute('SELECT id FROM blocks WHERE block_hash = ?', (block_hash,))
+            result = cursor.fetchone()
+            
+            if result:
+                print(f"   [DB] Block already in ledger: {block_hash[:16]}...")
+            else:
+                print(f"   [DB] New valid block: {block_hash[:16]}...")
+            
+            conn.close()
+        except Exception as e:
+            print(f"   ⚠️ Database error during validation: {e}")
     
     def mine_block(self, transactions_data=""):
         """
@@ -245,8 +365,9 @@ class PoWNode:
         self.mining = True
         nonce = 0
         start_time = time.time()
+        target_zeros = '0' * self.difficulty
         
-        print(f"⛏️ Mining block (difficulty: {self.difficulty})...")
+        print(f"⛏️ Mining block (difficulty: {self.difficulty})")
         
         while self.mining:
             # Create block data
@@ -263,29 +384,59 @@ class PoWNode:
             block_hash = hashlib.sha256(block_str.encode()).hexdigest()
             
             # Check if hash meets difficulty requirement
-            if block_hash.startswith('0' * self.difficulty):
+            if block_hash.startswith(target_zeros):
                 elapsed = time.time() - start_time
-                print(f"✅ Block mined!")
+                
+                print(f"✅ BLOCK FOUND!")
                 print(f"   Hash: {block_hash}")
-                print(f"   Nonce: {nonce}")
-                print(f"   Time: {elapsed:.2f}s")
+                print(f"   Time: {elapsed:.2f}s | Attempts: {nonce}\n")
                 
                 self.current_block_hash = block_hash
+                
+                # Store block in database
+                self._store_block_in_db(block_hash, nonce, transactions_data)
+                
+                # Broadcast to peers
                 self.broadcast_message('new_block', {
                     'block_hash': block_hash,
                     'nonce': nonce,
-                    'data': transactions_data
+                    'data': transactions_data,
+                    'miner': self.node_id
                 })
+                
                 self.mining = False
-                return block_hash
+                return block_hash, nonce
             
             nonce += 1
-            
-            # Progress indicator
-            if nonce % 10000 == 0:
-                print(f"   Trying nonce: {nonce}")
         
-        return None
+        return None, None
+    
+    def _store_block_in_db(self, block_hash, nonce, data):
+        """Store mined block in JSON ledger with digital signature"""
+        try:
+            ledger = get_ledger()
+            previous_hash = self.current_block_hash or '0' * 64
+            
+            # Sign the block with this node's private key
+            block_signature = self.key_manager.sign_data(block_hash)
+            public_key_pem = self.key_manager.get_public_key_pem()
+            
+            # Add block with signature
+            block = ledger.add_block(
+                block_hash=block_hash,
+                nonce=nonce,
+                miner_id=self.node_id,
+                difficulty=self.difficulty,
+                data=data,
+                previous_hash=previous_hash,
+                signature=block_signature,
+                public_key=public_key_pem
+            )
+            
+            print(f"   💾 Block saved to ledger: {block_hash[:16]}...")
+            print(f"   ✍️  Signed with node's private key\n")
+        except Exception as e:
+            print(f"   ⚠️ Ledger error: {e}\n")
     
     def stop(self):
         """Stop the node"""
@@ -293,75 +444,8 @@ class PoWNode:
         self.mining = False
         print(f"🛑 Node stopping...")
     
-    def _mine_puzzle(self, data):
-        """Internal mining loop"""
-        nonce = MIN_NONCE
-        start_time = time.time()
-        
-        while self.is_mining:
-            hash_value = self._compute_hash(data, nonce)
-            
-            if check_hash_difficulty(hash_value, self.difficulty):
-                elapsed_time = time.time() - start_time
-                log_block_solution(self.node_id, hash_value, nonce, elapsed_time)
-                return hash_value, nonce
-            
-            nonce += 1
-            
-            if nonce % MINING_PROGRESS_INTERVAL == 0:
-                log_mining_progress(self.node_id, nonce)
-        
-        return None, None
-    
-    def _compute_hash(self, data, nonce):
-        """Compute SHA256 hash"""
-        target = create_hash_target(data, nonce)
-        return hashlib.sha256(target).hexdigest()
     
     # ========================================================================
     # BLOCK MANAGEMENT
     # ========================================================================
     
-    def create_block(self, data, previous_hash=None, nonce=0, hash_value=None):
-        """Create a new PoW block"""
-        block = {
-            BLOCK_FIELD_INDEX: len(self.chain),
-            BLOCK_FIELD_TIMESTAMP: time.time(),
-            BLOCK_FIELD_DATA: data,
-            BLOCK_FIELD_PREVIOUS_HASH: previous_hash,
-            BLOCK_FIELD_NONCE: nonce,
-            BLOCK_FIELD_HASH: hash_value,
-        }
-        logger.debug(f"[{self.node_id}] Block created")
-        return block
-    
-    def add_block(self, block):
-        """Add block to chain"""
-        is_valid, missing_fields = is_valid_block(block, [BLOCK_FIELD_HASH, BLOCK_FIELD_NONCE])
-        if not is_valid:
-            logger.error(f"[{self.node_id}] {ERROR_INVALID_BLOCK}")
-            return False
-        
-        try:
-            self.chain.append(block)
-            log_block_added(self.node_id, len(self.chain))
-            return True
-        except Exception as e:
-            logger.error(f"[{self.node_id}] Error adding block: {e}", exc_info=True)
-            return False
-    
-    # ========================================================================
-    # CHAIN OPERATIONS
-    # ========================================================================
-    
-    def get_chain_length(self):
-        """Get chain length"""
-        return len(self.chain)
-    
-    def get_last_block(self):
-        """Get last block"""
-        return self.chain[-1] if self.chain else None
-    
-    def get_chain_copy(self):
-        """Get copy of blockchain"""
-        return self.chain.copy()

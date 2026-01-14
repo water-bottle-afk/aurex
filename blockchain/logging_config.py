@@ -58,6 +58,9 @@ def setup_logging(log_dir="logs", level=logging.INFO):
     root_logger.info("="*60)
     root_logger.info("Blockchain Logging System Initialized")
     root_logger.info("="*60)
+    
+    # Return logger
+    return logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
