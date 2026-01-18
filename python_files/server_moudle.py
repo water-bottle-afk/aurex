@@ -9,6 +9,12 @@ import random
 import socket
 import ssl as ssl_module
 import os
+import threading
+from config import (
+    SERVER_HOST, SERVER_PORT, SERVER_IP,
+    BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
+    LOGGING_LEVEL
+)
 from classes import PROTO, CustomLogger
 
 # Try to import Firebase Admin SDK
@@ -426,9 +432,10 @@ class ClientSession:
 class Server:
     """Main server that handles all client connections"""
     
-    def __init__(self, host='0.0.0.0', port=23456, logging_level=10):
+    def __init__(self, host=SERVER_HOST, port=SERVER_PORT, logging_level=LOGGING_LEVEL):
         self.host = host
         self.port = port
+        self.server_ip = SERVER_IP  # Local network IP for broadcast response
         self.logging_level = logging_level
         self.logger = CustomLogger("Server", logging_level)
         self.Print = self.logger.Print
@@ -439,12 +446,58 @@ class Server:
         # Firebase database
         self.db = FirebaseDB()
     
+    def _start_broadcast_listener(self):
+        """Start listening for WHRSRV (Where's Server) broadcast queries"""
+        def broadcast_loop():
+            try:
+                # Create UDP socket for broadcast listening
+                broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                broadcast_sock.bind(('0.0.0.0', 12345))
+                
+                self.Print("📡 Broadcast listener started on port 12345", 20)
+                
+                while self.is_running:
+                    try:
+                        data, addr = broadcast_sock.recvfrom(1024)
+                        message = data.decode('utf-8').strip()
+                        
+                        if message == "WHRSRV":
+                            # Get the local IP address (not 0.0.0.0)
+                            # Try to get the actual IP by connecting to a remote address
+                            try:
+                                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                                s.connect(("8.8.8.8", 80))
+                                local_ip = s.getsockname()[0]
+                                s.close()
+                            except:
+                                local_ip = "127.0.0.1"
+                            
+                            response = f"SRVRSP|{local_ip}|{self.port}"
+                            broadcast_sock.sendto(response.encode('utf-8'), addr)
+                            self.Print(f"📡 Broadcast response sent to {addr}: {response}", 10)
+                    except socket.timeout:
+                        continue
+                    except Exception as e:
+                        self.Print(f"⚠️ Broadcast listener error: {e}", 10)
+                
+                broadcast_sock.close()
+            except Exception as e:
+                self.Print(f"❌ Failed to start broadcast listener: {e}", 10)
+        
+        # Start broadcast listener in a separate thread
+        thread = threading.Thread(target=broadcast_loop, daemon=True)
+        thread.start()
+    
     def start(self):
         """Start the server"""
         self.Print(f"🚀 Server starting on {self.host}:{self.port}...", 20)
         
         try:
             self.is_running = True
+            
+            # Start broadcast listener thread
+            self._start_broadcast_listener()
             
             # Create SSL context
             context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)
@@ -527,11 +580,23 @@ class Server:
                         # Send response
                         self.Print(f"📮 Sending to {addr[0]}:{addr[1]}: {response}", 20)
                         session.proto.send_one_message(response.encode())
+                        self.Print(f"✅ Response sent successfully to {addr[0]}:{addr[1]}", 20)
                     
                     except Exception as e:
                         self.Print(f"❌ Error processing message from {addr[0]}:{addr[1]}: {e}", 40)
-                        session.proto.send_one_message(f"ERR99|{str(e)}".encode())
+                        try:
+                            session.proto.send_one_message(f"ERR99|{str(e)}".encode())
+                        except:
+                            self.Print(f"❌ Failed to send error response to {addr[0]}:{addr[1]}", 40)
+                            session.is_connected = False
+                            break
                 
+                except ConnectionResetError:
+                    self.Print(f"🔌 Client {addr[0]}:{addr[1]} reset connection", 20)
+                    session.is_connected = False
+                except BrokenPipeError:
+                    self.Print(f"🔌 Client {addr[0]}:{addr[1]} closed connection", 20)
+                    session.is_connected = False
                 except Exception as e:
                     self.Print(f"❌ Error in message loop for {addr[0]}:{addr[1]}: {e}", 40)
                     session.is_connected = False

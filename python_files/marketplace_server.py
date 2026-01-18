@@ -1,0 +1,318 @@
+"""
+Marketplace Server Handler - Processes authentication, pagination, and upload requests
+Routes messages to appropriate handlers based on message type
+Message format: KEYWORD|arg1|arg2|arg3...
+"""
+
+import json
+import random
+from datetime import datetime, timedelta
+from marketplace_db import MarketplaceDB
+
+# Initialize database
+db = MarketplaceDB()
+
+
+def handle_login(args):
+    """
+    Handle LOGIN request
+    Format: LOGIN|username|password
+    Response: OK or ERR|error_message
+    """
+    try:
+        if len(args) < 3:
+            return "ERR|Missing arguments for LOGIN"
+        
+        username = args[1].strip()
+        password = args[2].strip()
+        
+        if not username or not password:
+            return "ERR|Username and password required"
+        
+        # Verify user credentials
+        if db.verify_user(username, password):
+            return "OK"
+        else:
+            return "ERR|Invalid username or password"
+    except Exception as e:
+        return f"ERR|Login error: {str(e)}"
+
+
+def handle_signup(args):
+    """
+    Handle SIGNUP request
+    Format: SIGNUP|username|password|email
+    Response: OK or ERR|error_message
+    """
+    try:
+        if len(args) < 4:
+            return "ERR|Missing arguments for SIGNUP"
+        
+        username = args[1].strip()
+        password = args[2].strip()
+        email = args[3].strip()
+        
+        if not username or not password or not email:
+            return "ERR|Username, password, and email required"
+        
+        # Validate username length
+        if len(username) < 3:
+            return "ERR|Username must be at least 3 characters"
+        
+        # Validate email format (basic)
+        if '@' not in email or '.' not in email:
+            return "ERR|Invalid email format"
+        
+        # Try to add user
+        success, message = db.add_user(username, password, email)
+        
+        if success:
+            return "OK"
+        else:
+            return f"ERR|{message}"
+    except Exception as e:
+        return f"ERR|Signup error: {str(e)}"
+
+
+def handle_get_items(args):
+    """
+    Handle GET_ITEMS request
+    Format: GET_ITEMS
+    Returns: OK|item1|item2|item3... (JSON encoded items)
+    """
+    try:
+        items = db.get_all_items()
+        items_json = json.dumps(items)
+        return f"OK|{items_json}"
+    except Exception as e:
+        return f"ERR|Error getting items: {str(e)}"
+
+
+def handle_get_item(args):
+    """
+    Handle GET_ITEM request (single item by ID)
+    Format: GET_ITEM|item_id
+    Returns: OK|item_json or ERR|message
+    """
+    try:
+        if len(args) < 2:
+            return "ERR|Item ID required"
+        
+        item_id = args[1].strip()
+        if not item_id:
+            return "ERR|Item ID required"
+        
+        item = db.get_item_by_id(item_id)
+        if item:
+            item_json = json.dumps(item)
+            return f"OK|{item_json}"
+        else:
+            return "ERR|Item not found"
+    except Exception as e:
+        return f"ERR|Error getting item: {str(e)}"
+
+
+def handle_get_items_paginated(args):
+    """
+    Handle lazy scrolling pagination
+    Format: GET_ITEMS_PAGINATED|limit|last_timestamp
+    Examples:
+    - GET_ITEMS_PAGINATED|10  (first page, 10 items)
+    - GET_ITEMS_PAGINATED|10|2026-01-16T12:00:00.000000  (next page)
+    Returns: OK|items_json or ERR|message
+    """
+    try:
+        limit = 10
+        last_timestamp = None
+        
+        if len(args) > 1:
+            try:
+                limit = int(args[1].strip())
+            except ValueError:
+                limit = 10
+        
+        if len(args) > 2:
+            last_timestamp = args[2].strip()
+        
+        items = db.get_items_paginated(limit=limit, last_timestamp=last_timestamp)
+        items_json = json.dumps(items)
+        return f"OK|{items_json}"
+    except Exception as e:
+        return f"ERR|Error getting paginated items: {str(e)}"
+
+
+def handle_send_verification_code(args):
+    """
+    Handle email verification code request
+    Format: SEND_CODE|email
+    Returns: OK|Code sent or ERR|message
+    """
+    try:
+        if len(args) < 2:
+            return "ERR|Email required"
+        
+        email = args[1].strip()
+        if not email:
+            return "ERR|Email required"
+        
+        user = db.get_user_by_email(email)
+        if not user:
+            return "ERR|User not found"
+        
+        # Generate verification code (6 digits)
+        verification_code = str(random.randint(100000, 999999))
+        
+        # Set expiration time (5 minutes)
+        reset_time = (datetime.now() + timedelta(minutes=5)).isoformat()
+        user.set_verification_code(verification_code)
+        user.set_reset_time(reset_time)
+        
+        # Update user in database
+        db.update_user(email, user)
+        
+        # TODO: Send email in production
+        # For now, return the code (in production, email it)
+        print(f"[EMAIL] Verification code for {email}: {verification_code}")
+        
+        return "OK|Verification code sent"
+    except Exception as e:
+        return f"ERR|Error sending code: {str(e)}"
+
+
+def handle_verify_code(args):
+    """
+    Handle email verification code verification
+    Format: VERIFY_CODE|email|code
+    Returns: OK|Code verified or ERR|message
+    """
+    try:
+        if len(args) < 3:
+            return "ERR|Email and code required"
+        
+        email = args[1].strip()
+        code = args[2].strip()
+        
+        user = db.get_user_by_email(email)
+        if not user:
+            return "ERR|User not found"
+        
+        if user.is_code_match_and_available(datetime.now(), code):
+            user.is_verified = True
+            db.update_user(email, user)
+            return "OK|Email verified"
+        else:
+            return "ERR|Invalid or expired code"
+    except Exception as e:
+        return f"ERR|Error verifying code: {str(e)}"
+
+
+def handle_upload_item(args):
+    """
+    Handle item upload
+    Format: UPLOAD|asset_name|username|google_drive_url|file_type|cost
+    Returns: OK or ERR|message
+    """
+    try:
+        if len(args) < 6:
+            return "ERR|Missing arguments for UPLOAD"
+        
+        asset_name = args[1].strip()
+        username = args[2].strip()
+        url = args[3].strip()
+        file_type = args[4].strip()
+        
+        try:
+            cost = float(args[5].strip())
+        except ValueError:
+            return "ERR|Invalid cost format"
+        
+        if not asset_name or not username or not url or not file_type or cost < 0:
+            return "ERR|Invalid item data"
+        
+        # Verify file type
+        if file_type.lower() not in ['jpg', 'png']:
+            return "ERR|File type must be jpg or png"
+        
+        success, message = db.add_marketplace_item(asset_name, username, url, file_type, cost)
+        
+        if success:
+            return "OK"
+        else:
+            return f"ERR|{message}"
+    except Exception as e:
+        return f"ERR|Upload error: {str(e)}"
+
+
+def process_message(message_str):
+    """
+    Process incoming message from Dart client (pipe-delimited format)
+    
+    Format: KEYWORD|arg1|arg2|arg3...
+    
+    Supported commands:
+    - LOGIN|username|password
+    - SIGNUP|username|password|email
+    - GET_ITEMS
+    - GET_ITEM|item_id
+    - GET_ITEMS_PAGINATED|limit|last_timestamp
+    - SEND_CODE|email
+    - VERIFY_CODE|email|code
+    - UPLOAD|asset_name|username|google_drive_url|file_type|cost
+    
+    Response format: OK|data or ERR|error_message
+    """
+    try:
+        parts = message_str.strip().split('|')
+        keyword = parts[0].upper()
+        
+        if keyword == 'LOGIN':
+            return handle_login(parts)
+        elif keyword == 'SIGNUP':
+            return handle_signup(parts)
+        elif keyword == 'GET_ITEMS':
+            return handle_get_items(parts)
+        elif keyword == 'GET_ITEM':
+            return handle_get_item(parts)
+        elif keyword == 'GET_ITEMS_PAGINATED':
+            return handle_get_items_paginated(parts)
+        elif keyword == 'SEND_CODE':
+            return handle_send_verification_code(parts)
+        elif keyword == 'VERIFY_CODE':
+            return handle_verify_code(parts)
+        elif keyword == 'UPLOAD':
+            return handle_upload_item(parts)
+        else:
+            return f"ERR|Unknown command: {keyword}"
+    
+    except Exception as e:
+        return f"ERR|Server error: {str(e)}"
+
+
+if __name__ == "__main__":
+    # Test the handlers with pipe-delimited messages
+    print("Testing Marketplace Server Handlers (Pipe-Delimited Format)\n")
+    
+    # Test SIGNUP
+    print("1. SIGNUP request:")
+    result = process_message("SIGNUP|testuser|password123|test@example.com")
+    print(f"   Input:  SIGNUP|testuser|password123|test@example.com")
+    print(f"   Output: {result}\n")
+    
+    # Test LOGIN
+    print("2. LOGIN request:")
+    result = process_message("LOGIN|testuser|password123")
+    print(f"   Input:  LOGIN|testuser|password123")
+    print(f"   Output: {result}\n")
+    
+    # Test GET_ITEMS
+    print("3. GET_ITEMS request:")
+    result = process_message("GET_ITEMS")
+    print(f"   Input:  GET_ITEMS")
+    output = result.split('|', 1)
+    print(f"   Output: {output[0]}|{len(output)} items\n")
+    
+    # Test GET_ITEM
+    print("4. GET_ITEM request:")
+    result = process_message("GET_ITEM|1")
+    print(f"   Input:  GET_ITEM|1")
+    print(f"   Output: {result}\n")
