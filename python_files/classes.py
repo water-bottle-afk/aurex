@@ -361,11 +361,17 @@ class PROTO:
             try:
                 new_buffer = self.sock.recv(size)
                 if not new_buffer:
-                    return None
+                    # Socket closed by peer
+                    return buffer if buffer else None
                 buffer += new_buffer
                 size -= len(new_buffer)
-            except:
-                break
+            except socket.timeout:
+                # Timeout - return what we have so far
+                return buffer if buffer else None
+            except Exception as e:
+                # Other socket errors
+                self.Print(f"Socket receive error: {e}", 40)
+                return buffer if buffer else None
         return buffer
 
     def generate_iv(self):
@@ -380,66 +386,6 @@ class PROTO:
         self.Print(f"Closes {self.who_get} socket!", 10)
         self.sock.close()
 
-
-class Func:
-    def __init__(self, subject=None, color=None, moves=None, opponent=None, who_start=None, num1=0, num2=0, info="",
-                 pt=None, turn="", from_pt=-1, to_pt=-1, points=None, game_over=None):
-        self.opponent = opponent
-        self.color = color
-        self.moves = moves
-        self.subject = subject
-        self.who_start = who_start
-        self.num1 = num1
-        self.num2 = num2
-        self.info = info
-        self.pt = pt  # point on the board from 1-24
-        self.turn = turn
-        self.from_pt = from_pt
-        self.to_pt = to_pt
-        self.points = points # reach to points
-        self.game_over = game_over
-
-    def to_str(self):
-        msg = []
-        if self.subject:
-            msg.append(f"subject={self.subject}")
-        if self.color:
-            msg.append(f"color={self.color}")
-        if self.moves:
-            msg.append(f"moves={self.moves}")
-        if self.who_start:
-            msg.append(f"who_start={self.who_start}")
-        if self.opponent:
-            msg.append(f"opponent={self.opponent}")
-        if self.num1:
-            msg.append(f"num1={self.num1}")
-        if self.num2:
-            msg.append(f"num2={self.num2}")
-        if self.info:
-            msg.append(f"info={self.info}")
-        if self.pt is not None:  # 0 will be false, so check
-            msg.append(f"pt={self.pt}")
-        if self.turn:
-            msg.append(f"turn={self.turn}")
-        if self.from_pt >= 0:
-            msg.append(f"from_pt={self.from_pt}")
-        if self.to_pt >= 0:
-            msg.append(f"to_pt={self.to_pt}")
-        if self.points:
-            msg.append(f"points={self.points}")
-        if self.game_over:
-            msg.append(f"game_over={self.game_over}")
-        return "|".join(msg)
-
-    @classmethod
-    def from_str(cls, message):
-        parts = message.split("|")
-        kwargs = {}
-        for part in parts:
-            if "=" in part:
-                k, v = part.split("=", 1)
-                kwargs[k] = v
-        return cls(**kwargs)  # **kwargs unpacks the dict into params for the constructor
 
 
 class ColoredFormatter(logging.Formatter):

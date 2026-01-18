@@ -118,16 +118,13 @@ class AppServer:
         print("⏳ Waiting for block confirmation from nodes...")
         self.confirmation_event.clear()
         
-        # Wait up to 30 seconds for confirmation
-        if self.confirmation_event.wait(timeout=30):
+        # Wait indefinitely for confirmation from one of the nodes
+        if self.confirmation_event.wait(timeout=None):
             confirmation = self.last_block_confirmation
             miner_node_id = confirmation.get('miner_node_id', 'Unknown')
             block_hash = confirmation.get('block_hash', '')[:16] + '...'
             
             print(f"   Hash: {block_hash}")
-            print()
-        else:
-            print("⚠️  No block confirmation received (timeout)")
             print()
         
         # Show last 2 blocks
