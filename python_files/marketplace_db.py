@@ -377,3 +377,11 @@ class MarketplaceDB:
         except Exception as e:
             print(f"Error getting paginated items: {e}")
             return []
+
+    def get_latest_items(self, limit=10):
+        """Get the latest marketplace items (for initial load)"""
+        return self.get_items_paginated(limit=limit, last_timestamp=None)
+
+    def get_items_before_timestamp(self, timestamp, limit=10):
+        """Get items before a specific timestamp (for pagination)"""
+        return self.get_items_paginated(limit=limit, last_timestamp=timestamp)
