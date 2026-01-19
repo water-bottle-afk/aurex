@@ -11,18 +11,48 @@ import random
 import pickle
 import threading
 import struct
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding as PADDING
-from cryptography.hazmat.primitives.ciphers.algorithms import AES
-from cryptography.hazmat.backends import default_backend
 import os
-from cryptography.hazmat.primitives.asymmetric import dh, rsa, padding
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.serialization import load_pem_parameters, load_pem_public_key
 import logging
 import ssl
+import time
 
 PEPPER = "pepper"
+
+# CLASS USER PROFILE (Anonymous user data)
+
+class UserProfile:
+    """Store anonymous user profile - username only, no profile pic"""
+    def __init__(self, username, email, created_at=None):
+        self.username = username
+        self.email = email
+        self.created_at = created_at or time.time()
+        self.last_login = None
+        self.assets_owned = []  # List of asset IDs user owns
+        self.assets_uploaded = []  # List of asset IDs user uploaded
+    
+    def get_username(self):
+        return self.username
+    
+    def get_email(self):
+        return self.email
+    
+    def get_created_at(self):
+        return self.created_at
+    
+    def update_last_login(self):
+        self.last_login = time.time()
+    
+    def add_owned_asset(self, asset_id):
+        if asset_id not in self.assets_owned:
+            self.assets_owned.append(asset_id)
+    
+    def add_uploaded_asset(self, asset_id):
+        if asset_id not in self.assets_uploaded:
+            self.assets_uploaded.append(asset_id)
+    
+    def __repr__(self):
+        return f"Profile: username={self.username}, email={self.email}, created={self.created_at}"
+
 
 # CLASS USER
 
@@ -34,6 +64,10 @@ class User:
         self.email = email
         self.time_of_available_reset = None
         self.verification_code = None
+        # OTP fields for password reset
+        self.otp_code = None
+        self.otp_created_time = None
+        self.otp_expires_in_seconds = 300  # 5 minute OTP validity
 
     def create_salt(self):
         num = random.randint(1, 1000000)
@@ -84,6 +118,34 @@ class User:
 
     def is_same_password(self, other_password):
         return self.password == self.secured_password(other_password)
+
+    def generate_otp(self):
+        """Generate a 6-digit OTP code"""
+        import time
+        self.otp_code = str(random.randint(100000, 999999))
+        self.otp_created_time = time.time()
+        return self.otp_code
+
+    def verify_otp(self, provided_otp):
+        """Verify OTP code and check if it's still valid"""
+        import time
+        if self.otp_code is None or self.otp_created_time is None:
+            return False
+        
+        # Check if OTP matches
+        if self.otp_code != provided_otp:
+            return False
+        
+        # Check if OTP has expired
+        elapsed_time = time.time() - self.otp_created_time
+        if elapsed_time > self.otp_expires_in_seconds:
+            self.otp_code = None
+            return False
+        
+        # OTP is valid, clear it
+        self.otp_code = None
+        self.otp_created_time = None
+        return True
 
     def __repr__(self):
         return f"User: username = {self.username}, password = {self.password}, email = {self.email}"
@@ -185,13 +247,6 @@ class PROTO:
             self.sock = cln_sock
         else:
             self.sock = socket.socket()
-        self.dh_private_key = None
-        self.dh_public_key = None
-        self.shared_key = None
-        self.parameters = None
-        self.has_shared_key = False
-        self.choosed_DH = False
-        self.choosed_RSA = False
         self.lock = threading.Lock()
         self.logger = CustomLogger(f"PROTO for: {self.who_get}", logging_level)
         self.Print = self.logger.Print
@@ -202,157 +257,24 @@ class PROTO:
     def connect(self, ip, port):
         self.sock.connect((ip, port))
 
-    # def send_first_proto_message(self, proto_name):
-    #     msg = f"AVAIL|{proto_name}"
-    #     self.send_one_message(msg.encode(), encryption=False)
-
-    # def create_DH_keys(self):
-    #     if self.parameters is None:
-    #         self.parameters = dh.generate_parameters(generator=2, key_size=2048)
-    #     self.dh_private_key = self.parameters.generate_private_key()
-    #     self.dh_public_key = self.dh_private_key.public_key()
-    #     self.choosed_DH = True
-
-    # def get_public_key_dh(self):
-    #     self.choosed_DH = True
-    #     return self.dh_public_key.public_bytes(
-    #         encoding=serialization.Encoding.PEM,
-    #         format=serialization.PublicFormat.SubjectPublicKeyInfo
-    #     )
-
-    # def get_shared_key_dh(self):
-    #     self.choosed_DH = True
-    #     return self.shared_key
-
-    # def get_dh_parameters(self):
-    #     self.choosed_DH = True
-    #     return self.parameters.parameter_bytes(
-    #         encoding=serialization.Encoding.PEM,
-    #         format=serialization.ParameterFormat.PKCS3
-    #     )
-
-    # def create_shared_key_dh(self, other_public_key_data):
-    #     self.choosed_DH = True
-    #     other_public_key = load_pem_public_key(other_public_key_data)
-    #     self.shared_key = self.dh_private_key.exchange(other_public_key)
-    #     self.has_shared_key = True
-
-    # def set_parameters_dh(self, bin_data):
-    #     self.choosed_DH = True
-
-    #     self.parameters = load_pem_parameters(bin_data)
-    #     self.create_DH_keys()
-
-    # def create_RSA_keys(self):
-    #     self.choosed_RSA = True
-    #     self.RSA_private_key = rsa.generate_private_key(
-    #         public_exponent=65537,
-    #         key_size=2048
-    #     )
-
-    #     self.RSA_public_key = self.RSA_private_key.public_key()
-
-    # def get_public_key_RSA(self):
-    #     self.choosed_RSA = True
-
-    #     pem_public = self.RSA_public_key.public_bytes(
-    #         encoding=serialization.Encoding.PEM,
-    #         format=serialization.PublicFormat.SubjectPublicKeyInfo
-    #     )
-    #     return pem_public
-
-    # def set_RSA_public_key(self, bin_data):  # bin data in the pem_public in bytes
-    #     self.choosed_RSA = True
-
-    #     self.RSA_public_key = serialization.load_pem_public_key(bin_data)
-
-    # def encrypt_AES_key_by_RSA_public_key(self):
-    #     self.choosed_RSA = True
-
-    #     self.AES_key = self.generate_AES_key()
-    #     encrypted_key = self.RSA_public_key.encrypt(
-    #         self.AES_key,
-    #         padding.OAEP(
-    #             mgf=padding.MGF1(algorithm=hashes.SHA256()),
-    #             algorithm=hashes.SHA256(),
-    #             label=None
-    #         )
-    #     )
-    #     return encrypted_key
-
-    # def get_encrypted_AES_key(self, data: bytes):  #data = AES encrypted by RSA public key
-    #     self.choosed_RSA = True
-
-    #     decrypted_data = self.RSA_private_key.decrypt(
-    #         data,
-    #         padding.OAEP(
-    #             mgf=padding.MGF1(algorithm=hashes.SHA256()),
-    #             algorithm=hashes.SHA256(),
-    #             label=None
-    #         )
-    #     )
-    #     self.AES_key = decrypted_data
-
-    # def get_AES_key(self):
-    #     return self.AES_key
-
-    # # Function to encrypt data using AES CBC mode
-    # def AES_encrypt(self, plaintext: bytes, key: bytes, iv: bytes) -> bytes:
-    #     # Pad the plaintext to block size
-    #     padder = PADDING.PKCS7(AES.block_size).padder()
-    #     padded_plaintext = padder.update(plaintext) + padder.finalize()
-
-    #     # Create cipher and encrypt
-    #     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    #     encryptor = cipher.encryptor()
-    #     ciphertext = encryptor.update(padded_plaintext) + encryptor.finalize()
-    #     return ciphertext
-
-    # # Function to decrypt data using AES CBC mode
-    # def AES_decrypt(self, ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
-    #     # Create cipher and decrypt
-    #     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    #     decryptor = cipher.decryptor()
-    #     padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-    #     # Unpad the plaintext
-    #     unpadder = PADDING.PKCS7(AES.block_size).unpadder()
-    #     plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
-    #     return plaintext
-
-    def send_one_message(self, data: bytes, encryption=True):
-        if encryption and self.choosed_DH:
-            new_iv = self.generate_iv()
-            shared_key_in_sha256 = hashlib.sha256(self.shared_key).digest()
-            message = new_iv + self.AES_encrypt(data, shared_key_in_sha256, new_iv)
-        elif encryption and self.choosed_RSA:
-            new_iv = self.generate_iv()
-            message = new_iv + self.AES_encrypt(data, self.AES_key, new_iv)
-        else:
-            message = data
-
+    def send_one_message(self, data: bytes, encryption=False):
+        """Send message with 2-byte length prefix (TLS handles encryption)"""
+        message = data
         self.sock.send(struct.pack('!H', len(message)) + message)
         self.log("2", data)
 
-    def recv_one_message(self, encryption=True):
+    def recv_one_message(self, encryption=False):
+        """Receive message with 2-byte length prefix (TLS handles decryption)"""
         len_section = self.__recv_amount(2)
         if not len_section:
             return None
-        len_int, = struct.unpack('!H', len_section)  # ! for network (big endian)
+        len_int, = struct.unpack('!H', len_section)
         data = self.__recv_amount(len_int)
 
         if len_int != len(data):
             data = b''
-        if encryption and self.choosed_DH:
-            iv = data[:16]
-            shared_key_in_sha256 = hashlib.sha256(self.shared_key).digest()
-            data = self.AES_decrypt(data[16:], shared_key_in_sha256, iv)
-        if encryption and self.choosed_RSA:
-            iv = data[:16]
-            data = self.AES_decrypt(data[16:], self.AES_key, iv)
-
+        
         self.log("1", data)
-
         return data
 
     def __recv_amount(self, size):
@@ -373,14 +295,6 @@ class PROTO:
                 self.Print(f"Socket receive error: {e}", 40)
                 return buffer if buffer else None
         return buffer
-
-    def generate_iv(self):
-        iv = os.urandom(16)  # 16 bytes for CBC mode
-        return iv
-
-    def generate_AES_key(self):
-        key = os.urandom(16)
-        return key
 
     def close(self):
         self.Print(f"Closes {self.who_get} socket!", 10)
