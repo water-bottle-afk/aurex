@@ -15,10 +15,15 @@ import os
 import logging
 import ssl
 import time
+import sqlite3
+from pathlib import Path
 
 PEPPER = "pepper"
 
-# CLASS USER PROFILE (Anonymous user data)
+# Ensure Database directory exists
+DB_DIR = Path("Database")
+DB_DIR.mkdir(exist_ok=True)
+DATABASE_PATH = DB_DIR / "users.db"
 
 class UserProfile:
     """Store anonymous user profile - username only, no profile pic"""
@@ -155,72 +160,166 @@ class User:
 
 lock = threading.Lock()
 
-USERS_FILE_PATH = "Database/users.pickle"
-
 
 class DB:
     def __init__(self):
-        self.users = {}
+        self.conn = sqlite3.connect(str(DATABASE_PATH), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.create_table()
+
+    def create_table(self):
+        """Create users table if it doesn't exist"""
         with lock:
-            with open(USERS_FILE_PATH, 'rb') as file:
-                self.users = pickle.load(file)
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    password TEXT NOT NULL,
+                    salt TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    time_of_available_reset REAL,
+                    verification_code TEXT,
+                    otp_code TEXT,
+                    otp_created_time REAL,
+                    created_at REAL DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            self.conn.commit()
 
     def get_users(self):
+        """Get all users from database"""
         try:
-            with open(USERS_FILE_PATH, 'rb') as file:
-                self.users = pickle.load(file)
-                return self.users
-        except:
-            return "No Users"
-
-    def set_file(self):
-        with open(USERS_FILE_PATH, 'wb') as file:
-            pickle.dump(self.users, file)
+            with lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT * FROM users')
+                rows = cursor.fetchall()
+                users = {}
+                for row in rows:
+                    user = User(row['username'], '', row['email'])
+                    user.password = row['password']
+                    user.salt = row['salt']
+                    user.time_of_available_reset = row['time_of_available_reset']
+                    user.verification_code = row['verification_code']
+                    user.otp_code = row['otp_code']
+                    user.otp_created_time = row['otp_created_time']
+                    users[row['username']] = user
+                return users
+        except Exception as e:
+            print(f"Error getting users: {e}")
+            return {}
 
     def is_exist(self, username, password, email=None):
-        """
-
-        :param username: The username to check.
-        :param password: The password to validate.
-        :return: True if credentials are valid, False otherwise.
-        """
-        self.get_users()
-        with lock:
-            # for multy client use, each is_exist should be the most current
-            if username in self.users.keys() and self.users[username].is_same_password(password):
-                if (email is None) or (email is not None and self.users[username].get_email() == email):
-                    return True
+        """Check if user exists with valid credentials"""
+        try:
+            with lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+                row = cursor.fetchone()
+                
+                if row:
+                    user = User(row['username'], '', row['email'])
+                    user.password = row['password']
+                    user.salt = row['salt']
+                    
+                    if user.is_same_password(password):
+                        if email is None or user.get_email() == email:
+                            return True
+        except Exception as e:
+            print(f"Error in is_exist: {e}")
         return False
 
     def is_username_exist(self, username):
-        with lock:
-            return username in self.users.keys()
+        """Check if username exists"""
+        try:
+            with lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+                return cursor.fetchone() is not None
+        except:
+            return False
 
     def update_info(self, username, new_user_obj):
-        with lock:
-            self.users[username] = new_user_obj
-            self.set_file()
+        """Update user information"""
+        try:
+            with lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    UPDATE users SET 
+                    password = ?,
+                    salt = ?,
+                    email = ?,
+                    time_of_available_reset = ?,
+                    verification_code = ?,
+                    otp_code = ?,
+                    otp_created_time = ?
+                    WHERE username = ?
+                ''', (
+                    new_user_obj.password,
+                    new_user_obj.salt,
+                    new_user_obj.email,
+                    new_user_obj.time_of_available_reset,
+                    new_user_obj.verification_code,
+                    new_user_obj.otp_code,
+                    new_user_obj.otp_created_time,
+                    username
+                ))
+                self.conn.commit()
+        except Exception as e:
+            print(f"Error updating user info: {e}")
 
     def add_user(self, username, password, email):
+        """Add a new user"""
         self.get_users()
-        if not self.is_username_exist(username) and self.get_user_by_email(email) is None \
-                and not self.is_exist(username, password, email):
-            # the User obj does the encryption MD5, salt, pepper..
-            new_user = User(username, password, email)
-            self.update_info(username, new_user)
-            return True
+        if not self.is_username_exist(username) and self.get_user_by_email(email) is None:
+            try:
+                new_user = User(username, password, email)
+                with lock:
+                    cursor = self.conn.cursor()
+                    cursor.execute('''
+                        INSERT INTO users (username, password, salt, email, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (username, new_user.password, new_user.salt, email, time.time()))
+                    self.conn.commit()
+                return True
+            except Exception as e:
+                print(f"Error adding user: {e}")
+                return False
         return False
 
     def get_user_by_email(self, email):
-        for user in self.users.values():
-            if user.get_email() == email:
-                return user
+        """Get user by email"""
+        try:
+            with lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT * FROM users WHERE email = ?', (email,))
+                row = cursor.fetchone()
+                if row:
+                    user = User(row['username'], '', row['email'])
+                    user.password = row['password']
+                    user.salt = row['salt']
+                    return user
+        except:
+            pass
         return None
 
     def get_user_by_username(self, username):
-        for user in self.users.keys():
-            if user == username:
-                return self.users[username]
+        """Get user by username"""
+        try:
+            with lock:
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+                row = cursor.fetchone()
+                if row:
+                    user = User(row['username'], '', row['email'])
+                    user.password = row['password']
+                    user.salt = row['salt']
+                    user.time_of_available_reset = row['time_of_available_reset']
+                    user.verification_code = row['verification_code']
+                    user.otp_code = row['otp_code']
+                    user.otp_created_time = row['otp_created_time']
+                    return user
+        except:
+            pass
         return None
 
 

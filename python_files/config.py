@@ -6,7 +6,7 @@ Update these settings when you change physical locations or network configuratio
 # Server Configuration
 SERVER_HOST = '0.0.0.0'  # Listen on all interfaces
 SERVER_PORT = 23456      # Main TLS connection port
-SERVER_IP = '10.100.102.58'  # Local network IP (update this when you change location)
+SERVER_IP = '192.168.1.61'  # Local network IP (update this when you change location)
 
 # Broadcast Discovery Configuration
 BROADCAST_PORT = 12345   # UDP port for WHRSRV discovery

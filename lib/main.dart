@@ -4,7 +4,10 @@ import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'firebase_options.dart';
+import 'models/item_offering.dart';
 import 'pages/about_page.dart';
+import 'pages/asset_details_page.dart';
+import 'pages/connection_loading_page.dart';
 import 'pages/forgot_password.dart';
 import 'pages/login_screen.dart';
 import 'pages/marketplace_page.dart';
@@ -26,7 +29,10 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  runApp(const MyApp());
+  // Initialize client connection at app startup (before running app)
+  final clientProvider = ClientProvider();
+  
+  runApp(MyApp(initialClientProvider: clientProvider));
 }
 
 /// Clear app cache
@@ -44,10 +50,18 @@ Future<void> clearAppCache() async {
 }
 
 final _router = GoRouter(
-  initialLocation: '/',
+  initialLocation: '/loading',
   routes: [
     GoRoute(
+      path: '/loading',
+      builder: (context, state) => const ConnectionLoadingPage(nextRoute: '/'),
+    ),
+    GoRoute(
       path: '/',
+      builder: (context, state) => const WelcomeScreen(),
+    ),
+    GoRoute(
+      path: '/home',
       builder: (context, state) => const WelcomeScreen(),
     ),
     GoRoute(
@@ -71,6 +85,19 @@ final _router = GoRouter(
       builder: (context, state) => const MarketplacePage(),
     ),
     GoRoute(
+      path: '/marketplace/asset/:id',
+      builder: (context, state) {
+        final extra = state.extra;
+        if (extra != null && extra is ItemOffering) {
+          return AssetDetailsPage(asset: extra);
+        }
+        // Fallback if extra is not passed
+        return const Scaffold(
+          body: Center(child: Text('Asset not found')),
+        );
+      },
+    ),
+    GoRoute(
       path: '/upload-asset',
       builder: (context, state) => const UploadAssetPage(),
     ),
@@ -81,19 +108,43 @@ final _router = GoRouter(
   ],
 );
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class MyApp extends StatefulWidget {
+  final ClientProvider initialClientProvider;
+  
+  const MyApp({super.key, required this.initialClientProvider});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  late ClientProvider _clientProvider;
+
+  @override
+  void initState() {
+    super.initState();
+    _clientProvider = widget.initialClientProvider;
+    // Start connection in background
+    _clientProvider.initializeConnection();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (context) => UserProvider()),
-        ChangeNotifierProvider(create: (context) => ClientProvider()),
+        ChangeNotifierProvider.value(value: _clientProvider),
+        ChangeNotifierProvider(
+          create: (context) {
+            final userProvider = UserProvider();
+            // Initialize UserProvider with local storage on app startup
+            userProvider.initialize();
+            return userProvider;
+          },
+        ),
         ChangeNotifierProvider(create: (context) => SettingsProvider()),
         ChangeNotifierProvider(
           create: (context) => AssetsProvider(
-            clientProvider: Provider.of<ClientProvider>(context, listen: false),
+            clientProvider: _clientProvider,
           ),
         ),
       ],

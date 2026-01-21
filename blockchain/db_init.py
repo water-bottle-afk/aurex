@@ -4,8 +4,12 @@ SQLite Database Initialization for Aurex Blockchain PoW
 
 import sqlite3
 import os
+from pathlib import Path
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'database.sqlite3')
+# Database in parent DB folder
+DB_FOLDER = Path(__file__).parent.parent / "DB"
+DB_FOLDER.mkdir(exist_ok=True)
+DB_PATH = str(DB_FOLDER / "database.sqlite3")
 
 def init_database():
     """Initialize SQLite database with required tables"""

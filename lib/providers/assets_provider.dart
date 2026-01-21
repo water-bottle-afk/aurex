@@ -5,10 +5,10 @@ import 'client_provider.dart';
 class AssetsProvider extends ChangeNotifier {
   final ClientProvider clientProvider;
   
-  List<ItemOffering> _assets = [];
+  final List<ItemOffering> _assets = [];
   bool _isLoading = false;
   bool _hasMoreAssets = true;
-  int _currentPage = 0;
+  String? _lastTimestamp; // Use timestamp-based pagination
   final int _itemsPerPage = 10;
   String? _error;
 
@@ -19,7 +19,7 @@ class AssetsProvider extends ChangeNotifier {
 
   AssetsProvider({required this.clientProvider});
 
-  /// Request next page of assets from server
+  /// Request next page of assets from server using timestamp-based pagination
   Future<void> loadNextPage() async {
     if (_isLoading || !_hasMoreAssets) return;
 
@@ -30,36 +30,41 @@ class AssetsProvider extends ChangeNotifier {
     try {
       final client = clientProvider.client;
 
-      // Request asset list: ASKLST|page|limit
-      final tokens = await client.requestAssetList(_currentPage, _itemsPerPage);
+      // Request asset list with pagination
+      final items = await client.getMarketplaceItemsPaginated(
+        limit: _itemsPerPage,
+        lastTimestamp: _lastTimestamp,
+      );
 
-      if (tokens.isEmpty) {
+      if (items.isEmpty) {
         _hasMoreAssets = false;
       } else {
-        // Convert tokens to ItemOffering objects
-        for (int i = 0; i < tokens.length; i++) {
-          final token = tokens[i];
-          final assetId = token;
+        // Convert items to ItemOffering objects
+        for (int i = 0; i < items.length; i++) {
+          final item = items[i];
           
-          // In production, you would download actual image from URL
-          // For now, create a placeholder asset
           final asset = ItemOffering(
-            id: assetId,
-            title: 'Asset #${_assets.length + 1}',
-            description: 'Blockchain-registered asset',
-            imageUrl: 'assets/images/leather_jacket.png', // Placeholder
-            author: 'Blockchain User',
-            price: 99.99,
-            token: token,
+            id: item['id']?.toString() ?? 'unknown_${_assets.length}',
+            title: item['asset_name'] ?? 'Asset #${_assets.length + 1}',
+            description: item['file_type'] ?? 'Marketplace item',
+            imageUrl: item['url'] ?? 'assets/images/leather_jacket.png',
+            author: item['username'] ?? 'Unknown',
+            price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
+            token: item['id']?.toString() ?? '',
           );
 
           _assets.add(asset);
+          
+          // Update last timestamp for next page - convert to string if needed
+          if (item['timestamp'] != null) {
+            _lastTimestamp = item['timestamp'].toString();
+          }
         }
 
-        _currentPage++;
+        notifyListeners();
 
         // Check if we got fewer items than requested = last page
-        if (tokens.length < _itemsPerPage) {
+        if (items.length < _itemsPerPage) {
           _hasMoreAssets = false;
         }
       }
@@ -79,7 +84,7 @@ class AssetsProvider extends ChangeNotifier {
   /// Reset and reload assets from page 0
   Future<void> refreshAssets() async {
     _assets.clear();
-    _currentPage = 0;
+    _lastTimestamp = null;
     _hasMoreAssets = true;
     _error = null;
     notifyListeners();

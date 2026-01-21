@@ -9,11 +9,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:aurex/main.dart';
+import 'package:aurex/providers/client_provider.dart';
 
 void main() {
   testWidgets('Aurex app initializes and shows login screen', (WidgetTester tester) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(
+      initialClientProvider: ClientProvider(),
+    ));
 
     // Verify that the app initializes with the Material app.
     expect(find.byType(MaterialApp), findsOneWidget);

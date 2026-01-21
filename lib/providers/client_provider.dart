@@ -8,17 +8,18 @@ class ClientProvider with ChangeNotifier {
 
   Client get client => _client;
   bool get isConnecting => _isConnecting;
+  bool get isConnected => _client.isConnected;
   String? get connectionError => _connectionError;
 
-  /// Initialize connection to server with retry logic
-  Future<bool> initializeConnection() async {
+  /// Initialize connection to server with optional discovery
+  Future<bool> connect({bool discoverFirst = true}) async {
     _isConnecting = true;
     _connectionError = null;
     notifyListeners();
 
     try {
-      // Attempt to connect
-      await _client.connect();
+      // Attempt to connect (with or without discovery)
+      await _client.connect(discoverFirst: discoverFirst);
       _isConnecting = false;
       notifyListeners();
       return true;
@@ -28,6 +29,11 @@ class ClientProvider with ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+
+  /// Initialize connection to server with retry logic
+  Future<bool> initializeConnection() async {
+    return await connect(discoverFirst: true);
   }
 
   /// Retry connection (called by Try Again button)
@@ -46,7 +52,9 @@ class ClientProvider with ChangeNotifier {
 
   @override
   void dispose() {
-    _client.close();
+    // DO NOT close the client connection here!
+    // The connection is persistent and shared across the entire app
+    // Only call close() when explicitly disconnecting
     super.dispose();
   }
 }
