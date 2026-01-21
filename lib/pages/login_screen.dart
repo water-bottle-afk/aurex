@@ -17,19 +17,32 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
-  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
 
-  Future<void> _signInWithEmail() async {
+  Future<void> _signInWithUsername() async {
     if (!mounted) return;
 
-    final email = _emailController.text.trim();
+    final username = _usernameController.text.trim();
     final password = _passwordController.text;
 
-    if (email.isEmpty || password.isEmpty) {
+    // Validate fields
+    if (username.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in all fields')),
+        const SnackBar(content: Text('Username cannot be empty')),
+      );
+      return;
+    }
+    if (password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Password cannot be empty')),
+      );
+      return;
+    }
+    if (username.contains('|') || username.contains(' ')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid username format')),
       );
       return;
     }
@@ -39,26 +52,26 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
 
-      // Login via server protocol - sends LOGIN|email|password
-      // Server responds with LOGED or ERR01
-      final result = await clientProvider.client.login(email, password);
+      // Login via server protocol - sends LOGIN|username|password
+      // Server responds with OK|username
+      final result = await clientProvider.client.login(username, password);
 
-      if (result == "success") {
-        // Set user in provider
+      if (result != null) {
+        // Set user in provider with username from server
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
-          email: email,
-          username: email.split('@')[0], // Use email prefix as username
+          username: result,
+          email: '',
         );
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Login successful!')),
+            SnackBar(content: Text('Welcome, $result!')),
           );
           context.go('/marketplace');
         }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invalid email or password')),
+          const SnackBar(content: Text('user not found')),
         );
       }
     } catch (e) {
@@ -109,7 +122,11 @@ class _LoginScreenState extends State<LoginScreen> {
       final UserCredential userCredential =
           await FirebaseAuth.instance.signInWithCredential(credential);
 
-      if (mounted) {
+      if (mounted && userCredential.user != null) {
+        // Get email from Google account
+        final googleEmail = googleUser.email;
+        final googleDisplayName = googleUser.displayName ?? googleEmail.split('@')[0];
+
         // Clear cache on successful login
         await clearAppCache();
 
@@ -121,14 +138,30 @@ class _LoginScreenState extends State<LoginScreen> {
           final clientProvider = Provider.of<ClientProvider>(context, listen: false);
           await clientProvider.initializeConnection();
           print('✅ Client connected to TLS server');
+
+          // For Google Sign-In, use email as identifier
+          Provider.of<UserProvider>(context, listen: false).setLocalUser(
+            email: googleEmail,
+            username: googleDisplayName,
+          );
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Welcome, $googleDisplayName!')),
+            );
+          }
         } catch (e) {
           print('⚠️ Client connection failed: $e');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Server connection issue: $e')),
-          );
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Server connection issue: $e')),
+            );
+          }
         }
 
-        context.go('/marketplace');
+        if (mounted) {
+          context.go('/marketplace');
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -145,7 +178,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   void dispose() {
-    _emailController.dispose();
+    _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -186,9 +219,9 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 32),
                     TextField(
-                      controller: _emailController,
+                      controller: _usernameController,
                       decoration: InputDecoration(
-                        hintText: 'Email',
+                        hintText: 'Username',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide: BorderSide(color: Colors.grey[300]!),
@@ -227,7 +260,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           padding: const EdgeInsets.symmetric(vertical: 16),
                         ),
-                        onPressed: _isLoading ? null : _signInWithEmail,
+                        onPressed: _isLoading ? null : _signInWithUsername,
                         child: _isLoading
                             ? const SizedBox(
                                 height: 20,

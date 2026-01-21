@@ -23,7 +23,6 @@ class SimpleBlockchainManager:
         self.num_nodes = num_nodes
         self.difficulty = difficulty
         self.processes = []
-        self.reported_stopped = set()  # Track which processes we've already reported
         
         print("\n" + "="*70)
         print("⛓️  AUREX BLOCKCHAIN - PoW SYSTEM")
@@ -95,19 +94,14 @@ except Exception as e:
         sys.stdout.flush()
     
     def keep_running(self):
-        """Keep monitoring nodes (but don't spam if already reported)"""
+        """Keep nodes running in separate windows (don't monitor)"""
         try:
             print("[SYSTEM] Running - press Ctrl+C to stop\n", flush=True)
             sys.stdout.flush()
             
+            # Just keep the launcher alive - nodes are in separate windows
             while True:
                 time.sleep(1)
-                # Check if any processes have died (report only once)
-                for node_name, process in self.processes:
-                    if process.poll() is not None and node_name not in self.reported_stopped:
-                        print(f"⚠️  {node_name} has stopped", flush=True)
-                        sys.stdout.flush()
-                        self.reported_stopped.add(node_name)
         
         except KeyboardInterrupt:
             print("\n[SYSTEM] Shutting down...", flush=True)

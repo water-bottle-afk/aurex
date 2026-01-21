@@ -1,8 +1,66 @@
+/// AUREX CLIENT PROTOCOL DOCUMENTATION
+/// =====================================
+/// All client operations and their protocol messages:
+///
+/// 1. START - Connection initialization
+///    Send: START|Client_Flutter_App
+///    Recv: ACCPT|Connection accepted
+///
+/// 2. LOGIN - User authentication (by USERNAME)
+///    Send: LOGIN|username|password
+///    Recv: OK|username or ERR|error_message
+///
+/// 3. SIGNUP - User registration (by USERNAME)
+///    Send: SIGNUP|username|password
+///    Recv: OK or ERR|error_message
+///
+/// 4. SEND_CODE - Request password reset OTP code via username
+///    Send: SEND_CODE|username
+///    Recv: OK|otp_sent or ERR|error_message
+///
+/// 5. VERIFY_CODE - Verify OTP code for password reset
+///    Send: VERIFY_CODE|username|otp_code
+///    Recv: OK|token or ERR|error_message
+///
+/// 6. UPDATE_PASSWORD - Change user password (after OTP verification)
+///    Send: UPDATE_PASSWORD|username|new_password
+///    Recv: OK or ERR|error_message
+///
+/// 7. LOGOUT - User logout
+///    Send: LOGOUT|username
+///    Recv: OK or ERR|error_message
+///
+/// 8. UPLOAD - Upload/register marketplace item (asset)
+///    Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
+///    Recv: OK|asset_id or ERR|error_message
+///
+/// 9. GET_ITEMS - Get all marketplace items
+///    Send: GET_ITEMS
+///    Recv: OK|item1|item2|... or ERR|error_message
+///
+/// 10. GET_ITEMS_PAGINATED - Lazy scrolling with timestamp cursor
+///     Send: GET_ITEMS_PAGINATED|limit[|timestamp]
+///     Recv: OK|item1|item2|... or ERR|error_message
+///
+/// 12. BUY - Purchase an asset from marketplace
+///     Send: BUY|asset_id|username|amount
+///     Recv: OK|transaction_id or ERR|error_message
+///
+/// 13. SEND - Send purchased asset to another user
+///     Send: SEND|asset_id|sender_username|receiver_username
+///     Recv: OK|transaction_id or ERR|error_message
+///
+/// 14. GET_PROFILE - Get user profile (anonymous)
+///     Send: GET_PROFILE|username
+///     Recv: OK|username|email|created_at or ERR|error_message
+library;
+
 import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:logging/logging.dart';
 import 'package:flutter/foundation.dart';
+import 'config.dart';
 
 /// Message event for debugging - tracks sent/received messages
 class MessageEvent {
@@ -25,11 +83,15 @@ class MessageEvent {
 /// Protocol message handler for Blockchain Communication Protocol
 class Client extends ChangeNotifier {
   SecureSocket? _socket;
-  final String host;
-  final int port;
+  late String host;
+  late int port;
   final Logger _logger = Logger('Client');
   bool _isConnected = false;
   bool _isAuthenticated = false;
+
+  // Persistent socket stream and receive buffer
+  StreamSubscription? _socketSubscription;
+  final List<int> _receiveBuffer = [];
 
   // Message tracking for debugging
   final List<MessageEvent> _messageHistory = [];
@@ -39,7 +101,10 @@ class Client extends ChangeNotifier {
   bool get isAuthenticated => _isAuthenticated;
   List<MessageEvent> get messageHistory => List.unmodifiable(_messageHistory);
 
-  Client({this.host = "192.168.1.61", this.port = 23456});
+  Client({String? initialHost, int? initialPort}) {
+    host = initialHost ?? ClientConfig.defaultServerHost;
+    port = initialPort ?? ClientConfig.defaultServerPort;
+  }
 
   /// Push message to screen (helper function to reduce code duplication)
   void pushMessageToScreen({
@@ -58,9 +123,119 @@ class Client extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Connect to server via TLS with START/ACCPT handshake
-  Future<void> connect() async {
+  /// Discover server via broadcast message WHRSRV
+  /// Listens for SRVRSP|ip|port response
+  Future<bool> discoverServer({
+    Duration timeout = ClientConfig.broadcastTimeout,
+    int broadcastPort = ClientConfig.broadcastPort,
+  }) async {
     try {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Discovering server via broadcast...',
+        status: 'pending',
+      );
+
+      final discoveredServer = await _broadcastWhereIsServer(
+        broadcastPort: broadcastPort,
+        timeout: timeout,
+      );
+
+      if (discoveredServer != null) {
+        host = discoveredServer['ip']!;
+        port = discoveredServer['port']!;
+        notifyListeners();
+
+        pushMessageToScreen(
+          type: 'system',
+          message: '🔍 Server discovered at $host:$port',
+          status: 'success',
+        );
+        return true;
+      } else {
+        pushMessageToScreen(
+          type: 'system',
+          message: 'Server discovery timeout - using default server',
+          status: 'pending',
+        );
+        return false;
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Server discovery failed: $e',
+        status: 'error',
+      );
+      return false;
+    }
+  }
+
+  /// Broadcast WHRSRV message and wait for SRVRSP response
+  Future<Map<String, dynamic>?> _broadcastWhereIsServer({
+    int broadcastPort = ClientConfig.broadcastPort,
+    Duration timeout = ClientConfig.broadcastTimeout,
+  }) async {
+    try {
+      final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+
+      // Send WHRSRV broadcast
+      const message = "WHRSRV";
+      final broadcastAddr = InternetAddress("255.255.255.255");
+
+      socket.send(
+        utf8.encode(message),
+        broadcastAddr,
+        broadcastPort,
+      );
+
+      print('📡 Broadcast WHRSRV sent');
+
+      // Listen for response with timeout
+      final future = socket.timeout(timeout);
+
+      try {
+        await for (final event in future) {
+          if (event == RawSocketEvent.read) {
+            final datagram = socket.receive();
+            if (datagram != null) {
+              final response = utf8.decode(datagram.data);
+              print('📡 Received broadcast response: $response');
+
+              if (response.startsWith("SRVRSP|")) {
+                final parts = response.split('|');
+                if (parts.length >= 3) {
+                  socket.close();
+                  return {
+                    'ip': parts[1],
+                    'port': int.parse(parts[2]),
+                  };
+                }
+              }
+            }
+          }
+        }
+      } on TimeoutException {
+        print('📡 Broadcast discovery timeout');
+      }
+
+      socket.close();
+      return null;
+    } catch (e) {
+      print('📡 Broadcast error: $e');
+      return null;
+    }
+  }
+
+  /// Connect to server via TLS with START/ACCPT handshake
+  /// Can optionally discover server first
+  Future<void> connect({bool discoverFirst = true}) async {
+    try {
+      // Try to discover server first if requested
+      if (discoverFirst) {
+        await discoverServer();
+      }
+
       pushMessageToScreen(
         type: 'system',
         message: 'Attempting to connect to $host:$port',
@@ -72,9 +247,9 @@ class Client extends ChangeNotifier {
         port,
         onBadCertificate: (_) => true,
       ).timeout(
-        const Duration(seconds: 3),
+        const Duration(seconds: 10),
         onTimeout: () {
-          throw Exception('Connection timeout after 3 seconds');
+          throw Exception('Connection timeout after 10 seconds - server may be offline');
         },
       );
 
@@ -86,6 +261,9 @@ class Client extends ChangeNotifier {
         message: '🔒 TLS Connected to server',
         status: 'success',
       );
+
+      // Start persistent socket listener BEFORE sending any messages
+      _startSocketListener();
 
       // Send START message for connection initialization
       await _sendStartMessage();
@@ -102,6 +280,19 @@ class Client extends ChangeNotifier {
       notifyListeners();
       rethrow;
     }
+  }
+
+  /// Manually set server address
+  void setServerAddress(String newHost, int newPort) {
+    host = newHost;
+    port = newPort;
+    notifyListeners();
+
+    pushMessageToScreen(
+      type: 'system',
+      message: 'Server address changed to $host:$port',
+      status: 'success',
+    );
   }
 
   /// Send START message for protocol initialization
@@ -153,6 +344,8 @@ class Client extends ChangeNotifier {
     }
 
     try {
+      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
+      
       final messageBytes = utf8.encode(message);
       final lengthPrefix = ByteData(2);
       lengthPrefix.setUint16(0, messageBytes.length, Endian.big);
@@ -161,7 +354,10 @@ class Client extends ChangeNotifier {
       _socket!.add(messageBytes);
       await _socket!.flush();
 
-      print('📤 Sent: $message');
+      // Extract protocol preview for cleaner logging
+      final preview = message.length > 50 ? '${message.substring(0, 50)}...' : message;
+      
+      print('$timestamp - Client - INFO - [SEND] $preview');
 
       pushMessageToScreen(
         type: 'sent',
@@ -169,7 +365,9 @@ class Client extends ChangeNotifier {
         status: 'success',
       );
     } catch (e) {
-      print('❌ Send failed: $e');
+      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
+      print('$timestamp - Client - ERROR - [SEND FAILED] $e');
+      
       pushMessageToScreen(
         type: 'sent',
         message: message,
@@ -187,6 +385,8 @@ class Client extends ChangeNotifier {
     }
 
     try {
+      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
+      
       // Read 2-byte length header
       final lengthBytes = await _readExact(2);
       if (lengthBytes.isEmpty) {
@@ -203,8 +403,10 @@ class Client extends ChangeNotifier {
       }
 
       final message = utf8.decode(messageBytes);
-
-      print('📥 Received: $message');
+      
+      // Extract protocol command and log
+      final preview = message.length > 50 ? '${message.substring(0, 50)}...' : message;
+      print('$timestamp - Client - INFO - [RECV] $preview');
 
       pushMessageToScreen(
         type: 'received',
@@ -214,7 +416,9 @@ class Client extends ChangeNotifier {
 
       return message;
     } catch (e) {
-      print('❌ Receive failed: $e');
+      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
+      print('$timestamp - Client - ERROR - [RECV FAILED] $e');
+      
       pushMessageToScreen(
         type: 'system',
         message: 'Error receiving message: $e',
@@ -224,50 +428,101 @@ class Client extends ChangeNotifier {
     }
   }
 
-  /// Read exact number of bytes from socket
-  Future<Uint8List> _readExact(int numBytes) async {
-    final buffer = BytesBuilder();
-    int remaining = numBytes;
+  /// Start persistent socket listener that buffers all incoming data
+  void _startSocketListener() {
+    if (_socket == null) return;
 
-    try {
-      while (remaining > 0) {
-        // Use .first with timeout to read data without closing stream
-        final data = await _socket!.first.timeout(
-          const Duration(seconds: 10),
-          onTimeout: () {
-            _logger.warning("Timeout reading from socket");
-            return Uint8List(0);
-          },
-        );
+    // Cancel any existing subscription
+    _socketSubscription?.cancel();
 
-        if (data.isEmpty) {
-          _logger.warning("Socket returned empty data");
-          break;
-        }
+    // Start listening to socket and buffer all data
+    _socketSubscription = _socket!.listen(
+      (data) {
+        // Add incoming data to buffer
+        _receiveBuffer.addAll(data);
+      },
+      onError: (error) {
+        _logger.severe("Socket error: $error");
+        _isConnected = false;
+        notifyListeners();
+      },
+      onDone: () {
+        _logger.info("Socket closed by server");
+        _isConnected = false;
+        notifyListeners();
+      },
+    );
+  }
 
-        buffer.add(data);
-        remaining -= data.length;
-      }
-    } catch (e) {
-      _logger.severe("Error in _readExact: $e");
-      return Uint8List(0);
+  /// Validate signup fields - returns error message or null if valid
+  String? _validateSignupFields(String username, String password) {
+    // Check for empty fields
+    if (username.isEmpty) return "Username cannot be empty";
+    if (password.isEmpty) return "Password cannot be empty";
+
+    // Check for pipe characters
+    if (username.contains('|')) return "Username cannot contain '|'";
+    if (password.contains('|')) return "Password cannot contain '|'";
+
+    // Check for leading/trailing spaces
+    if (username != username.trim()) return "Username cannot have leading/trailing spaces";
+    if (password != password.trim()) return "Password cannot have leading/trailing spaces";
+
+    // Username validation: alphanumeric + underscore
+    if (!RegExp(r'^[a-zA-Z0-9_]{3,20}$').hasMatch(username)) {
+      return "Username: 3-20 chars, alphanumeric + underscore only";
     }
 
-    return buffer.toBytes();
+    // Password validation: min 6 chars
+    if (password.length < 6) {
+      return "Password must be at least 6 characters";
+    }
+
+    return null; // All valid
+  }
+
+  /// Read exact number of bytes from buffered socket data
+  Future<Uint8List> _readExact(int numBytes) async {
+    if (_socket == null) {
+      throw Exception("Socket not connected");
+    }
+
+    // Wait until we have enough bytes in buffer
+    while (_receiveBuffer.length < numBytes) {
+      if (!_isConnected) {
+        throw Exception("Connection closed by server");
+      }
+      // Small delay to avoid busy waiting
+      await Future.delayed(const Duration(milliseconds: 10));
+    }
+
+    // Extract bytes from buffer
+    final bytes = Uint8List.fromList(_receiveBuffer.sublist(0, numBytes));
+    _receiveBuffer.removeRange(0, numBytes);
+
+    return bytes;
   }
 
   // ====== AUTHENTICATION METHODS ======
 
-  /// Protocol Message 6: LOGIN
-  /// Send: LOGIN|username|password
-  /// Receive: LOGED|success_message or ERR01|error_message
-  Future<String> login(String username, String password) async {
+  /// Protocol Message: LOGIN (Email-based authentication)
+  /// Send: LOGIN|email|password
+  /// Receive: OK|username|email or ERR|error_message
+  Future<String?> login(String username, String password) async {
     try {
+      // Validate username format
+      if (username.isEmpty || username.contains('|') || username.contains(' ')) {
+        throw Exception("Invalid username format");
+      }
+      if (password.isEmpty || password.contains('|')) {
+        throw Exception("Invalid password format");
+      }
+
       final message = "LOGIN|$username|$password";
 
       pushMessageToScreen(
         type: 'sent',
-        message: message,
+        message: "LOGIN|$username|***",
         status: 'pending',
       );
 
@@ -277,14 +532,27 @@ class Client extends ChangeNotifier {
       final parts = response.split('|');
       final code = parts[0];
 
-      if (code == "LOGED") {
+      if (code == "OK" && parts.length >= 2) {
+        final returnedUsername = parts[1];
+        
         _isAuthenticated = true;
         notifyListeners();
-        return "success";
-      } else if (code.startsWith("ERR")) {
-        return "error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Login successful as $returnedUsername",
+          status: 'success',
+        );
+        return returnedUsername;
+      } else if (code == "ERR") {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Login failed: $errorMsg",
+          status: 'error',
+        );
+        return null;
       }
-      return "unknown";
+      return null;
     } catch (e) {
       pushMessageToScreen(
         type: 'system',
@@ -295,21 +563,35 @@ class Client extends ChangeNotifier {
     }
   }
 
-  /// Protocol Message 5: SGNUP
-  /// Send: SGNUP|username|password|verify_password|email
-  /// Receive: SIGND|success_message or ERR10|error_message
-  Future<String> signUp(
-    String username,
-    String password,
-    String verifyPassword,
-    String email,
-  ) async {
+  /// Protocol Message: SIGNUP (User Registration with field validation)
+  /// Send: SIGNUP|username|password
+  /// Receive: OK|username or ERR|error_message
+  /// 
+  /// Field validation rules:
+  /// - No '|' or leading/trailing spaces
+  /// - Username: alphanumeric (can contain underscore), 3-20 chars
+  /// - Password: min 6 chars
+  Future<String> signUp({
+    required String username,
+    required String password,
+  }) async {
     try {
-      final message = "SGNUP|$username|$password|$verifyPassword|$email";
+      // Client-side field validation
+      final validation = _validateSignupFields(username, password);
+      if (validation != null) {
+        pushMessageToScreen(
+          type: 'system',
+          message: validation,
+          status: 'error',
+        );
+        throw Exception(validation);
+      }
+
+      final message = "SIGNUP|$username|$password";
 
       pushMessageToScreen(
         type: 'sent',
-        message: message,
+        message: "SIGNUP|$username|***",
         status: 'pending',
       );
 
@@ -319,9 +601,21 @@ class Client extends ChangeNotifier {
       final parts = response.split('|');
       final code = parts[0];
 
-      if (code == "SIGND") {
+      if (code == "OK") {
+        final returnedUsername = parts.length > 1 ? parts[1] : username;
+        pushMessageToScreen(
+          type: 'received',
+          message: "Signup successful! Welcome $returnedUsername",
+          status: 'success',
+        );
         return "success";
-      } else if (code.startsWith("ERR")) {
+      } else if (code == "ERR") {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Signup failed: $errorMsg",
+          status: 'error',
+        );
         return "error";
       }
       return "unknown";
@@ -329,222 +623,6 @@ class Client extends ChangeNotifier {
       pushMessageToScreen(
         type: 'system',
         message: 'Signup error: $e',
-        status: 'error',
-      );
-      rethrow;
-    }
-  }
-
-  /// Protocol Message 9: SCODE
-  /// Send: SCODE|email
-  /// Receive: SENTM|success_message or ERR04|error_message
-  Future<String> sendVerificationCode(String email) async {
-    try {
-      final message = "SCODE|$email";
-
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'pending',
-      );
-
-      await sendMessage(message);
-
-      final response = await receiveMessage();
-      final parts = response.split('|');
-      final code = parts[0];
-
-      if (code == "SENTM") {
-        return "success";
-      } else if (code.startsWith("ERR")) {
-        return "error";
-      }
-      return "unknown";
-    } catch (e) {
-      pushMessageToScreen(
-        type: 'system',
-        message: 'Send message error: $e',
-        status: 'error',
-      );
-      rethrow;
-    }
-  }
-
-  /// Protocol Message 10: VRFYC
-  /// Send: VRFYC|email|code
-  /// Receive: VRFYD|success_message or ERR08|error_message
-  Future<String> verifyCode(String email, String code) async {
-    try {
-      final message = "VRFYC|$email|$code";
-
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'pending',
-      );
-
-      await sendMessage(message);
-
-      final response = await receiveMessage();
-      final parts = response.split('|');
-      final code2 = parts[0];
-
-      if (code2 == "VRFYD") {
-        return "success";
-      } else if (code2.startsWith("ERR")) {
-        return "error";
-      }
-      return "unknown";
-    } catch (e) {
-      pushMessageToScreen(
-        type: 'system',
-        message: 'Receive message error: $e',
-        status: 'error',
-      );
-      rethrow;
-    }
-  }
-
-  /// Protocol Message 11: UPDTE
-  /// Send: UPDTE|email|new_password|confirm_password
-  /// Receive: UPDTD|success_message or ERR07|error_message
-  Future<String> updatePassword(
-    String email,
-    String newPassword,
-    String confirmPassword,
-  ) async {
-    try {
-      final message = "UPDTE|$email|$newPassword|$confirmPassword";
-
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'pending',
-      );
-
-      await sendMessage(message);
-
-      final response = await receiveMessage();
-      final parts = response.split('|');
-      final code = parts[0];
-
-      if (code == "UPDTD") {
-        return "success";
-      } else if (code.startsWith("ERR")) {
-        return "error";
-      }
-      return "unknown";
-    } catch (e) {
-      pushMessageToScreen(
-        type: 'system',
-        message: 'Update password error: $e',
-        status: 'error',
-      );
-      rethrow;
-    }
-  }
-
-  /// Protocol Message 7: LGOUT
-  /// Send: LGOUT|empty
-  /// Receive: EXTLG|success_message
-  Future<String> logout() async {
-    try {
-      const message = "LGOUT|";
-
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'pending',
-      );
-
-      await sendMessage(message);
-
-      final response = await receiveMessage();
-      if (response.startsWith("EXTLG")) {
-        _isAuthenticated = false;
-        notifyListeners();
-        return "success";
-      }
-      return "error";
-    } catch (e) {
-      pushMessageToScreen(
-        type: 'system',
-        message: 'Logout error: $e',
-        status: 'error',
-      );
-      rethrow;
-    }
-  }
-
-  /// Protocol Message 12: LGAST
-  /// Send: LGAST|asset_id|asset_name
-  /// Receive: SAVED|success_message or ERR##|error_message
-  Future<String> logAsset(String assetId, String assetName) async {
-    try {
-      final message = "LGAST|$assetId|$assetName";
-
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'pending',
-      );
-
-      await sendMessage(message);
-
-      final response = await receiveMessage();
-      final parts = response.split('|');
-      final code = parts[0];
-
-      if (code == "SAVED") {
-        return "success";
-      } else if (code.startsWith("ERR")) {
-        return "error";
-      }
-      return "unknown";
-    } catch (e) {
-      pushMessageToScreen(
-        type: 'system',
-        message: 'Asset logging error: $e',
-        status: 'error',
-      );
-      rethrow;
-    }
-  }
-
-  /// Protocol Message 13: ASKLST
-  /// Send: ASKLST|page|limit (page starts at 0, limit items per page)
-  /// Receive: ASLIST|token1,token2,token3|total_count or ERR##|error_message
-  Future<List<String>> requestAssetList(int page, int limit) async {
-    try {
-      final message = "ASKLST|$page|$limit";
-
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'pending',
-      );
-
-      await sendMessage(message);
-
-      final response = await receiveMessage();
-      final parts = response.split('|');
-      final code = parts[0];
-
-      if (code == "ASLIST") {
-        // Parse: ASLIST|token1,token2,token3|total_count
-        if (parts.length >= 2) {
-          final tokens = parts[1].split(',').where((t) => t.isNotEmpty).toList();
-          return tokens;
-        }
-        return [];
-      } else if (code.startsWith("ERR")) {
-        throw Exception("Server error: ${parts.length > 1 ? parts[1] : 'Unknown error'}");
-      }
-      return [];
-    } catch (e) {
-      pushMessageToScreen(
-        type: 'system',
-        message: 'Asset list request error: $e',
         status: 'error',
       );
       rethrow;
@@ -571,5 +649,484 @@ class Client extends ChangeNotifier {
         status: 'error',
       );
     }
+  }
+
+  /// Lazy load marketplace items with pagination
+  /// Send: GET_ITEMS_PAGINATED|limit|last_timestamp (optional)
+  /// Receive: OK|items_json or ERR|error_message
+  Future<List<dynamic>> getMarketplaceItemsPaginated({
+    int limit = 10,
+    String? lastTimestamp,
+  }) async {
+    try {
+      final message = lastTimestamp != null
+          ? "GET_ITEMS_PAGINATED|$limit|$lastTimestamp"
+          : "GET_ITEMS_PAGINATED|$limit";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK" && parts.length > 1) {
+        final itemsJson = jsonDecode(parts[1]) as List;
+        pushMessageToScreen(
+          type: 'received',
+          message: "Loaded ${itemsJson.length} items",
+          status: 'success',
+        );
+        return itemsJson;
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Failed to load items: $errorMsg",
+          status: 'error',
+        );
+        return [];
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error loading items: $e',
+        status: 'error',
+      );
+      return [];
+    }
+  }
+
+  /// Send email verification code
+  /// Send: SEND_CODE|email
+  /// Receive: OK or ERR|error_message
+  Future<String> sendVerificationCode(String email) async {
+    try {
+      final message = "SEND_CODE|$email";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Verification code sent to $email",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Failed to send code: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error sending code: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Verify email with code
+  /// Send: VERIFY_CODE|email|code
+  /// Receive: OK or ERR|error_message
+  Future<String> verifyEmailCode(String email, String code) async {
+    try {
+      final message = "VERIFY_CODE|$email|$code";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Email verified successfully",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Verification failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error verifying code: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Upload marketplace item
+  /// Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
+  /// Receive: OK or ERR|error_message
+  Future<String> uploadMarketplaceItem({
+    required String assetName,
+    required String username,
+    required String googleDriveUrl,
+    required String fileType,
+    required double cost,
+  }) async {
+    try {
+      final message =
+          "UPLOAD|$assetName|$username|$googleDriveUrl|$fileType|$cost";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: "UPLOAD|$assetName|$username|...|$fileType|$cost",
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Item uploaded successfully",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Upload failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error uploading item: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Request password reset code via email
+  /// Send: SEND_CODE|email
+  /// Receive: OK or ERR|error_message
+  Future<String> requestPasswordReset(String email) async {
+    try {
+      final message = "SEND_CODE|$email";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Reset code sent to $email",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Reset failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error requesting reset: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Verify password reset code
+  /// Send: VERIFY_CODE|email|code
+  /// Receive: OK or ERR|error_message
+  Future<String> verifyPasswordResetCode(String email, String code) async {
+    try {
+      final message = "VERIFY_CODE|$email|$code";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Code verified",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Verification failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error verifying code: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Update password after OTP verification
+  /// Send: UPDATE_PASSWORD|email|new_password
+  /// Receive: OK or ERR|error_message
+  Future<String> updatePassword(String email, String newPassword) async {
+    try {
+      if (email.isEmpty || newPassword.isEmpty) {
+        throw Exception("Email and password cannot be empty");
+      }
+      if (email.contains('|') || newPassword.contains('|')) {
+        throw Exception("Fields cannot contain '|'");
+      }
+
+      final message = "UPDATE_PASSWORD|$email|$newPassword";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: "UPDATE_PASSWORD|$email|***",
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Password updated successfully",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Password update failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error updating password: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Buy marketplace asset
+  /// Send: BUY|asset_id|username|amount
+  /// Receive: OK|transaction_id or ERR|error_message
+  Future<String> buyAsset({
+    required String assetId,
+    required String username,
+    required double amount,
+  }) async {
+    try {
+      final message = "BUY|$assetId|$username|$amount";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: "BUY|$assetId|$username|$amount",
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        final transactionId = parts.length > 1 ? parts[1] : "unknown";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Asset purchased: $transactionId",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Purchase failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error purchasing asset: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Send purchased asset to another user
+  /// Send: SEND|asset_id|sender_username|receiver_username
+  /// Receive: OK|transaction_id or ERR|error_message
+  Future<String> sendAssetToUser({
+    required String assetId,
+    required String senderUsername,
+    required String receiverUsername,
+  }) async {
+    try {
+      final message = "SEND|$assetId|$senderUsername|$receiverUsername";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK") {
+        final transactionId = parts.length > 1 ? parts[1] : "unknown";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Asset sent to $receiverUsername: $transactionId",
+          status: 'success',
+        );
+        return "success";
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Failed to send asset: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error sending asset: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Get user profile (anonymous - username only)
+  /// Send: GET_PROFILE|username
+  /// Receive: OK|username|email|created_at or ERR|error_message
+  Future<Map<String, String>?> getUserProfile(String username) async {
+    try {
+      if (username.isEmpty || username.contains('|')) {
+        throw Exception("Invalid username");
+      }
+
+      final message = "GET_PROFILE|$username";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: message,
+        status: 'pending',
+      );
+
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK" && parts.length >= 4) {
+        return {
+          'username': parts[1],
+          'email': parts[2],
+          'created_at': parts[3],
+        };
+      } else {
+        throw Exception(parts.length > 1 ? parts[1] : "User not found");
+      }
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error getting user profile: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Disconnect from server and clean up resources
+  void disconnect() {
+    _socketSubscription?.cancel();
+    _socket?.close();
+    _socket = null;
+    _isConnected = false;
+    _isAuthenticated = false;
+    notifyListeners();
+
+    pushMessageToScreen(
+      type: 'system',
+      message: 'Disconnected from server',
+      status: 'success',
+    );
+  }
+
+  @override
+  void dispose() {
+    disconnect();
+    super.dispose();
   }
 }

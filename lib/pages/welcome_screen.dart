@@ -10,39 +10,68 @@ class WelcomeScreen extends StatefulWidget {
   State<WelcomeScreen> createState() => _WelcomeScreenState();
 }
 
-class _WelcomeScreenState extends State<WelcomeScreen> {
-  bool _showLogo = true;
+class _WelcomeScreenState extends State<WelcomeScreen>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animationController;
+  late Animation<double> _fadeAnimation;
+  late Animation<double> _scaleAnimation;
   bool _connectionFailed = false;
 
   @override
   void initState() {
     super.initState();
+    _setupAnimations();
     _initializeConnection();
   }
 
+  void _setupAnimations() {
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    );
+
+    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.8, end: 1).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeOutCubic),
+    );
+
+    _animationController.forward();
+  }
+
   Future<void> _initializeConnection() async {
-    // Show logo for 1 second
-    await Future.delayed(const Duration(seconds: 1));
+    // Wait for animation to complete
+    await Future.delayed(const Duration(milliseconds: 1500));
 
     if (!mounted) return;
 
-    // Try to connect with 5-second timeout
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      final success = await clientProvider.initializeConnection().timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => false,
-      );
+      
+      // Check if already connected (connection started at app level)
+      if (clientProvider.isConnected) {
+        print('✅ Already connected to server');
+        if (mounted) {
+          context.go('/login');
+        }
+        return;
+      }
+      
+      // Wait for connection to complete (started in main.dart)
+      final success = await Future.any([
+        _waitForConnection(clientProvider),
+        Future.delayed(const Duration(seconds: 10), () => false),
+      ]);
 
       if (mounted) {
         if (success) {
-          // Connection successful - navigate to login after 2 seconds
-          await Future.delayed(const Duration(seconds: 2));
+          await Future.delayed(const Duration(seconds: 1));
           if (mounted) {
             context.go('/login');
           }
         } else {
-          // Connection failed - show retry dialog
           setState(() => _connectionFailed = true);
         }
       }
@@ -54,56 +83,78 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     }
   }
 
+  Future<bool> _waitForConnection(ClientProvider clientProvider) async {
+    // Wait up to 10 seconds for connection to be established
+    final startTime = DateTime.now();
+    while (DateTime.now().difference(startTime).inSeconds < 10) {
+      if (clientProvider.isConnected) {
+        return true;
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
+  }
+
   Future<void> _retryConnection() async {
     setState(() => _connectionFailed = false);
 
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      
-      // Show loading
+
       if (!mounted) return;
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (context) => const Dialog(
-          child: Padding(
-            padding: EdgeInsets.all(20),
-            child: Row(
+        builder: (context) => Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                CircularProgressIndicator(),
-                SizedBox(width: 20),
-                Text('Connecting...'),
+                CircularProgressIndicator(
+                  strokeWidth: 3,
+                  valueColor: AlwaysStoppedAnimation(Color(0xFF6366F1)),
+                ),
+                SizedBox(height: 20),
+                Text(
+                  'Reconnecting...',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ],
             ),
           ),
         ),
       );
 
-      // Attempt connection with 5-second timeout
       final success = await clientProvider.retryConnection().timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 10),
         onTimeout: () => false,
       );
 
       if (mounted) {
-        Navigator.pop(context); // Close loading dialog
+        Navigator.pop(context);
 
         if (success) {
-          // Connection successful - navigate to login
           await Future.delayed(const Duration(seconds: 1));
           if (mounted) {
             context.go('/login');
           }
         } else {
-          // Connection failed again - show retry dialog
           setState(() => _connectionFailed = true);
         }
       }
     } catch (e) {
       print('❌ Retry error: $e');
       if (mounted) {
-        Navigator.pop(context, null); // Close loading dialog if still open
+        Navigator.pop(context);
         setState(() => _connectionFailed = true);
       }
     }
@@ -113,22 +164,79 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Connection Failed'),
-        content: const Text(
-          'Unable to connect to the server. Please check your internet connection and try again.',
-        ),
-        actions: [
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _retryConnection();
-            },
-            child: const Text('Retry'),
+      builder: (context) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.wifi_off,
+                  color: Colors.red,
+                  size: 32,
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Connection Failed',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Unable to connect to the server. Please check your internet connection.',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey[600],
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _retryConnection();
+                  },
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    backgroundColor: const Color(0xFF6366F1),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  child: const Text(
+                    'Try Again',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
   }
 
   @override
@@ -138,10 +246,89 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
     }
 
     return Scaffold(
-      body: Center(
-        child: _showLogo
-            ? Image.asset('assets/icons/icon_white.png')
-            : const SizedBox.shrink(),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              const Color(0xFF6366F1),
+              const Color(0xFF6366F1).withOpacity(0.8),
+              const Color(0xFF4F46E5),
+            ],
+          ),
+        ),
+        child: Center(
+          child: ScaleTransition(
+            scale: _scaleAnimation,
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.95),
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.15),
+                          blurRadius: 20,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: Image.asset(
+                      'assets/icons/icon_black.png',
+                      width: 120,
+                      height: 120,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  const Text(
+                    'Aurex',
+                    style: TextStyle(
+                      fontSize: 36,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Blockchain Marketplace',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: Colors.white.withOpacity(0.8),
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  const SizedBox(height: 48),
+                  SizedBox(
+                    width: 50,
+                    height: 50,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 4,
+                      valueColor: AlwaysStoppedAnimation(
+                        Colors.white.withOpacity(0.8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Connecting to server...',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.white.withOpacity(0.7),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

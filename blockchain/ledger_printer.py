@@ -4,9 +4,15 @@ Ledger Printer - Display blockchain data beautifully
 
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
-def print_ledger(db_path='database.sqlite3'):
+# Default to DB folder location
+DEFAULT_DB_PATH = str(Path(__file__).parent.parent / "DB" / "database.sqlite3")
+
+def print_ledger(db_path=None):
     """Print the last 2 blocks from ledger with full details"""
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()

@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../providers/client_provider.dart';
 import '../providers/assets_provider.dart';
 import '../providers/user_provider.dart';
+import '../services/google_drive_image_loader.dart';
 
 class MarketplacePage extends StatefulWidget {
   const MarketplacePage({super.key});
@@ -65,7 +66,8 @@ class _MarketplacePageState extends State<MarketplacePage> {
       
       // Clear user provider
       if (context.mounted) {
-        Provider.of<UserProvider>(context, listen: false).setUser(null);
+        final userProvider = Provider.of<UserProvider>(context, listen: false);
+        await userProvider.clearUserData();
       }
       
       // Clear navigation stack and go to login
@@ -84,16 +86,26 @@ class _MarketplacePageState extends State<MarketplacePage> {
 
   @override
   Widget build(BuildContext context) {
+    final userProvider = Provider.of<UserProvider>(context);
+    final username = userProvider.localUser?.username ?? 
+                     userProvider.user?.email?.split('@')[0] ?? 
+                     'User';
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Marketplace'),
+        title: const Text('Aurex Marketplace'),
+        centerTitle: false,
+        elevation: 0,
+        backgroundColor: Colors.blue[600],
+        foregroundColor: Colors.white,
       ),
-      floatingActionButton: FloatingActionButton(
+      floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
           context.go('/upload-asset');
         },
         backgroundColor: Colors.blue.shade600,
-        child: const Icon(Icons.add),
+        icon: const Icon(Icons.add),
+        label: const Text('Upload'),
       ),
       drawer: Drawer(
         child: ListView(
@@ -103,25 +115,40 @@ class _MarketplacePageState extends State<MarketplacePage> {
               decoration: BoxDecoration(
                 color: Colors.blue.shade600,
               ),
-              child: const Column(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
+                  CircleAvatar(
+                    radius: 28,
+                    backgroundColor: Colors.white,
+                    child: Text(
+                      username[0].toUpperCase(),
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue[600],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   Text(
-                    'Aurex',
-                    style: TextStyle(
+                    username,
+                    style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 28,
+                      fontSize: 18,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-                  SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   Text(
-                    'Marketplace App',
-                    style: TextStyle(
+                    userProvider.localUser?.email ?? 'No email',
+                    style: const TextStyle(
                       color: Colors.white70,
-                      fontSize: 14,
+                      fontSize: 12,
                     ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
@@ -238,21 +265,28 @@ class _MarketplacePageState extends State<MarketplacePage> {
               final item = assetsProvider.assets[index];
               return GestureDetector(
                 onTap: () =>
-                    context.go('/marketplace/item/${item.id}', extra: item),
+                    context.go('/marketplace/asset/${item.id}', extra: item),
                 child: Card(
+                  elevation: 2,
                   clipBehavior: Clip.antiAlias,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Expanded(
-                        child: Image.asset(
-                          item.imageUrl,
-                          fit: BoxFit.cover,
-                          width: double.infinity,
+                        child: Container(
+                          color: Colors.grey[200],
+                          child: GoogleDriveImageLoader.buildCachedImage(
+                            imageUrl: item.imageUrl,
+                            fit: BoxFit.cover,
+                            width: double.infinity,
+                          ),
                         ),
                       ),
                       Padding(
-                        padding: const EdgeInsets.all(8.0),
+                        padding: const EdgeInsets.all(12.0),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -260,27 +294,53 @@ class _MarketplacePageState extends State<MarketplacePage> {
                               item.title,
                               style: const TextStyle(
                                 fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  '\$${item.price.toStringAsFixed(2)}',
+                                  style: TextStyle(
+                                    color: Colors.green[600],
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.blue[50],
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    'View',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.blue[600],
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'by ${item.author}',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.grey[600],
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '\$${item.price.toStringAsFixed(2)}',
-                              style: TextStyle(
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                            ),
-                            if (item.token != null)
-                              Text(
-                                'Token: ${item.token!.substring(0, 8)}...',
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.grey,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
                           ],
                         ),
                       ),

@@ -13,24 +13,24 @@ Supported Commands:
      Send: START|Client_Flutter_App
      Recv: ACCPT|Connection accepted
   
-  2. LOGIN - User authentication (by EMAIL)
-     Send: LOGIN|email|password
-     Recv: OK|username|email or ERR|error_message
+  2. LOGIN - User authentication (by USERNAME)
+     Send: LOGIN|username|password
+     Recv: OK|username or ERR|error_message
   
-  3. SIGNUP - User registration (Anonymous profile, username only)
-     Send: SIGNUP|username|password|email
+  3. SIGNUP - User registration (by USERNAME)
+     Send: SIGNUP|username|password
      Recv: OK or ERR|error_message
   
-  4. SEND_CODE - Request password reset OTP code via email
-     Send: SEND_CODE|email
+  4. SEND_CODE - Request password reset OTP code via username
+     Send: SEND_CODE|username
      Recv: OK|code_sent or ERR|error_message
   
   5. VERIFY_CODE - Verify OTP code for password reset
-     Send: VERIFY_CODE|email|otp_code
+     Send: VERIFY_CODE|username|otp_code
      Recv: OK|token or ERR|error_message
   
   6. UPDATE_PASSWORD - Change user password (after OTP verification)
-     Send: UPDATE_PASSWORD|email|new_password
+     Send: UPDATE_PASSWORD|username|new_password
      Recv: OK or ERR|error_message
   
   7. LOGOUT - User logout
@@ -73,9 +73,9 @@ import time
 from config import (
     SERVER_HOST, SERVER_PORT, SERVER_IP,
     BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
-    LOGGING_LEVEL
+    LOGGING_LEVEL, DATABASE_TYPE
 )
-from classes import PROTO, CustomLogger
+from classes import PROTO, CustomLogger, DB
 
 # Try to import Firebase Admin SDK
 FIREBASE_ENABLED = False
@@ -260,7 +260,11 @@ class ClientSession:
         self.username = None
         self.is_authenticated = False
         self.is_connected = True
-        self.db = FirebaseDB()
+        # Initialize database based on config
+        if DATABASE_TYPE == 'firebase':
+            self.db = FirebaseDB()
+        else:
+            self.db = DB()  # Use SQLite by default
         
         # Message handlers - Protocol Command Mapping
         # Client → Server protocol messages
@@ -306,70 +310,69 @@ class ClientSession:
         return "ACCPT|Connection accepted"
     
     def handle_login(self, params):
-        """Protocol Message: LOGIN - Email/Password authentication
-        Format: LOGIN|email|password
-        Returns: OK|username|email or ERR|error_message
+        """Protocol Message: LOGIN - Username/Password authentication
+        Format: LOGIN|username|password
+        Returns: OK|username or ERR|error_message
         """
         if len(params) < 2:
             self.Print("❌ Invalid login format", 40)
             return "ERR01|Invalid login format"
         
-        email = params[0].strip()
+        username = params[0].strip()
         password = params[1].strip()
         
-        # Validate email format
-        if not email or '|' in email or ' ' in email:
-            self.Print(f"❌ Invalid email format: {email}", 40)
-            return "ERR01|Invalid email format"
+        # Validate username format
+        if not username or '|' in username or ' ' in username:
+            self.Print(f"❌ Invalid username format: {username}", 40)
+            return "ERR01|Invalid username format"
         
         try:
-            # Search users by email
+            # Get user by username
             all_users = self.db.get_users()
             
-            for username, user_obj in all_users.items():
-                if user_obj.get_email() == email:
-                    # Found user with this email, check password
-                    if user_obj.is_same_password(password):
-                        self.username = username
-                        self.is_authenticated = True
-                        self.Print(f"✅ [RECV] LOGIN|{email}|***", 20)
-                        self.Print(f"✅ User {username} ({email}) logged in", 20)
-                        return f"OK|{username}|{email}"
-                    else:
-                        self.Print(f"❌ Wrong password for {email}", 40)
-                        return "ERR01|Invalid email or password"
-            
-            self.Print(f"❌ Email {email} not found in system", 40)
-            return "ERR01|Invalid email or password"
+            if username in all_users:
+                user_obj = all_users[username]
+                # Check password
+                if user_obj.is_same_password(password):
+                    self.username = username
+                    self.is_authenticated = True
+                    self.Print(f"✅ [RECV] LOGIN|{username}|***", 20)
+                    self.Print(f"✅ User {username} logged in", 20)
+                    return f"OK|{username}"
+                else:
+                    self.Print(f"❌ Wrong password for {username}", 40)
+                    return "ERR01|user not found"
+            else:
+                self.Print(f"❌ Username {username} not found in system", 40)
+                return "ERR01|user not found"
         
         except Exception as e:
             self.Print(f"❌ Login error: {e}", 40)
             return f"ERR99|{str(e)}"
     
     def handle_signup(self, params):
-        """Protocol Message: SIGNUP - User registration (Anonymous profile)
-        Format: SIGNUP|username|password|email
+        """Protocol Message: SIGNUP - User registration
+        Format: SIGNUP|username|password
         Returns: OK|username or ERR|error_message
         """
-        if len(params) < 3:
+        if len(params) < 2:
             self.Print("❌ Invalid signup format", 40)
-            return "ERR10|Invalid signup format: SIGNUP|username|password|email"
+            return "ERR10|Invalid signup format: SIGNUP|username|password"
         
         username = params[0].strip()
         password = params[1].strip()
-        email = params[2].strip()
         
         # Validate fields - no pipes or spaces
-        if '|' in username or '|' in password or '|' in email:
+        if '|' in username or '|' in password:
             self.Print(f"❌ Invalid characters in signup fields", 40)
             return "ERR10|Fields cannot contain '|'"
         
-        if username != params[0] or password != params[1] or email != params[2]:
+        if username != params[0] or password != params[1]:
             self.Print(f"❌ Fields have leading/trailing spaces", 40)
             return "ERR10|Fields cannot have leading/trailing spaces"
         
         # Validate inputs
-        if not username or not password or not email:
+        if not username or not password:
             self.Print(f"❌ Missing required fields for signup", 40)
             return "ERR10|Missing required fields"
         
@@ -384,25 +387,15 @@ class ClientSession:
             self.Print(f"❌ Password too short", 40)
             return "ERR10|Password must be at least 6 characters"
         
-        # Email validation
-        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
-            self.Print(f"❌ Invalid email format: {email}", 40)
-            return "ERR10|Invalid email format"
-        
-        # Check if username or email already exists
+        # Check if username already exists
         all_users = self.db.get_users()
         if username in all_users:
             self.Print(f"❌ Username {username} already exists", 40)
-            return "ERR10|Username already taken"
-        
-        for u in all_users.values():
-            if u.get_email() == email:
-                self.Print(f"❌ Email {email} already registered", 40)
-                return "ERR10|Email already registered"
+            return "ERR10|username already exists"
         
         # Create new user (anonymous profile = no profile pic, just username)
-        if self.db.add_user(username, password, email):
-            self.Print(f"✅ User {username} ({email}) signed up", 20)
+        if self.db.add_user(username, password):
+            self.Print(f"✅ User {username} signed up", 20)
             return f"OK|{username}"
         else:
             self.Print(f"❌ Signup failed for {username}", 40)
@@ -551,24 +544,51 @@ class ClientSession:
         return "EXTLG|Logout successful"
     
     def handle_log_asset(self, params):
-        """Protocol Message 12: LGAST - Log asset to blockchain
-        Format: LGAST|asset_id|asset_name
+        """Protocol Message: UPLOAD - Upload marketplace item
+        Format: UPLOAD|asset_name|username|google_drive_url|file_type|cost
         """
         if not self.is_authenticated:
             return "ERR03|Not authenticated"
         
-        if len(params) < 2:
-            return "ERR03|Invalid asset log format"
+        if len(params) < 5:
+            self.Print(f"[RECV] UPLOAD - Invalid format, got {len(params)} params", 40)
+            return "ERR01|Invalid format: UPLOAD|asset_name|username|url|file_type|cost"
         
-        asset_id = params[0].strip()
-        asset_name = params[1].strip()
-        
-        if self.db.add_asset(asset_id, asset_name, self.username):
-            self.Print(f"📦 Asset {asset_id} registered by {self.username}", 20)
-            return "SAVED|Asset saved to blockchain"
-        else:
-            self.Print(f"❌ Failed to save asset {asset_id}", 40)
-            return "ERR03|Failed to save asset"
+        try:
+            asset_name = params[0].strip()
+            username = params[1].strip()
+            url = params[2].strip()
+            file_type = params[3].strip()
+            cost = float(params[4].strip())
+            
+            # Ensure authenticated user is uploading for their own account
+            if username != self.username:
+                return "ERR02|Cannot upload on behalf of another user"
+            
+            # Validate inputs
+            if not asset_name or not username or not url or not file_type or cost < 0:
+                return "ERR01|Invalid parameters"
+            
+            if file_type.lower() not in ['jpg', 'png', 'gif', 'jpeg']:
+                return "ERR01|Invalid file type. Supported: jpg, png, gif, jpeg"
+            
+            # Add to marketplace database
+            from marketplace_db import MarketplaceDB
+            marketplace_db = MarketplaceDB()
+            success, message = marketplace_db.add_marketplace_item(asset_name, username, url, file_type, cost)
+            
+            if success:
+                self.Print(f"✅ Asset uploaded: {asset_name} by {username} - \\${cost}", 20)
+                return f"OK|Asset '{asset_name}' uploaded successfully"
+            else:
+                self.Print(f"❌ Failed to upload asset: {message}", 40)
+                return f"ERR03|{message}"
+                
+        except ValueError as ve:
+            return "ERR01|Invalid cost format"
+        except Exception as e:
+            self.Print(f"❌ Error processing UPLOAD: {e}", 40)
+            return f"ERR99|{str(e)}"
     
     def handle_asset_list(self, params):
         """Protocol Message 13: ASKLST - Request asset list with pagination
@@ -784,8 +804,11 @@ class Server:
         self.clients = {}  # addr -> ClientSession
         self.is_running = False
         
-        # Firebase database
-        self.db = FirebaseDB()
+        # Initialize database based on config
+        if DATABASE_TYPE == 'firebase':
+            self.db = FirebaseDB()
+        else:
+            self.db = DB()  # Use SQLite by default
     
     def _start_broadcast_listener(self):
         """Start listening for WHRSRV (Where's Server) broadcast queries"""

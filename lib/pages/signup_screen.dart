@@ -56,9 +56,12 @@ class _SignupScreenState extends State<SignupScreen> {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
 
       // Sign up via server protocol
-      // Sends: SGNUP|username|password|verify_password|email
-      // Server responds with SIGND or ERR10
-      final result = await clientProvider.client.signUp(username, password, password, email);
+      // Sends: SIGNUP|username|password
+      // Server responds with OK or ERR
+      final result = await clientProvider.client.signUp(
+        username: username,
+        password: password,
+      );
 
       if (result == "success") {
         // Set user in provider
@@ -130,14 +133,24 @@ class _SignupScreenState extends State<SignupScreen> {
         // Clear cache on successful signup
         await clearAppCache();
 
-        // Set user in provider (Firebase user)
+        // Extract username from Google email (first part before @)
+        final googleEmail = googleUser.email;
+        final googleDisplayName = googleUser.displayName ?? googleEmail.split('@')[0];
+
+        // Set Firebase user in provider
         Provider.of<UserProvider>(context, listen: false).setUser(userCredential.user);
+        
+        // Set local user with proper username
+        Provider.of<UserProvider>(context, listen: false).setLocalUser(
+          email: googleEmail,
+          username: googleDisplayName,
+        );
         
         // Initialize client connection to server
         try {
           final clientProvider = Provider.of<ClientProvider>(context, listen: false);
           await clientProvider.initializeConnection();
-          print('✅ Client connected to TLS server');
+          print('✅ Client connected to TLS server via Google Sign-up');
         } catch (e) {
           print('⚠️ Client connection failed: $e');
           ScaffoldMessenger.of(context).showSnackBar(
@@ -145,7 +158,12 @@ class _SignupScreenState extends State<SignupScreen> {
           );
         }
 
-        context.go('/marketplace');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Welcome, $googleDisplayName!')),
+          );
+          context.go('/marketplace');
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -191,7 +209,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     child: Container(
                       width: 50,
                       height: 50,
-                      decoration: BoxDecoration(
+                      decoration: const BoxDecoration(
                         color: Colors.white,
                         shape: BoxShape.circle,
                       ),
