@@ -7,7 +7,7 @@ Message format: KEYWORD|arg1|arg2|arg3...
 import json
 import random
 from datetime import datetime, timedelta
-from marketplace_db import MarketplaceDB
+from DB_ORM import MarketplaceDB
 
 # Initialize database
 db = MarketplaceDB()
@@ -289,30 +289,82 @@ def process_message(message_str):
 
 
 if __name__ == "__main__":
-    # Test the handlers with pipe-delimited messages
-    print("Testing Marketplace Server Handlers (Pipe-Delimited Format)\n")
+    print("=" * 60)
+    print("INITIALIZING MARKETPLACE WITH SAMPLE DATA")
+    print("=" * 60 + "\n")
     
-    # Test SIGNUP
-    print("1. SIGNUP request:")
-    result = process_message("SIGNUP|testuser|password123|test@example.com")
-    print(f"   Input:  SIGNUP|testuser|password123|test@example.com")
-    print(f"   Output: {result}\n")
+    # Sample data to insert
+    sample_assets = [
+        {
+            "asset_name": "deer",
+            "url": "https://drive.google.com/file/d/1Ixi3AvnhT1-gcQ-hMlEs6NzDKbZo9utH/view?usp=drive_link",
+            "file_type": "image",
+            "cost": 9.99
+        },
+        {
+            "asset_name": "honeybird",
+            "url": "https://drive.google.com/file/d/165BGZAhaZktLEWBoh_9hH4Y3HL1tUFhj/view?usp=drive_link",
+            "file_type": "image",
+            "cost": 7.99
+        },
+        {
+            "asset_name": "jerusalem",
+            "url": "https://drive.google.com/file/d/1lyXgwhcrIS_kXojaRxez_yR_QTGQi1xA/view?usp=drive_link",
+            "file_type": "image",
+            "cost": 12.99
+        },
+        {
+            "asset_name": "lion",
+            "url": "https://drive.google.com/file/d/1MksCKh0shfHfw4fMcY1vkoZ0WIEeUHzG/view?usp=drive_link",
+            "file_type": "image",
+            "cost": 10.99
+        },
+        {
+            "asset_name": "tiger",
+            "url": "https://drive.google.com/file/d/1tGPKxi8ivjNwoNCirgeEBhTeW47qQWcE/view?usp=drive_link",
+            "file_type": "image",
+            "cost": 11.99
+        },
+        {
+            "asset_name": "wolf",
+            "url": "https://drive.google.com/file/d/17BLlyH7BY_T0-7Rxp6ciM59JrURfww7i/view?usp=drive_link",
+            "file_type": "image",
+            "cost": 10.99
+        }
+    ]
     
-    # Test LOGIN
-    print("2. LOGIN request:")
-    result = process_message("LOGIN|testuser|password123")
-    print(f"   Input:  LOGIN|testuser|password123")
-    print(f"   Output: {result}\n")
+    # Create demo admin user if doesn't exist
+    print("1. Creating demo admin user...")
+    result = process_message("SIGNUP|admin|admin123|admin@aurex.com")
+    print(f"   {result}\n")
     
-    # Test GET_ITEMS
-    print("3. GET_ITEMS request:")
-    result = process_message("GET_ITEMS")
-    print(f"   Input:  GET_ITEMS")
-    output = result.split('|', 1)
-    print(f"   Output: {output[0]}|{len(output)} items\n")
+    # Insert sample assets
+    print("2. Inserting sample marketplace assets...\n")
+    for asset in sample_assets:
+        success, message = db.add_marketplace_item(
+            asset_name=asset["asset_name"],
+            username="admin",
+            url=asset["url"],
+            file_type=asset["file_type"],
+            cost=asset["cost"]
+        )
+        status = "✓" if success else "✗"
+        print(f"   {status} {asset['asset_name'].capitalize():15} - ${asset['cost']} - {message}")
     
-    # Test GET_ITEM
-    print("4. GET_ITEM request:")
-    result = process_message("GET_ITEM|1")
-    print(f"   Input:  GET_ITEM|1")
-    print(f"   Output: {result}\n")
+    print("\n" + "=" * 60)
+    print("3. Fetching all marketplace items...")
+    print("=" * 60 + "\n")
+    
+    # Get and display all items
+    all_items = db.get_all_items()
+    if all_items:
+        print(f"Total items in marketplace: {len(all_items)}\n")
+        for item in all_items:
+            print(f"  ID: {item['id']}")
+            print(f"  Asset: {item['asset_name']}")
+            print(f"  Seller: {item['username']}")
+            print(f"  Price: ${item['cost']}")
+            print(f"  Type: {item['file_type']}")
+            print(f"  URL: {item['url'][:60]}...")
+            print(f"  Created: {item['created_at']}")
+            print()
