@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -54,23 +53,13 @@ class _MarketplacePageState extends State<MarketplacePage> {
 
   Future<void> _handleLogout(BuildContext context) async {
     try {
-      // Disconnect from TLS server
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
       await clientProvider.disconnect();
-      
-      // Sign out from Firebase
-      await FirebaseAuth.instance.signOut();
-      
-      // Sign out from Google (clears cached account)
       await _googleSignIn.signOut();
-      
-      // Clear user provider
       if (context.mounted) {
         final userProvider = Provider.of<UserProvider>(context, listen: false);
         await userProvider.clearUserData();
       }
-      
-      // Clear navigation stack and go to login
       if (context.mounted) {
         context.go('/login');
       }

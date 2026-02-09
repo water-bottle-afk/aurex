@@ -1,8 +1,6 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
-
 import '../providers/user_provider.dart';
 
 class ProfilePage extends StatelessWidget {
@@ -11,41 +9,44 @@ class ProfilePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
-    final user = userProvider.user;
+    final localUser = userProvider.localUser;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Profile')),
-      body: user != null ? _buildUserProfile(context, user) : _buildLoginPrompt(context),
+      body: localUser != null
+          ? _buildUserProfile(context, localUser)
+          : _buildLoginPrompt(context),
     );
   }
 
-  Widget _buildUserProfile(BuildContext context, User user) {
+  Widget _buildUserProfile(BuildContext context, UserModel localUser) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           CircleAvatar(
             radius: 50,
-            backgroundImage: NetworkImage(user.photoURL ?? ''),
+            backgroundColor: Colors.blue,
+            child: Text(
+              (localUser.username.isNotEmpty ? localUser.username[0] : '?').toUpperCase(),
+              style: const TextStyle(fontSize: 36, color: Colors.white),
+            ),
           ),
           const SizedBox(height: 20),
           Text(
-            user.displayName ?? 'No Name',
+            localUser.username,
             style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 10),
           Text(
-            user.email ?? '',
+            localUser.email,
             style: const TextStyle(fontSize: 16, color: Colors.grey),
           ),
           const SizedBox(height: 30),
           ElevatedButton(
             onPressed: () async {
-              await FirebaseAuth.instance.signOut();
-              // ignore: use_build_context_synchronously
-              Provider.of<UserProvider>(context, listen: false).setUser(null);
-              // ignore: use_build_context_synchronously
-              context.go('/login');
+              await Provider.of<UserProvider>(context, listen: false).clearUserData();
+              if (context.mounted) context.go('/login');
             },
             child: const Text('Sign Out'),
           ),
@@ -65,9 +66,7 @@ class ProfilePage extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           ElevatedButton(
-            onPressed: () {
-              context.go('/login');
-            },
+            onPressed: () => context.go('/login'),
             child: const Text('Login'),
           ),
         ],

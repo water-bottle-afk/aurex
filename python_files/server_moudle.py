@@ -1,6 +1,6 @@
 """
-Aurex Blockchain Server - Handles client connections and Firebase data management
-Optimized architecture: One persistent connection per client, event-based processing
+Aurex Blockchain Server - Handles client connections and marketplace (ORM: DB/marketplace.db)
+One persistent connection per client, event-based processing
 
 PROTOCOL SPECIFICATION
 ======================
@@ -60,189 +60,34 @@ Supported Commands:
   13. GET_PROFILE - Get user profile (anonymous - username only)
       Send: GET_PROFILE|username
       Recv: OK|username|email|created_at or ERR|error_message
+
+  14. GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in)
+      Send: GET_USER_BY_EMAIL|email
+      Recv: OK|username or ERR|error_message
 """
 
 import datetime
-import hashlib
+import json
+import logging
 import random
 import socket
 import ssl as ssl_module
-import os
 import threading
 import time
 from config import (
     SERVER_HOST, SERVER_PORT, SERVER_IP,
     BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
-    LOGGING_LEVEL, DATABASE_TYPE
+    LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
 )
-from classes import PROTO, CustomLogger, DB
+from classes import PROTO, CustomLogger
+from DB_ORM import MarketplaceDB
 
-# Try to import Firebase Admin SDK
-FIREBASE_ENABLED = False
-firebase_db = None
-
-try:
-    import firebase_admin
-    from firebase_admin import credentials, db as firebase_db_module
-    
-    # Get the path to serviceAccountKey.json relative to this script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    key_path = os.path.join(script_dir, 'serviceAccountKey.json')
-    
-    # Initialize Firebase
-    cred = credentials.Certificate(key_path)
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://aurex-blockchain-transactions-default-rtdb.firebaseio.com'
-    })
-    firebase_db = firebase_db_module
-    FIREBASE_ENABLED = True
-    print(f"✅ Firebase initialized successfully from {key_path}")
-except ImportError:
-    print("⚠️ firebase-admin not installed. Install with: pip install firebase-admin")
-except FileNotFoundError as e:
-    print(f"⚠️ serviceAccountKey.json not found at {key_path}. Using in-memory database.")
-except Exception as e:
-    print(f"⚠️ Firebase initialization failed: {e}. Using in-memory database.")
-
-
-class FirebaseDB:
-    """Wrapper for Firebase Realtime Database operations"""
-    
-    def create_user(self, username, email, password):
-        """Create a new user with hashed password"""
-        try:
-            # Hash password with SHA256
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            
-            if FIREBASE_ENABLED:
-                # Check if user exists
-                user_ref = firebase_db.reference(f'/users/{username}')
-                if user_ref.get() is not None:
-                    return False
-                
-                # Create user in Firebase
-                user_ref.set({
-                    'username': username,
-                    'email': email,
-                    'password_hash': password_hash,
-                    'created_at': datetime.datetime.now().isoformat(),
-                    'verified': False,
-                })
-                return True
-            else:
-                # Fallback: in-memory storage
-                if not hasattr(self, '_users'):
-                    self._users = {}
-                if username in self._users:
-                    return False
-                self._users[username] = {
-                    'email': email,
-                    'password_hash': password_hash,
-                    'created_at': datetime.datetime.now().isoformat(),
-                }
-                return True
-        except Exception as e:
-            print(f"❌ Error creating user: {e}")
-            return False
-    
-    def get_user(self, username):
-        """Get user data"""
-        try:
-            if FIREBASE_ENABLED:
-                user_ref = firebase_db.reference(f'/users/{username}')
-                return user_ref.get()
-            else:
-                if not hasattr(self, '_users'):
-                    self._users = {}
-                return self._users.get(username)
-        except Exception as e:
-            print(f"❌ Error getting user: {e}")
-            return None
-    
-    def verify_password(self, username, password):
-        """Verify user password"""
-        try:
-            user = self.get_user(username)
-            if not user:
-                return False
-            
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            return user.get('password_hash') == password_hash
-        except Exception as e:
-            print(f"❌ Error verifying password: {e}")
-            return False
-    
-    def add_asset(self, asset_id, asset_name, username):
-        """Register asset in blockchain"""
-        try:
-            if FIREBASE_ENABLED:
-                asset_ref = firebase_db.reference(f'/assets/{asset_id}')
-                asset_ref.set({
-                    'name': asset_name,
-                    'owner': username,
-                    'created_at': datetime.datetime.now().isoformat(),
-                    'token': asset_id,
-                })
-                
-                # Add to user's assets
-                user_assets_ref = firebase_db.reference(f'/users/{username}/assets/{asset_id}')
-                user_assets_ref.set(True)
-                return True
-            else:
-                if not hasattr(self, '_assets'):
-                    self._assets = {}
-                    self._user_assets = {}
-                
-                self._assets[asset_id] = {
-                    'name': asset_name,
-                    'owner': username,
-                    'created_at': datetime.datetime.now().isoformat(),
-                }
-                if username not in self._user_assets:
-                    self._user_assets[username] = []
-                self._user_assets[username].append(asset_id)
-                return True
-        except Exception as e:
-            print(f"❌ Error adding asset: {e}")
-            return False
-    
-    def get_user_assets(self, username, page=0, limit=10):
-        """Get paginated asset list for user"""
-        try:
-            if FIREBASE_ENABLED:
-                user_assets_ref = firebase_db.reference(f'/users/{username}/assets')
-                assets = user_assets_ref.get()
-                if not assets:
-                    return []
-                asset_ids = list(assets.keys())
-                start = page * limit
-                end = start + limit
-                return asset_ids[start:end]
-            else:
-                if not hasattr(self, '_user_assets'):
-                    self._user_assets = {}
-                assets = self._user_assets.get(username, [])
-                start = page * limit
-                end = start + limit
-                return assets[start:end]
-        except Exception as e:
-            print(f"❌ Error getting user assets: {e}")
-            return []
-    
-    def get_total_assets(self, username):
-        """Get total asset count for user"""
-        try:
-            if FIREBASE_ENABLED:
-                user_assets_ref = firebase_db.reference(f'/users/{username}/assets')
-                assets = user_assets_ref.get()
-                return len(assets) if assets else 0
-            else:
-                if not hasattr(self, '_user_assets'):
-                    self._user_assets = {}
-                return len(self._user_assets.get(username, []))
-        except Exception as e:
-            print(f"❌ Error getting asset count: {e}")
-            return 0
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+server_logger = logging.getLogger('server')
 
 
 class ClientSession:
@@ -260,30 +105,23 @@ class ClientSession:
         self.username = None
         self.is_authenticated = False
         self.is_connected = True
-        # Initialize database based on config
-        if DATABASE_TYPE == 'firebase':
-            self.db = FirebaseDB()
-        else:
-            self.db = DB()  # Use SQLite by default
-        
-        # Message handlers - Protocol Command Mapping
-        # Client → Server protocol messages
+        self.db = MarketplaceDB()  # ORM: DB/marketplace.db (users + marketplace_items)
+
         self.handlers = {
-            # Connection & Auth
-            "START": self.handle_start,                         # Connection initialization
-            "LOGIN": self.handle_login,                         # User login by username
-            "SIGNUP": self.handle_signup,                       # User registration (anonymous)
-            "SEND_CODE": self.handle_send_code,                # Request OTP code for password reset
-            "VERIFY_CODE": self.handle_verify_code,           # Verify OTP code
-            "UPDATE_PASSWORD": self.handle_update_password,   # Change password
-            "LOGOUT": self.handle_logout,                       # User logout
-            # Marketplace Operations
-            "UPLOAD": self.handle_log_asset,                    # Upload/list marketplace item
-            "GET_ITEMS": self.handle_asset_list,               # Get all marketplace items
-            "GET_ITEMS_PAGINATED": self.handle_get_items_paginated,  # Lazy scroll with cursor
-            "BUY": self.handle_buy_asset,                       # Purchase an asset
-            "SEND": self.handle_send_asset,                     # Send asset to another user
-            "GET_PROFILE": self.handle_get_profile,             # Get user profile (anonymous)
+            "START": self.handle_start,
+            "LOGIN": self.handle_login,
+            "SIGNUP": self.handle_signup,
+            "GET_USER_BY_EMAIL": self.handle_get_user_by_email,
+            "SEND_CODE": self.handle_send_code,
+            "VERIFY_CODE": self.handle_verify_code,
+            "UPDATE_PASSWORD": self.handle_update_password,
+            "LOGOUT": self.handle_logout,
+            "UPLOAD": self.handle_log_asset,
+            "GET_ITEMS": self.handle_asset_list,
+            "GET_ITEMS_PAGINATED": self.handle_get_items_paginated,
+            "BUY": self.handle_buy_asset,
+            "SEND": self.handle_send_asset,
+            "GET_PROFILE": self.handle_get_profile,
         }
     
     def process_message(self, message):
@@ -327,25 +165,15 @@ class ClientSession:
             return "ERR01|Invalid username format"
         
         try:
-            # Get user by username
-            all_users = self.db.get_users()
-            
-            if username in all_users:
-                user_obj = all_users[username]
-                # Check password
-                if user_obj.is_same_password(password):
-                    self.username = username
-                    self.is_authenticated = True
-                    self.Print(f"✅ [RECV] LOGIN|{username}|***", 20)
-                    self.Print(f"✅ User {username} logged in", 20)
-                    return f"OK|{username}"
-                else:
-                    self.Print(f"❌ Wrong password for {username}", 40)
-                    return "ERR01|user not found"
-            else:
-                self.Print(f"❌ Username {username} not found in system", 40)
-                return "ERR01|user not found"
-        
+            user_obj = self.db.get_user(username)
+            if user_obj and user_obj.verify_password(password):
+                self.username = username
+                self.is_authenticated = True
+                self.Print(f"✅ [RECV] LOGIN|{username}|***", 20)
+                self.Print(f"✅ User {username} logged in", 20)
+                return f"OK|{username}"
+            self.Print(f"❌ Invalid credentials for {username}", 40)
+            return "ERR01|user not found"
         except Exception as e:
             self.Print(f"❌ Login error: {e}", 40)
             return f"ERR99|{str(e)}"
@@ -387,20 +215,31 @@ class ClientSession:
             self.Print(f"❌ Password too short", 40)
             return "ERR10|Password must be at least 6 characters"
         
-        # Check if username already exists
-        all_users = self.db.get_users()
-        if username in all_users:
-            self.Print(f"❌ Username {username} already exists", 40)
-            return "ERR10|username already exists"
-        
-        # Create new user (anonymous profile = no profile pic, just username)
-        if self.db.add_user(username, password):
+        email = f"{username}@aurex.local"
+        success, message = self.db.add_user(username, password, email)
+        if success:
             self.Print(f"✅ User {username} signed up", 20)
             return f"OK|{username}"
-        else:
-            self.Print(f"❌ Signup failed for {username}", 40)
-            return "ERR99|Signup failed"
-    
+        self.Print(f"❌ Signup failed: {message}", 40)
+        return f"ERR10|{message}"
+
+    def handle_get_user_by_email(self, params):
+        """GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in).
+        Format: GET_USER_BY_EMAIL|email
+        Returns: OK|username or ERR|error_message
+        """
+        if len(params) < 1:
+            return "ERR01|Invalid format: GET_USER_BY_EMAIL|email"
+        email = params[0].strip()
+        if not email or '|' in email:
+            return "ERR01|Invalid email format"
+        user_obj = self.db.get_user_by_email(email)
+        if user_obj:
+            self.Print(f"✅ User by email {email}: {user_obj.username}", 20)
+            return f"OK|{user_obj.username}"
+        self.Print(f"❌ No user for email {email}", 40)
+        return "ERR02|User not found"
+
     def handle_send_code(self, params):
         """Protocol Message: SEND_CODE - Send OTP code for password reset
         Format: SEND_CODE|email
@@ -412,39 +251,21 @@ class ClientSession:
         
         email = params[0].strip()
         
-        # Validate email format
         if not email or '|' in email or ' ' in email:
             self.Print(f"❌ Invalid email format", 40)
             return "ERR04|Invalid email format"
-        
-        # Find user by email
-        all_users = self.db.get_users()
-        user_obj = None
-        username = None
-        
-        for uname, u in all_users.items():
-            if u.get_email() == email:
-                user_obj = u
-                username = uname
-                break
-        
+        user_obj = self.db.get_user_by_email(email)
         if not user_obj:
             self.Print(f"❌ Email {email} not registered", 40)
             return "ERR04|Email not found in system"
-        
-        # Generate OTP
-        otp = user_obj.generate_otp()
+        otp = str(random.randint(100000, 999999))
+        user_obj.set_verification_code(otp)
+        user_obj.set_reset_time((datetime.datetime.now() + datetime.timedelta(minutes=5)).isoformat())
+        self.db.update_user(user_obj.username, user_obj)
         self.Print(f"📧 Generated OTP {otp} for {email}", 20)
-        
-        # TODO: In production, send real email with OTP
-        # For now, log it to console
         self.Print(f"🔐 [DEV] OTP Code: {otp}", 30)
-        
-        # Update user in database
-        self.db.update_info(username, user_obj)
-        
         return "OK|otp_sent"
-    
+
     def handle_verify_code(self, params):
         """Protocol Message: VERIFY_CODE - Verify OTP code
         Format: VERIFY_CODE|email|otp_code
@@ -457,38 +278,21 @@ class ClientSession:
         email = params[0].strip()
         otp_code = params[1].strip()
         
-        # Validate inputs
         if not email or not otp_code or '|' in email or '|' in otp_code:
             self.Print(f"❌ Invalid verify code inputs", 40)
             return "ERR08|Invalid input format"
-        
-        # Find user by email
-        all_users = self.db.get_users()
-        user_obj = None
-        username = None
-        
-        for uname, u in all_users.items():
-            if u.get_email() == email:
-                user_obj = u
-                username = uname
-                break
-        
+        user_obj = self.db.get_user_by_email(email)
         if not user_obj:
             self.Print(f"❌ Email {email} not found", 40)
             return "ERR08|Email not found"
-        
-        # Verify OTP
-        if user_obj.verify_otp(otp_code):
+        if user_obj.is_code_match_and_available(datetime.datetime.now(), otp_code):
+            user_obj.is_verified = True
+            self.db.update_user(user_obj.username, user_obj)
             self.Print(f"✅ OTP verified for {email}", 20)
-            # Update user in database
-            self.db.update_info(username, user_obj)
-            # Generate reset token
-            token = f"RESET_{username}_{int(time.time())}"
-            return f"OK|{token}"
-        else:
-            self.Print(f"❌ Invalid or expired OTP for {email}", 40)
-            return "ERR08|Invalid or expired OTP"
-    
+            return f"OK|RESET_{user_obj.username}_{int(time.time())}"
+        self.Print(f"❌ Invalid or expired OTP for {email}", 40)
+        return "ERR08|Invalid or expired OTP"
+
     def handle_update_password(self, params):
         """Protocol Message: UPDATE_PASSWORD - Change user password (after OTP verification)
         Format: UPDATE_PASSWORD|email|new_password
@@ -501,38 +305,21 @@ class ClientSession:
         email = params[0].strip()
         new_password = params[1].strip()
         
-        # Validate inputs
         if not email or not new_password or '|' in email or '|' in new_password:
             self.Print(f"❌ Invalid password update inputs", 40)
             return "ERR07|Invalid input format"
-        
-        # Password must be min 6 chars
         if len(new_password) < 6:
             self.Print(f"❌ New password too short", 40)
             return "ERR07|Password must be at least 6 characters"
-        
-        # Find user by email
-        all_users = self.db.get_users()
-        user_obj = None
-        username = None
-        
-        for uname, u in all_users.items():
-            if u.get_email() == email:
-                user_obj = u
-                username = uname
-                break
-        
+        user_obj = self.db.get_user_by_email(email)
         if not user_obj:
             self.Print(f"❌ Email {email} not found", 40)
             return "ERR07|Email not found"
-        
-        # Update password
         user_obj.set_password(new_password)
-        self.db.update_info(username, user_obj)
-        
+        self.db.update_user(user_obj.username, user_obj)
         self.Print(f"🔑 Password updated for {email}", 20)
         return "OK|Password updated successfully"
-    
+
     def handle_logout(self, params):
         """Protocol Message 7: LGOUT - Logout
         Format: LGOUT|
@@ -572,8 +359,7 @@ class ClientSession:
             if file_type.lower() not in ['jpg', 'png', 'gif', 'jpeg']:
                 return "ERR01|Invalid file type. Supported: jpg, png, gif, jpeg"
             
-            # Add to marketplace database
-            from marketplace_db import MarketplaceDB
+            # Add to marketplace database (ORM: DB/marketplace.db)
             marketplace_db = MarketplaceDB()
             success, message = marketplace_db.add_marketplace_item(asset_name, username, url, file_type, cost)
             
@@ -605,26 +391,21 @@ class ClientSession:
             limit = int(params[1].strip())
         except ValueError:
             return "ERR02|Invalid page/limit parameters"
-        
-        assets = self.db.get_user_assets(self.username, page, limit)
-        total = self.db.get_total_assets(self.username)
-        
-        # Format: ASLIST|token1,token2,...|total_count
-        tokens = ','.join(assets) if assets else ''
+        items = self.db.get_items_by_username(self.username)
+        start = page * limit
+        end = start + limit
+        page_items = items[start:end]
+        tokens = ','.join(str(it['id']) for it in page_items)
+        total = len(items)
         response = f"ASLIST|{tokens}|{total}"
-        
-        self.Print(f"📋 Asset list requested (page {page}): {len(assets)} assets", 20)
+        self.Print(f"📋 Asset list requested (page {page}): {len(page_items)} assets", 20)
         return response
 
     def handle_get_items_paginated(self, params):
         """Protocol Message: GET_ITEMS_PAGINATED - Get marketplace items with pagination
-        Format: GET_ITEMS_PAGINATED|limit[|lastTimestamp]
-        
-        Lazy scrolling: Client sends cursor (lastTimestamp) to get next batch
-        Server returns items with timestamps so client can request next batch
+        Format: GET_ITEMS_PAGINATED|limit[|lastTimestamp] (lastTimestamp = ISO string from last item)
         """
         import json
-        from marketplace_db import MarketplaceDB
         
         if len(params) < 1:
             self.Print(f"[RECV] GET_ITEMS_PAGINATED - Invalid format", 40)
@@ -632,56 +413,32 @@ class ClientSession:
         
         try:
             limit = int(params[0].strip())
-            lastTimestamp = None
+            lastTimestamp = params[1].strip() if len(params) > 1 and params[1].strip() else None
             
-            if len(params) > 1 and params[1].strip():
-                lastTimestamp = float(params[1].strip())
-            
-            # Log incoming request
             self.Print(f"[RECV] GET_ITEMS_PAGINATED|{limit}|{lastTimestamp}", 20)
             
-            # Query marketplace database
             try:
                 db = MarketplaceDB()
-                
                 if lastTimestamp:
-                    # Get items before this timestamp for pagination
                     items = db.get_items_before_timestamp(lastTimestamp, limit)
                 else:
-                    # Get latest items
                     items = db.get_latest_items(limit)
                 
                 if items:
-                    # Convert tuples/rows to dictionaries
-                    items_list = []
-                    for item in items:
-                        # Assuming item is a tuple: (id, asset_name, username, url, cost, file_type, timestamp)
-                        if isinstance(item, dict):
-                            items_list.append(item)
-                        elif isinstance(item, (tuple, list)) and len(item) >= 7:
-                            items_list.append({
-                                'id': item[0],
-                                'asset_name': item[1],
-                                'username': item[2],
-                                'url': item[3],
-                                'cost': item[4],
-                                'file_type': item[5],
-                                'timestamp': item[6]
-                            })
-                    
+                    items_list = items if isinstance(items[0], dict) else [
+                        {'id': r[0], 'asset_name': r[1], 'username': r[2], 'url': r[3],
+                         'file_type': r[4], 'cost': r[5], 'timestamp': r[6], 'created_at': r[7]}
+                        for r in items
+                    ]
                     response = f"OK|{json.dumps(items_list)}"
                     self.Print(f"[SEND] OK|{len(items_list)} items", 20)
-                    self.Print(f"📦 Returned {len(items_list)} items (last timestamp: {items_list[-1].get('timestamp') if items_list else 'N/A'})", 20)
                     return response
-                else:
-                    response = "OK|[]"
-                    self.Print(f"[SEND] OK|0 items (no more items)", 20)
-                    return response
-                    
+                response = "OK|[]"
+                self.Print(f"[SEND] OK|0 items (no more items)", 20)
+                return response
             except Exception as db_error:
                 self.Print(f"❌ Database error: {db_error}", 40)
                 return f"ERR03|Database error: {str(db_error)}"
-        
         except ValueError as ve:
             self.Print(f"[RECV] GET_ITEMS_PAGINATED - Invalid parameters: {ve}", 40)
             return "ERR01|Invalid parameters"
@@ -761,30 +518,17 @@ class ClientSession:
         if len(params) < 1:
             self.Print(f"[RECV] GET_PROFILE - Invalid format", 40)
             return "ERR01|Invalid format: GET_PROFILE|username"
-        
         try:
             username = params[0].strip()
-            
             if not username or '|' in username:
                 self.Print(f"❌ Invalid username format", 40)
                 return "ERR01|Invalid username"
-            
-            # Find user
-            all_users = self.db.get_users()
-            if username not in all_users:
+            user_obj = self.db.get_user(username)
+            if not user_obj:
                 self.Print(f"❌ User {username} not found", 40)
                 return "ERR02|User not found"
-            
-            user_obj = all_users[username]
-            email = user_obj.get_email()
-            
-            # For now, use user creation time as profile created_at
-            # TODO: Store actual profile creation time
-            created_at = int(time.time())
-            
             self.Print(f"✅ Profile retrieved for {username}", 20)
-            return f"OK|{username}|{email}|{created_at}"
-            
+            return f"OK|{username}|{user_obj.email}|{user_obj.created_at}"
         except Exception as e:
             self.Print(f"❌ Error processing GET_PROFILE: {e}", 40)
             return f"ERR99|{str(e)}"
@@ -803,13 +547,8 @@ class Server:
         
         self.clients = {}  # addr -> ClientSession
         self.is_running = False
-        
-        # Initialize database based on config
-        if DATABASE_TYPE == 'firebase':
-            self.db = FirebaseDB()
-        else:
-            self.db = DB()  # Use SQLite by default
-    
+        self.db = MarketplaceDB()
+
     def _start_broadcast_listener(self):
         """Start listening for WHRSRV (Where's Server) broadcast queries"""
         def broadcast_loop():
@@ -852,16 +591,85 @@ class Server:
         # Start broadcast listener in a separate thread
         thread = threading.Thread(target=broadcast_loop, daemon=True)
         thread.start()
+
+    def _start_block_confirmation_listener(self):
+        """Background listener: receive block_confirmation from RPC server (blockchain)."""
+        def listen_loop():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(('0.0.0.0', BLOCK_CONFIRMATION_PORT))
+                sock.listen(5)
+                sock.settimeout(1.0)
+                server_logger.info("block_confirmation listener on port %s", BLOCK_CONFIRMATION_PORT)
+                self.Print("📡 Block confirmation listener on port %s" % BLOCK_CONFIRMATION_PORT, 20)
+                while self.is_running:
+                    try:
+                        client, addr = sock.accept()
+                        client.settimeout(5)
+                        data = b''
+                        while b'\n' not in data and len(data) < 65536:
+                            chunk = client.recv(4096)
+                            if not chunk:
+                                break
+                            data += chunk
+                        client.close()
+                        if data:
+                            line = data.decode('utf-8', errors='ignore').strip()
+                            if line:
+                                msg = json.loads(line)
+                                if msg.get('type') == 'block_confirmation':
+                                    server_logger.info(
+                                        "block_confirmation block_index=%s block_hash=%s miner_id=%s",
+                                        msg.get('block_index'), msg.get('block_hash', '')[:16], msg.get('miner_id')
+                                    )
+                                    self.Print("✅ Block confirmed: index=%s hash=%s..." % (
+                                        msg.get('block_index'), (msg.get('block_hash') or '')[:16]), 20)
+                                    # Apply wallet transfers from confirmed transactions
+                                    for tx in msg.get('transactions', []):
+                                        data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
+                                        from_user = data.get('from') or tx.get('sender')
+                                        to_user = data.get('to')
+                                        amount = data.get('amount')
+                                        if from_user and to_user is not None and amount is not None:
+                                            try:
+                                                amount = float(amount)
+                                                ok, res = self.db.transfer(from_user, to_user, amount)
+                                                if ok:
+                                                    server_logger.info("wallet transfer: %s -> %s amount=%s: %s", from_user, to_user, amount, res)
+                                                    self.Print("💰 Saved: %s" % res, 20)
+                                                    wa, wb = self.db.get_wallet(from_user), self.db.get_wallet(to_user)
+                                                    if wa and wb:
+                                                        server_logger.info("balances: %s=%.2f %s=%.2f", from_user, wa['balance'], to_user, wb['balance'])
+                                                else:
+                                                    server_logger.warning("wallet transfer failed: %s", res)
+                                            except (ValueError, TypeError) as e:
+                                                server_logger.warning("skip tx (bad amount): %s", e)
+                    except socket.timeout:
+                        continue
+                    except json.JSONDecodeError as e:
+                        server_logger.warning("block_confirmation parse error: %s", e)
+                    except Exception as e:
+                        if self.is_running:
+                            server_logger.warning("block_confirmation listener: %s", e)
+                sock.close()
+            except Exception as e:
+                server_logger.error("block_confirmation listener failed: %s", e)
+        thread = threading.Thread(target=listen_loop, daemon=True)
+        thread.start()
     
     def start(self):
         """Start the server"""
         self.Print(f"🚀 Server starting on {self.host}:{self.port}...", 20)
+        server_logger.info("server starting on %s:%s", self.host, self.port)
         
         try:
             self.is_running = True
             
             # Start broadcast listener thread
             self._start_broadcast_listener()
+            # Start block confirmation listener (RPC -> server)
+            self._start_block_confirmation_listener()
             
             # Create SSL context
             context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)

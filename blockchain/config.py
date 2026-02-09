@@ -7,6 +7,17 @@ Blockchain Configuration and Constants
 # ============================================================================
 POW_DEFAULT_PORT = 13245
 POA_DEFAULT_PORT = 13246
+# Five node ports for PoW race (RPC broadcasts to all)
+NODE_PORTS = [13245, 13246, 13247, 13248, 13249]
+NUM_NODES = len(NODE_PORTS)
+# RPC server: socket listener (no Flask)
+RPC_HOST = '127.0.0.1'
+RPC_PORT = 5000
+RPC_LISTEN_HOST = '0.0.0.0'
+RPC_LISTEN_PORT = 5000
+# Main server to notify when block is confirmed (marketplace server)
+SERVER_NOTIFY_HOST = '127.0.0.1'
+SERVER_NOTIFY_PORT = 23457
 DEFAULT_SOCKET_TIMEOUT = 5
 DEFAULT_LISTEN_BACKLOG = 5
 SOCKET_BUFFER_SIZE = 4096

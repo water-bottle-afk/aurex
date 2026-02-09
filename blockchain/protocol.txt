@@ -1,0 +1,104 @@
+# Blockchain P2P & RPC Protocol (sockets, no HTTP)
+
+All messages are JSON over TCP. Connection: send length-prefixed or newline-terminated JSON, then close (or keep open per design).
+
+================================================================================
+1. GOSSIP (node-to-node)
+================================================================================
+
+--- ping ---
+  Client -> Node: {"type": "ping"}
+  Node -> Client: {"type": "pong", "node_id": "<uuid>"}
+
+--- node_discovery ---
+  Client -> Node: {"type": "node_discovery"}
+  Node -> Client: {"type": "node_list", "nodes": [{"node_id": "...", "host": "...", "port": 13246}, ...]}
+
+--- new_block (gossip: block broadcast) ---
+  Miner node -> Peers: {"type": "new_block", "node_id": "<miner_uuid>", "data": <block_payload>}
+  block_payload: {
+    "index": int,
+    "timestamp": "ISO8601",
+    "prev_hash": "hex",
+    "current_hash": "hex",
+    "nonce": int,
+    "miner_id": "uuid",
+    "signature": "b64",
+    "public_key_pem": " PEM string ",
+    "transactions": [ { "sender", "data", "signature" }, ... ]
+  }
+  Receiver validates: PoW (hash starts with N zeros), signature, prev_hash chain; then writes to ledger and stops mining.
+
+--- NEW_TRANSACTION (initiate mining race) ---
+  RPC or client -> Node: {"type": "NEW_TRANSACTION", "sender": "...", "data": {...}, "signature": "..."}
+  Node -> Client: {"type": "MINING_STARTED", "miner": "<node_id>", "message": "Mining started"}
+  Node adds tx to mempool and starts mining (or continues). No further response until block is found.
+
+================================================================================
+2. MINING (internal)
+================================================================================
+
+- Mining is a separate process (multiprocessing). Data hashed: SHA256(JSON(prev_hash, timestamp, index, tx) + nonce).
+- Difficulty: hash must start with N leading zeros (N = difficulty).
+- stop_mining_event: when any node receives a valid new_block, it sets this event so its mining process exits immediately (no wasted work).
+
+================================================================================
+3. VALIDATION (on receiving new_block)
+================================================================================
+
+Each node must:
+  1. PoW: current_hash.startswith('0' * difficulty)
+  2. Signature: NodeKeyManager.verify_signature(public_key_pem, current_hash, signature)
+  3. Chain: block index == last_block_index + 1 and prev_hash == last_block_hash
+If all pass: write block and transactions to local SQLite (node_{port}.sqlite3), update last_block_*, set stop_mining_event.
+
+================================================================================
+4. RPC SERVER (socket, not Flask)
+================================================================================
+
+RPC listens on RPC_LISTEN_HOST:RPC_LISTEN_PORT. Wire format: 2-byte big-endian length of JSON bytes, then JSON. Two kinds of connections:
+
+--- Client request (submit transaction) ---
+  Client -> RPC: length-prefixed JSON, e.g. {"action": "submit_transaction", "body": {"sender": "...", "data": {...}, "signature": "..."}}
+  RPC -> Client: {"status": "broadcast", "nodes_reached": 5, "total_nodes": 5, "message": "..."}
+
+  Optional: {"action": "health"}
+  RPC -> Client: {"status": "ok", "service": "rpc_server"}
+
+--- Block confirmation (from any node) ---
+  Node -> RPC: {"type": "block_confirmation", "block_index": int, "block_hash": "...", "miner_id": "...", "node_id": "...", "timestamp": "..."}
+  RPC: forwards this to the main server (SERVER_NOTIFY_HOST:SERVER_NOTIFY_PORT) and logs. No response required to node.
+
+================================================================================
+5. SERVER NOTIFICATION (RPC -> marketplace server)
+================================================================================
+
+When RPC receives block_confirmation, it opens a TCP connection to SERVER_NOTIFY_HOST:SERVER_NOTIFY_PORT and sends one JSON line:
+  {"type": "block_confirmation", "block_index": int, "block_hash": "...", "miner_id": "...", "node_id": "...", "timestamp": "..."}
+Then closes. The server logs and can update internal state (e.g. mark transaction confirmed).
+
+================================================================================
+6. LEDGER (per-node SQLite)
+================================================================================
+
+blocks: index, timestamp, prev_hash, current_hash, nonce, miner_id, signature
+transactions: id, block_hash, sender, data, signature, start_timestamp, end_timestamp
+  - start_timestamp: when tx was received / mining started
+  - end_timestamp: when block was written (tx confirmed)
+
+================================================================================
+7. MESSAGE TYPES SUMMARY
+================================================================================
+
+  type / action          direction           purpose
+  -----------------     -----------------   ----------------------------------
+  ping                   client -> node     liveness
+  pong                   node -> client     liveness reply
+  node_discovery         client -> node     get peer list
+  node_list              node -> client     peer list
+  new_block              node -> nodes      gossip: new block (validate, store, stop miner)
+  NEW_TRANSACTION        RPC/client->node    add to mempool, start mining
+  MINING_STARTED         node -> client     ack tx received
+  block_confirmation     node -> RPC        block committed (RPC forwards to server)
+  submit_transaction     client -> RPC      action: broadcast tx to all nodes
+  health                 client -> RPC      action: liveness

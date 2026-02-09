@@ -1,22 +1,22 @@
 import sys
 import os
 import traceback
-sys.path.insert(0, r"C:\dev\aurex\blockchain")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from blockchain_node import BlockchainNode
-    
+
     node = BlockchainNode(
-        node_name="PoW_Node_3",
+        node_name="PoW_Node_4",
         host='127.0.0.1',
-        port=13247,
-        difficulty=2
+        port=13248,
+        difficulty=3
     )
     node.start()
     while node.running:
         import time
         time.sleep(1)
 except Exception as e:
-    print(f"FATAL ERROR in PoW_Node_3: {e}")
+    print(f"FATAL ERROR in PoW_Node_4: {e}")
     traceback.print_exc()
     sys.exit(1)

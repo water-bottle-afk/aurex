@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/user_model.dart';
 
 class UserService {
@@ -208,30 +207,6 @@ class UserService {
 
   /// Clear all session data (called on logout)
   Future<void> clearSession() async {
-    // Nothing to clear from local DB, but can be extended
     print('Session cleared');
-  }
-
-  /// Get username from Firebase Firestore by email
-  Future<String?> getUsernameFromFirebase(String email) async {
-    try {
-      final firestore = FirebaseFirestore.instance;
-      
-      // Query users collection where email matches
-      final querySnapshot = await firestore
-          .collection('users')
-          .where('email', isEqualTo: email)
-          .get();
-      
-      if (querySnapshot.docs.isNotEmpty) {
-        final userData = querySnapshot.docs.first.data();
-        return userData['username'] as String?;
-      }
-      
-      return null;
-    } catch (e) {
-      print('Error fetching username from Firebase: $e');
-      return null;
-    }
   }
 }

@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
@@ -20,7 +19,6 @@ class _HomePageState extends State<HomePage> {
   int _currentPageIndex = 0;
   final UserService _userService = UserService();
   final GoogleSignIn _googleSignIn = GoogleSignIn();
-  String? _firebaseUsername;
 
   late List<Widget> _pages;
 
@@ -32,34 +30,15 @@ class _HomePageState extends State<HomePage> {
       const ProfilePage(),
       const AboutPage(),
     ];
-    _loadUsername();
-  }
-
-  /// Load username from Firebase based on current user's email
-  Future<void> _loadUsername() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user?.email != null) {
-      final username = await _userService.getUsernameFromFirebase(user!.email!);
-      if (mounted) {
-        setState(() {
-          _firebaseUsername = username;
-        });
-      }
-    }
   }
 
   Future<void> _logout() async {
-    // Clear session
     await _userService.clearSession();
     await _googleSignIn.signOut();
 
     if (mounted) {
-      // Clear user from provider
-      Provider.of<UserProvider>(context, listen: false).setUser(null);
-
-      // Navigate to login
+      Provider.of<UserProvider>(context, listen: false).clearUserData();
       context.go('/login');
-
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Logged out successfully')),
       );
@@ -155,10 +134,9 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
-    final user = userProvider.user;
+    final localUser = userProvider.localUser;
 
     return Scaffold(
-      // Top Profile Section
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
@@ -177,12 +155,14 @@ class _HomePageState extends State<HomePage> {
           children: [
             CircleAvatar(
               radius: 30,
-              backgroundImage: user?.photoURL != null
-                  ? NetworkImage(user!.photoURL!)
-                  : null,
-              child: user?.photoURL == null
-                  ? const Icon(Icons.person, size: 30)
-                  : null,
+              backgroundColor: Colors.blue,
+              child: Text(
+                (localUser?.username.isNotEmpty == true
+                    ? localUser!.username[0]
+                    : '?')
+                    .toUpperCase(),
+                style: const TextStyle(fontSize: 24, color: Colors.white),
+              ),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -190,7 +170,7 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    _firebaseUsername ?? user?.displayName ?? 'Guest',
+                    localUser?.username ?? 'Guest',
                     style: const TextStyle(
                       color: Colors.black,
                       fontSize: 18,
@@ -199,7 +179,7 @@ class _HomePageState extends State<HomePage> {
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
-                    user?.email ?? 'Not logged in',
+                    localUser?.email ?? 'Not logged in',
                     style: const TextStyle(
                       color: Colors.grey,
                       fontSize: 12,
