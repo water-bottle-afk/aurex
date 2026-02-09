@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -13,12 +12,10 @@ class UserModel {
 }
 
 class UserProvider with ChangeNotifier {
-  User? _firebaseUser;
   UserModel? _localUser;
   late SharedPreferences _prefs;
   bool _isInitialized = false;
 
-  User? get user => _firebaseUser;
   UserModel? get localUser => _localUser;
   bool get isInitialized => _isInitialized;
   String get username => _localUser?.username ?? 'Guest';
@@ -27,18 +24,17 @@ class UserProvider with ChangeNotifier {
   /// Initialize SharedPreferences and load saved user data
   Future<void> initialize() async {
     if (_isInitialized) return;
-    
+
     try {
       _prefs = await SharedPreferences.getInstance();
-      
-      // Load saved username and email
+
       final savedUsername = _prefs.getString('username');
       final savedEmail = _prefs.getString('email');
-      
+
       if (savedUsername != null && savedEmail != null) {
         _localUser = UserModel(username: savedUsername, email: savedEmail);
       }
-      
+
       _isInitialized = true;
       notifyListeners();
     } catch (e) {
@@ -46,11 +42,6 @@ class UserProvider with ChangeNotifier {
       _isInitialized = true;
       notifyListeners();
     }
-  }
-
-  void setUser(User? user) {
-    _firebaseUser = user;
-    notifyListeners();
   }
 
   void setLocalUser({required String username, required String email}) {
@@ -92,16 +83,10 @@ class UserProvider with ChangeNotifier {
       await _prefs.remove('username');
       await _prefs.remove('email');
       _localUser = null;
-      _firebaseUser = null;
       notifyListeners();
       print('✅ User data cleared');
     } catch (e) {
       print('⚠️ Error clearing user data: $e');
     }
-  }
-
-  void refreshUser() {
-    _firebaseUser = FirebaseAuth.instance.currentUser;
-    notifyListeners();
   }
 }

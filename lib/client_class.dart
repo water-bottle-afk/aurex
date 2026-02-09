@@ -563,6 +563,32 @@ class Client extends ChangeNotifier {
     }
   }
 
+  /// GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in).
+  /// Send: GET_USER_BY_EMAIL|email
+  /// Receive: OK|username or ERR|error_message
+  Future<String?> getUserByEmail(String email) async {
+    try {
+      if (email.isEmpty || email.contains('|')) {
+        throw Exception("Invalid email format");
+      }
+      final message = "GET_USER_BY_EMAIL|$email";
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+      if (parts[0] == "OK" && parts.length >= 2) {
+        return parts[1];
+      }
+      return null;
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'getUserByEmail error: $e',
+        status: 'error',
+      );
+      return null;
+    }
+  }
+
   /// Protocol Message: SIGNUP (User Registration with field validation)
   /// Send: SIGNUP|username|password
   /// Receive: OK|username or ERR|error_message

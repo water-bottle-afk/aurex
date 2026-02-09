@@ -1,6 +1,7 @@
 """
-PoW Node Class - Proof of Work blockchain node with P2P networking
-Implements node discovery, mining, and gossip protocol
+PoW Node - Proof of Work blockchain node with P2P gossip and multiprocessing miner.
+- Main thread/listener: P2P, mempool, block validation, SQLite writes.
+- Mining process: dedicated SHA-256 hashing loop; stopped by multiprocessing.Event when peer wins.
 """
 
 import socket
@@ -9,443 +10,434 @@ import hashlib
 import time
 import uuid
 import threading
+import multiprocessing
+import logging
+import struct
 from datetime import datetime
 import sys
 import os
-import logging
 
-logger = logging.getLogger(__name__)
-
-# Add parent directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from json_ledger import get_ledger
-
-try:
-    from db_init import get_db_connection
-except:
-    print("⚠️ db_init not available")
-
 from key_manager import NodeKeyManager
+from db_init import (
+    get_db_connection,
+    get_node_db_path,
+    init_node_database,
+    get_node_db_connection,
+)
+from config import NODE_PORTS, RPC_HOST, RPC_PORT
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+logger = logging.getLogger('pow_node')
+
+
+def hashing_process(data, difficulty, stop_event, result_queue):
+    """
+    CPU-bound mining loop. Runs in a separate process.
+    Exits when stop_event is set (peer found block) or when nonce is found.
+    """
+    nonce = 0
+    target = '0' * difficulty
+    while not stop_event.is_set():
+        hash_attempt = hashlib.sha256(f"{data}{nonce}".encode()).hexdigest()
+        if hash_attempt.startswith(target):
+            result_queue.put((hash_attempt, nonce))
+            return
+        nonce += 1
+    # stopped by peer block (no log in subprocess to avoid cross-process logger issues)
 
 
 class PoWNode:
     """
-    Proof of Work Node
-    - Mines blocks using PoW
-    - Discovers and connects to other nodes
-    - Spreads information (gossip protocol)
+    Proof of Work Node: listener (main thread) + mining (multiprocessing).
+    Each node has its own ledger: blockchain/node_{port}.sqlite3.
     """
-    
+
     def __init__(self, host='0.0.0.0', port=11111, difficulty=2):
-        """
-        Initialize PoW Node (miner + validator)
-        
-        Args:
-            host: Listening host (0.0.0.0 = all interfaces)
-            port: Listening port (11111, 22222, 33333, 44444, 55555)
-            difficulty: Number of leading zeros required in hash
-        """
-        self.node_id = str(uuid.uuid4())  # Unique node identifier
+        self.node_id = str(uuid.uuid4())
         self.host = host
         self.port = port
-        # Each node is both miner and validator
+        self.difficulty = difficulty
         self.is_running = False
-        
-        # Digital signatures - each node has its own key pair
         self.key_manager = NodeKeyManager(self.node_id)
-        
-        # P2P network
-        self.known_nodes = {}  # node_id -> (host, port)
-        self.connected_nodes = {}  # node_id -> socket
-        
-        # Blockchain
-        self.current_block_hash = None
-        self.difficulty = difficulty  # Number of leading zeros required
-        self.mining = False
-        self.validated_blocks = []  # Blocks validated by this node
-        
-        # Register this node in database
+
+        self.known_nodes = {}
+        self.mempool = []
+        self.mempool_lock = threading.Lock()
+
+        # Last block on our chain (from our DB)
+        self.last_block_index = -1
+        self.last_block_hash = '0' * 64
+
+        # Mining control: event shared with miner process; when set, miner stops
+        self.stop_mining_event = multiprocessing.Event()
+        self.result_queue = multiprocessing.Queue()  # single queue for all miner runs
+        self.miner_process = None
+        self.mining_lock = threading.Lock()
+
         self._register_node()
-        
-        print(f"🚀 PoW Node initialized (Miner + Validator)")
-        print(f"   🔑 Digital Signatures: ENABLED")
-        print(f"   Node ID: {self.node_id}")
-        print(f"   Listening: {self.host}:{self.port}")
-    
+        # Seed peers from config so block broadcast reaches all nodes regardless of startup order
+        for p in NODE_PORTS:
+            if p != self.port:
+                self.known_nodes[f"node_{p}"] = (RPC_HOST, p)
+        init_node_database(port)
+        self._load_last_block()
+        logger.info("node started port=%s node_id=%s difficulty=%s", port, self.node_id[:8], difficulty)
+
+    def _load_last_block(self):
+        """Load last block from this node's DB to set last_block_index/hash."""
+        try:
+            conn = get_node_db_connection(self.port)
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT "index", current_hash FROM blocks ORDER BY "index" DESC LIMIT 1'
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                self.last_block_index = row[0]
+                self.last_block_hash = row[1]
+                logger.info("last block loaded index=%s hash=%s...", self.last_block_index, self.last_block_hash[:16])
+        except Exception as e:
+            logger.warning("could not load last block: %s", e)
+
     def _register_node(self):
-        """Register this node in the database"""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO nodes (node_id, host, port, node_type, status)
-                VALUES (?, ?, ?, ?, 'active')
-            ''', (self.node_id, self.host, self.port, 'full-node'))
-            
+            cursor.execute(
+                'INSERT OR REPLACE INTO nodes (node_id, host, port, node_type, status) VALUES (?, ?, ?, ?, ?)',
+                (self.node_id, self.host, self.port, 'full-node', 'active')
+            )
             conn.commit()
             conn.close()
-            print(f"✅ Node registered in database")
         except Exception as e:
-            print(f"⚠️ Could not register node: {e}")
-    
+            logger.warning("could not register node: %s", e)
+
     def discover_nodes(self):
-        """
-        Discover known nodes from database
-        This implements gossip protocol - get list of nearby nodes
-        """
+        """Discover peers from DB; only add nodes whose port is in NODE_PORTS (ignore stale rows)."""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            
-            cursor.execute('SELECT node_id, host, port FROM nodes WHERE status = "active" AND node_id != ?', (self.node_id,))
-            nodes = cursor.fetchall()
-            
-            for node in nodes:
-                node_id, host, port = node
-                self.known_nodes[node_id] = (host, port)
-                print(f"📍 Discovered node: {node_id} at {host}:{port}")
-            
+            cursor.execute(
+                'SELECT node_id, host, port FROM nodes WHERE status = ? AND node_id != ?',
+                ('active', self.node_id)
+            )
+            added = 0
+            for row in cursor.fetchall():
+                nid, h, p = row[0], row[1], row[2]
+                if p in NODE_PORTS and p != self.port:
+                    self.known_nodes[nid] = (h, p)
+                    added += 1
             conn.close()
-            print(f"✅ Found {len(self.known_nodes)} known nodes")
+            logger.info("discovered %s peers (ports in NODE_PORTS)", len(self.known_nodes))
         except Exception as e:
-            print(f"⚠️ Could not discover nodes: {e}")
-    
+            logger.warning("discover nodes: %s", e)
+
     def start_listening(self):
-        """Start listening for incoming P2P connections"""
         self.is_running = True
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
         server_socket.listen(5)
-        
-        print(f"👂 Listening on {self.host}:{self.port}")
-        
+        logger.info("listening on %s:%s", self.host, self.port)
+
+        # Thread that checks result_queue when we are mining
+        def result_collector():
+            while self.is_running:
+                try:
+                    if self.result_queue.empty():
+                        time.sleep(0.1)
+                        continue
+                    block_hash, nonce = self.result_queue.get_nowait()
+                    self._on_block_mined(block_hash, nonce)
+                except Exception:
+                    time.sleep(0.1)
+
+        threading.Thread(target=result_collector, daemon=True).start()
+
         while self.is_running:
             try:
                 client_socket, (client_host, client_port) = server_socket.accept()
-                
-                # Handle connection in separate thread
-                thread = threading.Thread(
+                threading.Thread(
                     target=self._handle_p2p_connection,
-                    args=(client_socket, client_host, client_port)
-                )
-                thread.daemon = True
-                thread.start()
-            except Exception as e:
-                if self.is_running:
-                    pass
-        
+                    args=(client_socket, client_host, client_port),
+                    daemon=True
+                ).start()
+            except Exception:
+                if not self.is_running:
+                    break
         server_socket.close()
-    
+
     def _handle_p2p_connection(self, client_socket, client_host, client_port):
-        """Handle incoming P2P message"""
         try:
             data = client_socket.recv(4096)
+            if not data:
+                client_socket.close()
+                return
             message = json.loads(data.decode())
-            
             msg_type = message.get('type')
-            
+
             if msg_type == 'ping':
-                self._send_pong(client_socket)
+                client_socket.send(json.dumps({'type': 'pong', 'node_id': self.node_id}).encode())
                 client_socket.close()
             elif msg_type == 'node_discovery':
-                self._send_node_list(client_socket)
+                client_socket.send(json.dumps({
+                    'type': 'node_list',
+                    'nodes': [{'node_id': nid, 'host': h, 'port': p} for nid, (h, p) in self.known_nodes.items()]
+                }).encode())
                 client_socket.close()
             elif msg_type == 'new_block':
                 self._handle_new_block(message)
                 client_socket.close()
             elif msg_type == 'NEW_TRANSACTION':
-                # Keep socket open and mine the transaction
                 self._handle_new_transaction(message, client_socket)
             else:
                 client_socket.close()
         except Exception as e:
             try:
                 client_socket.close()
-            except:
+            except Exception:
                 pass
-    
-    def _send_pong(self, socket):
-        """Respond to ping"""
-        response = {
-            'type': 'pong',
-            'node_id': self.node_id,
-            'timestamp': datetime.now().isoformat()
-        }
-        socket.send(json.dumps(response).encode())
-    
-    def _send_node_list(self, socket):
-        """Send list of known nodes (gossip protocol)"""
-        response = {
-            'type': 'node_list',
-            'node_id': self.node_id,
-            'nodes': [
-                {'node_id': nid, 'host': host, 'port': port}
-                for nid, (host, port) in self.known_nodes.items()
-            ]
-        }
-        socket.send(json.dumps(response).encode())
-    
+
     def _handle_new_block(self, message):
-        """Handle incoming block from another node"""
-        block_hash = message.get('block_hash')
-        block_nonce = message.get('nonce')
-        block_data = message.get('data')
-        
-        print(f"📦 New block received: {block_hash}")
-        
-        # Validate block
-        if self.validate_block(block_hash, block_nonce):
-            self.validated_blocks.append(block_hash)
-            print(f"✅ Block validated: {block_hash}")
-            # Broadcast to other nodes that we validated this
-            self.broadcast_message('block_validated', {
-                'block_hash': block_hash,
-                'validator': self.node_id
-            })
-        else:
-            print(f"❌ Block validation failed: {block_hash}")
-    
-    def _handle_new_transaction(self, message, client_socket):
-        """Handle incoming transaction and start mining in background thread"""
+        """Validate block (PoW + signature + prev_hash), write to DB, stop our miner."""
+        payload = message.get('data', {})
+        block_index = payload.get('index')
+        timestamp = payload.get('timestamp')
+        prev_hash = payload.get('prev_hash')
+        current_hash = payload.get('current_hash')
+        nonce = payload.get('nonce')
+        miner_id = payload.get('miner_id')
+        signature = payload.get('signature')
+        public_key_pem = payload.get('public_key_pem')
+        tx_list = payload.get('transactions', [])
+
+        if block_index is None or current_hash is None or nonce is None or miner_id is None or signature is None:
+            logger.warning("validation failed: missing fields")
+            return
+        if not public_key_pem:
+            logger.warning("validation failed: missing public_key_pem")
+            return
+
+        # 1) PoW: hash starts with N zeros
+        if not current_hash.startswith('0' * self.difficulty):
+            logger.warning("validation failed: PoW %s...", current_hash[:16])
+            return
+        logger.info("validation: PoW ok block_index=%s", block_index)
+
+        # 2) Signature: verify block hash signed by miner
         try:
-            tx_data = message.get('data', {})
-            asset_name = tx_data.get('asset', 'unknown')
-            
-            # Extract confirmation details from app server
-            confirmation_host = message.get('confirmation_host', '127.0.0.1')
-            confirmation_port = message.get('confirmation_port', 13290)
-            
-            # Send immediate acknowledgment to client
-            ack_response = {
-                'type': 'MINING_STARTED',
-                'miner': self.node_id,
-                'message': 'Mining started'
-            }
-            client_socket.send(json.dumps(ack_response).encode())
-            
-            # Close client socket
-            client_socket.close()
-            
-            # Create block data from transaction
-            block_data = json.dumps(tx_data)
-            
-            # Start mining in background thread
-            mining_thread = threading.Thread(
-                target=self._mine_and_broadcast,
-                args=(block_data, asset_name, confirmation_host, confirmation_port),
-                daemon=True
-            )
-            mining_thread.start()
-            
+            if not NodeKeyManager.verify_signature(public_key_pem, current_hash, signature):
+                logger.warning("validation failed: signature")
+                return
         except Exception as e:
-            try:
-                error_response = {
-                    'type': 'ERROR',
-                    'error': str(e),
-                    'miner': self.node_id
-                }
-                client_socket.send(json.dumps(error_response).encode())
-            except:
-                pass
-            finally:
-                try:
-                    client_socket.close()
-                except:
-                    pass
-    
-    def _mine_and_broadcast(self, block_data, asset_name, confirmation_host='127.0.0.1', confirmation_port=13290):
-        """Mine block in background and send confirmation to app server"""
+            logger.warning("validation failed: signature error %s", e)
+            return
+        logger.info("validation: signature ok")
+
+        # 3) Chain: prev_hash must match our latest block
+        if block_index != self.last_block_index + 1:
+            logger.warning("validation failed: index %s expected %s", block_index, self.last_block_index + 1)
+            return
+        if prev_hash != self.last_block_hash:
+            logger.warning("validation failed: prev_hash mismatch")
+            return
+        logger.info("validation: chain ok prev_hash link")
+
+        # Write to our ledger (same thread as listener = safe for SQLite)
         try:
-            # Mine the block (broadcasts automatically inside mine_block)
-            block_hash, nonce = self.mine_block(block_data)
-            
-            if block_hash:
-                # Send block confirmation to app server
-                confirmation = {
-                    'type': 'block_confirmation',
-                    'miner_node_id': self.node_id,
-                    'block_hash': block_hash,
-                    'asset': asset_name,
-                    'timestamp': datetime.now().isoformat()
-                }
-                
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(5)
-                    sock.connect((confirmation_host, confirmation_port))
-                    sock.send(json.dumps(confirmation).encode())
-                    sock.close()
-                    print(f"📢 Block confirmation sent to app server")
-                except Exception as e:
-                    print(f"⚠️ Could not send confirmation: {e}")
-            
-        except Exception as e:
-            print(f"❌ Error in mining: {e}")
-    
-    def broadcast_message(self, message_type, data):
-        """Broadcast message to all known nodes"""
-        message = {
-            'type': message_type,
-            'node_id': self.node_id,
-            'timestamp': datetime.now().isoformat(),
-            'data': data
-        }
-        
-        for node_id, (host, port) in self.known_nodes.items():
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect((host, port))
-                sock.send(json.dumps(message).encode())
-                sock.close()
-            except Exception as e:
-                pass
-    
-    def validate_block(self, block_hash, nonce):
-        """
-        Validate block by checking if hash meets difficulty requirement
-        
-        DEBUG OUTPUT:
-        - Block hash (first 16 chars)
-        - Nonce value
-        - Difficulty requirement
-        - Validation result
-        """
-        if not block_hash or not isinstance(block_hash, str):
-            print(f"❌ [{self.node_id}] Invalid block hash type: {type(block_hash)}")
-            return False
-        
-        # Check if hash starts with required leading zeros
-        difficulty_target = '0' * self.difficulty
-        is_valid = block_hash.startswith(difficulty_target)
-        
-        if is_valid:
-            print(f"\n✅ [{self.node_id}] BLOCK VALIDATED")
-            print(f"   Hash: {block_hash}")
-            print(f"   Nonce: {nonce}")
-            print(f"   Difficulty: {self.difficulty} zeros ✓\n")
-            
-            # Store validation in database
-            self._store_validation_in_db(block_hash, nonce)
-        else:
-            print(f"\n❌ [{self.node_id}] BLOCK INVALID")
-            print(f"   Hash: {block_hash[:16]}...")
-            print(f"   Expected: {difficulty_target}...")
-            print(f"   Got: {block_hash[:self.difficulty]}...")
-            print(f"   Nonce: {nonce}\n")
-        
-        return is_valid
-    
-    def _store_validation_in_db(self, block_hash, nonce):
-        """Store block validation in database"""
-        try:
-            conn = get_db_connection()
+            conn = get_node_db_connection(self.port)
             cursor = conn.cursor()
-            
-            # Check if block exists
-            cursor.execute('SELECT id FROM blocks WHERE block_hash = ?', (block_hash,))
-            result = cursor.fetchone()
-            
-            if result:
-                print(f"   [DB] Block already in ledger: {block_hash[:16]}...")
-            else:
-                print(f"   [DB] New valid block: {block_hash[:16]}...")
-            
+            cursor.execute(
+                '''INSERT INTO blocks ("index", timestamp, prev_hash, current_hash, nonce, miner_id, signature)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (block_index, timestamp, prev_hash, current_hash, nonce, miner_id, signature)
+            )
+            end_ts = timestamp
+            for tx in tx_list:
+                sender = tx.get('sender', '')
+                data_str = json.dumps(tx.get('data', tx)) if isinstance(tx.get('data'), dict) else str(tx.get('data', ''))
+                sig = tx.get('signature', '')
+                start_ts = tx.get('start_timestamp') or end_ts
+                cursor.execute(
+                    'INSERT INTO transactions (block_hash, sender, data, signature, start_timestamp, end_timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+                    (current_hash, sender, data_str, sig, start_ts, end_ts)
+                )
+            conn.commit()
             conn.close()
         except Exception as e:
-            print(f"   ⚠️ Database error during validation: {e}")
-    
-    def mine_block(self, transactions_data=""):
-        """
-        Mine a block using Proof of Work
-        Find nonce such that hash starts with required zeros
-        """
-        self.mining = True
-        nonce = 0
-        start_time = time.time()
-        target_zeros = '0' * self.difficulty
-        
-        print(f"⛏️ Mining block (difficulty: {self.difficulty})")
-        
-        while self.mining:
-            # Create block data
-            block_data = {
-                'previous_hash': self.current_block_hash or '0' * 64,
-                'nonce': nonce,
-                'timestamp': datetime.now().isoformat(),
-                'miner': self.node_id,
-                'data': transactions_data
-            }
-            
-            # Calculate hash
-            block_str = json.dumps(block_data, sort_keys=True)
-            block_hash = hashlib.sha256(block_str.encode()).hexdigest()
-            
-            # Check if hash meets difficulty requirement
-            if block_hash.startswith(target_zeros):
-                elapsed = time.time() - start_time
-                
-                print(f"✅ BLOCK FOUND!")
-                print(f"   Hash: {block_hash}")
-                print(f"   Time: {elapsed:.2f}s | Attempts: {nonce}\n")
-                
-                self.current_block_hash = block_hash
-                
-                # Store block in database
-                self._store_block_in_db(block_hash, nonce, transactions_data)
-                
-                # Broadcast to peers
-                self.broadcast_message('new_block', {
-                    'block_hash': block_hash,
-                    'nonce': nonce,
-                    'data': transactions_data,
-                    'miner': self.node_id
-                })
-                
-                self.mining = False
-                return block_hash, nonce
-            
-            nonce += 1
-        
-        return None, None
-    
-    def _store_block_in_db(self, block_hash, nonce, data):
-        """Store mined block in JSON ledger with digital signature"""
+            logger.error("DB write failed: %s", e)
+            return
+
+        self.last_block_index = block_index
+        self.last_block_hash = current_hash
+        logger.info("gossip: block accepted index=%s hash=%s...", block_index, current_hash[:16])
+
+        # Stop our miner so we don't keep hashing
+        self.stop_mining_event.set()
+
+    def _handle_new_transaction(self, message, client_socket):
         try:
-            ledger = get_ledger()
-            previous_hash = self.current_block_hash or '0' * 64
-            
-            # Sign the block with this node's private key
-            block_signature = self.key_manager.sign_data(block_hash)
-            public_key_pem = self.key_manager.get_public_key_pem()
-            
-            # Add block with signature
-            block = ledger.add_block(
-                block_hash=block_hash,
-                nonce=nonce,
-                miner_id=self.node_id,
-                difficulty=self.difficulty,
-                data=data,
-                previous_hash=previous_hash,
-                signature=block_signature,
-                public_key=public_key_pem
-            )
-            
-            print(f"   💾 Block saved to ledger: {block_hash[:16]}...")
-            print(f"   ✍️  Signed with node's private key\n")
+            tx_data = message.get('data', {})
+            sender = message.get('sender', '')
+            signature = message.get('signature', '')
+            start_timestamp = datetime.utcnow().isoformat()
+
+            ack = {'type': 'MINING_STARTED', 'miner': self.node_id, 'message': 'Mining started'}
+            client_socket.send(json.dumps(ack).encode())
+            client_socket.close()
+
+            with self.mempool_lock:
+                self.mempool.append({
+                    'sender': sender, 'data': tx_data, 'signature': signature,
+                    'start_timestamp': start_timestamp,
+                })
+
+            logger.info("gossip: NEW_TRANSACTION received sender=%s", sender)
+            self._start_mining_if_needed()
         except Exception as e:
-            print(f"   ⚠️ Ledger error: {e}\n")
-    
+            try:
+                client_socket.send(json.dumps({'type': 'ERROR', 'error': str(e)}).encode())
+            except Exception:
+                pass
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+
+    def _start_mining_if_needed(self):
+        """Start miner process if not already mining. Uses first tx in mempool."""
+        with self.mining_lock:
+            if self.miner_process is not None and self.miner_process.is_alive():
+                return
+        with self.mempool_lock:
+            if not self.mempool:
+                return
+            tx = self.mempool[0]
+
+        self.stop_mining_event.clear()
+        # Data to hash: prev_hash + timestamp + tx payload (deterministic)
+        ts = datetime.utcnow().isoformat()
+        data_to_hash = json.dumps({
+            'prev_hash': self.last_block_hash,
+            'timestamp': ts,
+            'index': self.last_block_index + 1,
+            'tx': tx
+        }, sort_keys=True)
+
+        self.miner_process = multiprocessing.Process(
+            target=hashing_process,
+            args=(data_to_hash, self.difficulty, self.stop_mining_event, self.result_queue)
+        )
+        self.miner_process.start()
+        logger.info("hashing: mining started difficulty=%s", self.difficulty)
+
+    def _on_block_mined(self, block_hash, nonce):
+        """We found a block: sign, write to DB, broadcast, clear mempool for that tx."""
+        with self.mempool_lock:
+            if not self.mempool:
+                return
+            tx = self.mempool.pop(0)
+
+        block_index = self.last_block_index + 1
+        prev_hash = self.last_block_hash
+        timestamp = datetime.utcnow().isoformat()
+        signature = self.key_manager.sign_data(block_hash)
+        public_key_pem = self.key_manager.get_public_key_pem()
+
+        end_timestamp = timestamp
+        start_timestamp = tx.get('start_timestamp') or end_timestamp
+        try:
+            conn = get_node_db_connection(self.port)
+            cursor = conn.cursor()
+            cursor.execute(
+                '''INSERT INTO blocks ("index", timestamp, prev_hash, current_hash, nonce, miner_id, signature)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (block_index, timestamp, prev_hash, block_hash, nonce, self.node_id, signature)
+            )
+            data_str = json.dumps(tx['data']) if isinstance(tx['data'], dict) else str(tx['data'])
+            cursor.execute(
+                'INSERT INTO transactions (block_hash, sender, data, signature, start_timestamp, end_timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+                (block_hash, tx.get('sender', ''), data_str, tx.get('signature', ''), start_timestamp, end_timestamp)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error("DB write failed: %s", e)
+            return
+
+        self.last_block_index = block_index
+        self.last_block_hash = block_hash
+        logger.info("block mined index=%s hash=%s...", block_index, block_hash[:16])
+
+        payload = {
+            'index': block_index,
+            'timestamp': timestamp,
+            'prev_hash': prev_hash,
+            'current_hash': block_hash,
+            'nonce': nonce,
+            'miner_id': self.node_id,
+            'signature': signature,
+            'public_key_pem': public_key_pem,
+            'transactions': [tx]
+        }
+        self._broadcast_block(payload)
+        self._send_block_confirmation(block_index, block_hash, timestamp, [tx])
+
+        # Start mining next tx if any
+        with self.mempool_lock:
+            if self.mempool:
+                self._start_mining_if_needed()
+
+    def _broadcast_block(self, payload):
+        """Broadcast new_block to all known nodes."""
+        message = {'type': 'new_block', 'node_id': self.node_id, 'data': payload}
+        raw = json.dumps(message).encode()
+        for node_id, (host, port) in list(self.known_nodes.items()):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3)
+                sock.connect((host, port))
+                sock.send(raw)
+                sock.close()
+            except Exception:
+                pass
+        logger.info("gossip: block broadcast to %s peers", len(self.known_nodes))
+
+    def _send_block_confirmation(self, block_index, block_hash, timestamp, transactions=None):
+        """Notify RPC server so it can forward to main server (with tx list for wallet updates)."""
+        try:
+            msg = {
+                'type': 'block_confirmation',
+                'block_index': block_index,
+                'block_hash': block_hash,
+                'miner_id': self.node_id,
+                'node_id': self.node_id,
+                'timestamp': timestamp,
+                'transactions': transactions or [],
+            }
+            raw = json.dumps(msg).encode()
+            length = struct.pack('>H', len(raw))
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            sock.connect((RPC_HOST, RPC_PORT))
+            sock.send(length + raw)
+            sock.close()
+            logger.info("block_confirmation sent to RPC block_index=%s", block_index)
+        except Exception as e:
+            logger.warning("send block_confirmation to RPC failed: %s", e)
+
     def stop(self):
-        """Stop the node"""
         self.is_running = False
-        self.mining = False
-        print(f"🛑 Node stopping...")
-    
-    
-    # ========================================================================
-    # BLOCK MANAGEMENT
-    # ========================================================================
-    
+        self.stop_mining_event.set()
+        if self.miner_process and self.miner_process.is_alive():
+            self.miner_process.join(timeout=2)
+            if self.miner_process.is_alive():
+                self.miner_process.terminate()
+        logger.info("node stopping")

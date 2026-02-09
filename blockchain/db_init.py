@@ -1,15 +1,75 @@
 """
 SQLite Database Initialization for Aurex Blockchain PoW
+- Shared DB: DB/database.sqlite3 (nodes registry, etc.)
+- Per-node ledger: blockchain/node_{port}.sqlite3 (blocks, transactions)
 """
 
 import sqlite3
 import os
 from pathlib import Path
 
-# Database in parent DB folder
+# Shared database in parent DB folder
 DB_FOLDER = Path(__file__).parent.parent / "DB"
 DB_FOLDER.mkdir(exist_ok=True)
 DB_PATH = str(DB_FOLDER / "database.sqlite3")
+
+# Per-node ledger directory (blockchain folder)
+BLOCKCHAIN_DIR = Path(__file__).parent
+BLOCKCHAIN_DIR.mkdir(exist_ok=True)
+
+
+def get_node_db_path(port):
+    """Path to this node's ledger DB (node_{port}.sqlite3)."""
+    return str(BLOCKCHAIN_DIR / f"node_{port}.sqlite3")
+
+
+def init_node_database(port):
+    """Initialize SQLite ledger for a single node: blocks + transactions."""
+    path = get_node_db_path(port)
+    conn = sqlite3.connect(path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS blocks (
+            "index" INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            prev_hash TEXT NOT NULL,
+            current_hash TEXT NOT NULL,
+            nonce INTEGER NOT NULL,
+            miner_id TEXT NOT NULL,
+            signature TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_hash TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            data TEXT NOT NULL,
+            signature TEXT,
+            start_timestamp TEXT,
+            end_timestamp TEXT
+        )
+    ''')
+    # Migrate existing DBs: add columns if missing
+    for col in ('start_timestamp', 'end_timestamp'):
+        try:
+            cursor.execute(f'ALTER TABLE transactions ADD COLUMN {col} TEXT')
+        except sqlite3.OperationalError:
+            pass
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_blocks_index ON blocks("index")')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_blocks_current_hash ON blocks(current_hash)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_tx_block_hash ON transactions(block_hash)')
+    conn.commit()
+    conn.close()
+    print(f"✅ Node ledger initialized at {path}")
+
+
+def get_node_db_connection(port):
+    """Get a connection to this node's ledger DB. Call from the thread that will use it."""
+    path = get_node_db_path(port)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_database():
     """Initialize SQLite database with required tables"""

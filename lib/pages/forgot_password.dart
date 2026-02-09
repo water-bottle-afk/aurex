@@ -1,6 +1,7 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+import '../providers/client_provider.dart';
 
 class ForgotPasswordPage extends StatefulWidget {
   const ForgotPasswordPage({super.key});
@@ -23,34 +24,33 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     }
 
     if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(
-        email: _emailController.text,
-      );
+      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+      final result = await clientProvider.client.sendVerificationCode(_emailController.text);
 
-      if (mounted) {
-        setState(() {
-          _emailSent = true;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Password reset email sent!')),
-        );
-      }
-    } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: ${e.message}')),
-        );
-      }
-    } finally {
       if (mounted) {
         setState(() {
           _isLoading = false;
+          _emailSent = result == 'success';
         });
+        if (result == 'success') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Verification code sent! Check server logs for code.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to send code. Check email or try again.')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
       }
     }
   }
@@ -65,7 +65,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: BoxDecoration(
+        decoration: const BoxDecoration(
           image: DecorationImage(
             image: AssetImage('assets/images/welcome_background.png'),
             fit: BoxFit.cover,
@@ -109,10 +109,11 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Enter your email to reset password',
+                          'Enter your email to receive a verification code (server sends code to console in dev)',
                           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                 color: Colors.grey[600],
                               ),
+                          textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 32),
                         TextField(
@@ -144,7 +145,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                                     child: CircularProgressIndicator(strokeWidth: 2),
                                   )
                                 : Text(
-                                    _emailSent ? 'Email Sent!' : 'Send Reset Email',
+                                    _emailSent ? 'Code Sent!' : 'Send Verification Code',
                                     style: const TextStyle(color: Colors.white, fontSize: 16),
                                   ),
                           ),

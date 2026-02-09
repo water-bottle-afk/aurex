@@ -1,9 +1,7 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
-import '../main.dart';
 import '../providers/user_provider.dart';
 import '../providers/client_provider.dart';
 
@@ -27,7 +25,6 @@ class _LoginScreenState extends State<LoginScreen> {
     final username = _usernameController.text.trim();
     final password = _passwordController.text;
 
-    // Validate fields
     if (username.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Username cannot be empty')),
@@ -52,12 +49,9 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
 
-      // Login via server protocol - sends LOGIN|username|password
-      // Server responds with OK|username
       final result = await clientProvider.client.login(username, password);
 
       if (result != null) {
-        // Set user in provider with username from server
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: result,
           email: '',
@@ -87,11 +81,10 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  /// Sign in with Google: get email, then look up user by email on server (ORM get_user_by_email).
   Future<void> _signInWithGoogle() async {
     if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
       final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
@@ -101,67 +94,37 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
-
-      // Get both tokens with null-safety checks
-      if (googleAuth.idToken == null && googleAuth.accessToken == null) {
-        throw Exception('Failed to get authentication tokens from Google. Please check Firebase configuration.');
-      }
-
-      // Prefer idToken, fallback to accessToken if needed
-      final idToken = googleAuth.idToken ?? googleAuth.accessToken;
-      
-      if (idToken == null) {
-        throw Exception('No valid token received from Google Sign-In');
-      }
-
-      final AuthCredential credential = GoogleAuthProvider.credential(
-        idToken: idToken,
-      );
-
-      final UserCredential userCredential =
-          await FirebaseAuth.instance.signInWithCredential(credential);
-
-      if (mounted && userCredential.user != null) {
-        // Get email from Google account
-        final googleEmail = googleUser.email;
-        final googleDisplayName = googleUser.displayName ?? googleEmail.split('@')[0];
-
-        // Clear cache on successful login
-        await clearAppCache();
-
-        // Set user in provider (Firebase user)
-        Provider.of<UserProvider>(context, listen: false).setUser(userCredential.user);
-        
-        // Initialize client connection to server
-        try {
-          final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-          await clientProvider.initializeConnection();
-          print('✅ Client connected to TLS server');
-
-          // For Google Sign-In, use email as identifier
-          Provider.of<UserProvider>(context, listen: false).setLocalUser(
-            email: googleEmail,
-            username: googleDisplayName,
-          );
-          
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Welcome, $googleDisplayName!')),
-            );
-          }
-        } catch (e) {
-          print('⚠️ Client connection failed: $e');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Server connection issue: $e')),
-            );
-          }
-        }
-
+      final googleEmail = googleUser.email;
+      if (googleEmail == null || googleEmail.isEmpty) {
         if (mounted) {
-          context.go('/marketplace');
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not get email from Google')),
+          );
         }
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+      await clientProvider.initializeConnection();
+
+      final username = await clientProvider.client.getUserByEmail(googleEmail);
+      if (username != null && mounted) {
+        final displayName = googleUser.displayName ?? googleEmail.split('@')[0];
+        Provider.of<UserProvider>(context, listen: false).setLocalUser(
+          username: username,
+          email: googleEmail,
+        );
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Welcome, $displayName!')),
+        );
+        context.go('/marketplace');
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No account with this email. Sign up with email first.'),
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {

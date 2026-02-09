@@ -1,9 +1,7 @@
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
-import 'firebase_options.dart';
 import 'models/item_offering.dart';
 import 'pages/about_page.dart';
 import 'pages/asset_details_page.dart';
@@ -21,17 +19,9 @@ import 'providers/settings_provider.dart';
 import 'providers/assets_provider.dart';
 
 void main() async {
-  // Initialize Flutter bindings
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Firebase
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
-
-  // Initialize client connection at app startup (before running app)
   final clientProvider = ClientProvider();
-  
   runApp(MyApp(initialClientProvider: clientProvider));
 }
 

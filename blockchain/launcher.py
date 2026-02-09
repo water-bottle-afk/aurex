@@ -1,54 +1,56 @@
 """
 Aurex Blockchain System - Multi-Node Launcher with Separate Windows
-Each node runs in its own subprocess window for independent monitoring
+Each node runs in its own subprocess window. Supports --port and --difficulty per run.
+RPC server: run rpc_server.py separately (socket-based, no Flask); submit_transaction + block_confirmation listener.
 """
 
 import subprocess
 import time
 import sys
 import os
-import threading
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from db_init import init_database
+from db_init import init_database, init_node_database
+from config import NODE_PORTS, NUM_NODES
 
 
 class SimpleBlockchainManager:
-    """Manage multiple PoW nodes using subprocess"""
+    """Manage multiple PoW nodes using subprocess (5 nodes by default)"""
     
-    def __init__(self, num_nodes=3, difficulty=3):
-        """Initialize the blockchain system"""
-        self.num_nodes = num_nodes
+    def __init__(self, num_nodes=None, difficulty=3):
+        """Initialize the blockchain system. num_nodes defaults to 5 (all NODE_PORTS)."""
+        self.num_nodes = num_nodes if num_nodes is not None else NUM_NODES
         self.difficulty = difficulty
         self.processes = []
+        self.ports = NODE_PORTS[:self.num_nodes]
         
         print("\n" + "="*70)
         print("⛓️  AUREX BLOCKCHAIN - PoW SYSTEM")
         print("="*70)
-        print(f"Nodes:        {num_nodes}")
-        print(f"Difficulty:   {difficulty} leading zeros")
+        print(f"Nodes:        {self.num_nodes} (ports: {self.ports})")
+        print(f"Difficulty:   {self.difficulty} leading zeros")
         print(f"Network:      127.0.0.1 (localhost)")
         print("="*70 + "\n")
         sys.stdout.flush()
     
     def setup_database(self):
-        """Initialize database"""
-        print("[DB] Initializing...", flush=True)
+        """Initialize shared DB and per-node ledger DBs"""
+        print("[DB] Initializing shared database...", flush=True)
         sys.stdout.flush()
         init_database()
+        for port in self.ports:
+            init_node_database(port)
         print("[DB] Ready\n", flush=True)
         sys.stdout.flush()
     
     def start_all_nodes(self):
-        """Start all nodes in separate subprocess windows"""
+        """Start all nodes in separate subprocess windows (--port and --difficulty from config)"""
         print("[NODES] Launching in separate windows...\n", flush=True)
         sys.stdout.flush()
         
-        ports = [13245, 13246, 13247][:self.num_nodes]
-        
-        for i, port in enumerate(ports, 1):
+        for i, port in enumerate(self.ports, 1):
             node_name = f"PoW_Node_{i}"
             script_path = os.path.join(os.path.dirname(__file__), f"_node_{i}.py")
             
@@ -131,15 +133,18 @@ except Exception as e:
 
 
 def main():
-    """Main entry point"""
+    """Main entry point. --nodes (default 5), --difficulty (default 3)."""
     import argparse
     
     parser = argparse.ArgumentParser(description='Aurex Blockchain System')
-    parser.add_argument('--nodes', type=int, default=3, help='Number of PoW nodes')
-    parser.add_argument('--difficulty', type=int, default=3, help='Mining difficulty')
+    parser.add_argument('--nodes', type=int, default=NUM_NODES, help='Number of PoW nodes (max 5)')
+    parser.add_argument('--difficulty', type=int, default=3, help='Mining difficulty (leading zeros)')
     args = parser.parse_args()
     
-    manager = SimpleBlockchainManager(num_nodes=args.nodes, difficulty=args.difficulty)
+    manager = SimpleBlockchainManager(
+        num_nodes=min(args.nodes, NUM_NODES),
+        difficulty=args.difficulty
+    )
     manager.run()
 
 

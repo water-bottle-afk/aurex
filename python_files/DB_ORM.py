@@ -82,7 +82,11 @@ class User:
         if self.verification_code == code_to_check and self.reset_time:
             return current_time < datetime.fromisoformat(self.reset_time)
         return False
-    
+
+    def set_password(self, new_password):
+        """Update password hash (e.g. after password reset)."""
+        self.password_hash = self._hash_password(new_password)
+
     def __repr__(self):
         return f"User(username={self.username}, email={self.email}, verified={self.is_verified})"
 
@@ -125,6 +129,16 @@ class MarketplaceDB:
                 cost REAL NOT NULL,
                 timestamp TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                FOREIGN KEY (username) REFERENCES users (username)
+            )
+        ''')
+        
+        # Wallets table (balance in coins)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wallets (
+                username TEXT PRIMARY KEY,
+                balance REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY (username) REFERENCES users (username)
             )
         ''')
@@ -221,6 +235,104 @@ class MarketplaceDB:
         if user and user.verify_password(password):
             return True
         return False
+
+    def get_wallet(self, username):
+        """Get wallet balance for user. Returns balance or None if no wallet."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT balance, updated_at FROM wallets WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            conn.close()
+            return {'balance': row[0], 'updated_at': row[1]} if row else None
+        except Exception as e:
+            print(f"Error getting wallet: {e}")
+            return None
+
+    def ensure_wallet(self, username, initial_balance=0):
+        """Create wallet for user if not exists. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1 FROM wallets WHERE username = ?', (username,))
+            if cursor.fetchone():
+                conn.close()
+                return True
+            cursor.execute(
+                'INSERT INTO wallets (username, balance, updated_at) VALUES (?, ?, ?)',
+                (username, initial_balance, datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error ensuring wallet: {e}")
+            return False
+
+    def update_balance(self, username, new_balance):
+        """Set wallet balance. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
+                (new_balance, datetime.now().isoformat(), username)
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error updating balance: {e}")
+            return False
+
+    def transfer(self, from_user, to_user, amount):
+        """Transfer amount from from_user to to_user. Returns (success, message)."""
+        if amount <= 0:
+            return False, "Amount must be positive"
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (from_user,))
+            row_from = cursor.fetchone()
+            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (to_user,))
+            row_to = cursor.fetchone()
+            if not row_from:
+                conn.close()
+                return False, f"Wallet not found: {from_user}"
+            if not row_to:
+                conn.close()
+                return False, f"Wallet not found: {to_user}"
+            bal_from = row_from[0]
+            bal_to = row_to[0]
+            if bal_from < amount:
+                conn.close()
+                return False, f"Insufficient balance: {from_user} has {bal_from}"
+            now = datetime.now().isoformat()
+            cursor.execute('UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
+                           (bal_from - amount, now, from_user))
+            cursor.execute('UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
+                           (bal_to + amount, now, to_user))
+            conn.commit()
+            conn.close()
+            return True, f"Transferred {amount} from {from_user} to {to_user}"
+        except Exception as e:
+            return False, str(e)
+
+    def seed_alice_bob(self):
+        """Create users alice and bob and their wallets (alice 100 coins, bob 0). Idempotent."""
+        for username, password, email, balance in [
+            ('alice', 'alice123', 'alice@test.com', 100.0),
+            ('bob', 'bob123', 'bob@test.com', 0.0),
+        ]:
+            if self.get_user(username) is None:
+                ok, msg = self.add_user(username, password, email)
+                print(f"  User {username}: {msg}")
+            else:
+                print(f"  User {username}: already exists")
+            self.ensure_wallet(username, balance)
+            w = self.get_wallet(username)
+            print(f"  Wallet {username}: balance={w['balance'] if w else 'N/A'}")
+        print("  Done: alice and bob ready (alice 100 coins, bob 0).")
     
     def update_user(self, username, user):
         """Update user information (verification status, codes, password)"""
@@ -235,7 +347,7 @@ class MarketplaceDB:
                     verification_code = ?,
                     reset_time = ?
                 WHERE username = ?
-            ''', (user.password_hash, int(user.is_verified), user.verification_code, 
+            ''', (user.password_hash, int(user.is_verified), user.verification_code,
                   user.reset_time, user.username))
             
             conn.commit()
@@ -385,3 +497,25 @@ class MarketplaceDB:
     def get_items_before_timestamp(self, timestamp, limit=10):
         """Get items before a specific timestamp (for pagination)"""
         return self.get_items_paginated(limit=limit, last_timestamp=timestamp)
+
+    def get_items_by_username(self, username):
+        """Get marketplace items uploaded by a specific user (for GET_ITEMS / asset list)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, asset_name, username, url, file_type, cost, timestamp, created_at
+                FROM marketplace_items
+                WHERE username = ?
+                ORDER BY created_at DESC
+            ''', (username,))
+            results = cursor.fetchall()
+            conn.close()
+            return [
+                {'id': row[0], 'asset_name': row[1], 'username': row[2], 'url': row[3],
+                 'file_type': row[4], 'cost': row[5], 'timestamp': row[6], 'created_at': row[7]}
+                for row in results
+            ]
+        except Exception as e:
+            print(f"Error getting items by username: {e}")
+            return []
