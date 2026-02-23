@@ -1,9 +1,11 @@
 import 'package:flutter/foundation.dart';
 import '../models/item_offering.dart';
 import 'client_provider.dart';
+import '../utils/app_logger.dart';
 
 class AssetsProvider extends ChangeNotifier {
   final ClientProvider clientProvider;
+  final AppLogger _log = AppLogger.get('assets_provider.dart');
   
   final List<ItemOffering> _assets = [];
   bool _isLoading = false;
@@ -28,6 +30,16 @@ class AssetsProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          _error = 'Server connection failed';
+          _isLoading = false;
+          notifyListeners();
+          return;
+        }
+      }
+
       final client = clientProvider.client;
 
       // Request asset list with pagination
@@ -46,7 +58,9 @@ class AssetsProvider extends ChangeNotifier {
           final asset = ItemOffering(
             id: item['id']?.toString() ?? 'unknown_${_assets.length}',
             title: item['asset_name'] ?? 'Asset #${_assets.length + 1}',
-            description: item['file_type'] ?? 'Marketplace item',
+            description: item['description'] ??
+                item['file_type'] ??
+                'No description provided.',
             imageUrl: item['url'] ?? 'assets/images/leather_jacket.png',
             author: item['username'] ?? 'Unknown',
             price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
@@ -113,7 +127,7 @@ class AssetsProvider extends ChangeNotifier {
       // For now, return placeholder
       return 'assets/images/leather_jacket.png';
     } catch (e) {
-      print('Error downloading asset image: $e');
+      _log.error('Error downloading asset image: $e');
       rethrow;
     }
   }

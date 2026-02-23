@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/google_drive_image_loader.dart';
 import 'item_details_elegant.dart';
 import 'upload_item_page.dart';
+import '../utils/app_logger.dart';
 
 /// Model for marketplace item
 class MarketplaceItem {
@@ -48,6 +49,7 @@ class MarketplacePageV2 extends StatefulWidget {
 }
 
 class _MarketplacePageV2State extends State<MarketplacePageV2> {
+  final AppLogger _log = AppLogger.get('marketplace_page_v2.dart');
   final ScrollController _scrollController = ScrollController();
   List<MarketplaceItem> items = [];
   bool isLoading = true;
@@ -99,7 +101,7 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
   void _onScroll() {
     if (_scrollController.position.pixels ==
         _scrollController.position.maxScrollExtent) {
-      print("📜 Reached bottom - loading older items...");
+      _log.info('Reached bottom - loading older items...');
       // TODO: Load more items from server
     }
   }

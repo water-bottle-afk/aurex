@@ -92,7 +92,7 @@ class _UploadItemPageState extends State<UploadItemPage> {
 
     final fileName = _nameController.text.isEmpty
         ? _selectedFile!.path.split('/').last
-        : '${_nameController.text}.${_selectedFileType}';
+        : '${_nameController.text}.$_selectedFileType';
 
     final url = await _googleDriveService.uploadFile(_selectedFile!, fileName);
 
@@ -215,7 +215,7 @@ class _UploadItemPageState extends State<UploadItemPage> {
                         : Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.check_circle, size: 48, color: Colors.green),
+                              const Icon(Icons.check_circle, size: 48, color: Colors.green),
                               const SizedBox(height: 8),
                               Text(_selectedFile!.path.split('/').last, style: const TextStyle(fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
                             ],

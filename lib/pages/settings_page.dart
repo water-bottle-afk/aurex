@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/user_provider.dart';
@@ -90,12 +91,74 @@ class _SettingsPageState extends State<SettingsPage> {
       appBar: AppBar(
         title: const Text('Settings'),
         backgroundColor: Colors.blue,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go('/marketplace');
+            }
+          },
+        ),
       ),
       body: Consumer2<UserProvider, SettingsProvider>(
         builder: (context, userProvider, settingsProvider, child) {
           return ListView(
             padding: const EdgeInsets.all(16.0),
             children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.blueGrey[900],
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 24,
+                      backgroundColor: Colors.white,
+                      child: Text(
+                        userProvider.username.isNotEmpty
+                            ? userProvider.username[0].toUpperCase()
+                            : 'U',
+                        style: TextStyle(
+                          color: Colors.blueGrey[900],
+                          fontWeight: FontWeight.bold,
+                          fontSize: 20,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Hello ${userProvider.username},',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            userProvider.email.isNotEmpty
+                                ? userProvider.email
+                                : 'Signed in locally',
+                            style: TextStyle(
+                              color: Colors.blueGrey[100],
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
               // User Profile Section
               Card(
                 elevation: 2,

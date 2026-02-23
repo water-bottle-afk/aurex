@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../providers/client_provider.dart';
+import '../utils/app_logger.dart';
 
 class ForgotPasswordPage extends StatefulWidget {
   const ForgotPasswordPage({super.key});
@@ -14,11 +15,19 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
   final _emailController = TextEditingController();
   bool _isLoading = false;
   bool _emailSent = false;
+  final AppLogger _log = AppLogger.get('forgot_password.dart');
 
   Future<void> _resetPassword() async {
-    if (_emailController.text.isEmpty) {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter your email')),
+      );
+      return;
+    }
+    if (!email.contains('@')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid email')),
       );
       return;
     }
@@ -28,29 +37,39 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
 
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      final result = await clientProvider.client.sendVerificationCode(_emailController.text);
+      if (!clientProvider.isConnected) {
+        await clientProvider.initializeConnection();
+      }
+      final result = await clientProvider.client.sendVerificationCode(email);
 
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _emailSent = result == 'success';
-        });
-        if (result == 'success') {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Verification code sent! Check server logs for code.')),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to send code. Check email or try again.')),
-          );
-        }
+      if (!mounted) return;
+      _emailSent = result == 'success';
+
+      if (_emailSent) {
+        _log.success('Verification code sent for $email');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Verification code sent! Check server logs for code.'),
+          ),
+        );
+      } else {
+        _log.warn('Verification code send failed for $email');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to send code. Check email or try again.'),
+          ),
+        );
       }
     } catch (e) {
+      _log.error('Reset password error: $e');
       if (mounted) {
-        setState(() => _isLoading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error: $e')),
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
       }
     }
   }
@@ -84,7 +103,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                     child: Container(
                       width: 50,
                       height: 50,
-                      decoration: BoxDecoration(
+                      decoration: const BoxDecoration(
                         color: Colors.white,
                         shape: BoxShape.circle,
                       ),

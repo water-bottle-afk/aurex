@@ -77,7 +77,7 @@ def main():
         else:
             print("No response from RPC.")
     except ConnectionRefusedError:
-        print("ERROR: Could not connect to RPC. Is rpc_server.py running on", RPC_HOST + ":" + str(RPC_LISTEN_PORT), "?")
+        print("ERROR: Could not connect to gateway. Is gateway_server.py running on", RPC_HOST + ":" + str(RPC_LISTEN_PORT), "?")
         sys.exit(1)
     except Exception as e:
         print("ERROR:", e)

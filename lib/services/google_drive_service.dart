@@ -2,10 +2,12 @@ import 'dart:io';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:http/http.dart' as http;
+import '../utils/app_logger.dart';
 
 /// Google Drive upload service for direct file uploads from Flutter
 class GoogleDriveService {
   static const String _googleDriveFolderName = 'Aurex_Marketplace';
+  final AppLogger _log = AppLogger.get('google_drive_service.dart');
   
   late GoogleSignIn _googleSignIn;
   GoogleSignInAccount? _currentUser;
@@ -34,7 +36,7 @@ class GoogleDriveService {
       
       return true;
     } catch (e) {
-      print('❌ Google Sign-In failed: $e');
+      _log.error('Google Sign-In failed: $e');
       return false;
     }
   }
@@ -46,7 +48,7 @@ class GoogleDriveService {
       _currentUser = null;
       _driveApi = null;
     } catch (e) {
-      print('❌ Sign out failed: $e');
+      _log.error('Sign out failed: $e');
     }
   }
 
@@ -61,14 +63,14 @@ class GoogleDriveService {
   Future<String?> uploadFile(File file, String fileName) async {
     try {
       if (_driveApi == null) {
-        print('❌ Not signed in to Google Drive');
+        _log.warn('Not signed in to Google Drive');
         return null;
       }
 
       // Get or create Aurex_Marketplace folder
       final folderId = await _getOrCreateFolder(_googleDriveFolderName);
       if (folderId == null) {
-        print('❌ Failed to create/get folder');
+        _log.error('Failed to create/get folder');
         return null;
       }
 
@@ -79,14 +81,14 @@ class GoogleDriveService {
       fileMetadata.description = 'Uploaded from Aurex Marketplace';
 
       // Upload file
-      print('📤 Uploading $fileName to Google Drive...');
+      _log.info('Uploading $fileName to Google Drive...');
       final response = await _driveApi!.files.create(
         fileMetadata,
         uploadMedia: drive.Media(file.openRead(), await file.length()),
       );
 
       if (response.id == null) {
-        print('❌ Upload failed');
+        _log.error('Upload failed');
         return null;
       }
 
@@ -97,10 +99,10 @@ class GoogleDriveService {
       final directUrl =
           'https://drive.google.com/uc?export=view&id=${response.id}';
       
-      print('✅ Upload successful: $directUrl');
+      _log.success('Upload successful: $directUrl');
       return directUrl;
     } catch (e) {
-      print('❌ Upload error: $e');
+      _log.error('Upload error: $e');
       return null;
     }
   }
@@ -123,7 +125,7 @@ class GoogleDriveService {
       }
 
       // Create new folder if not found
-      print('📁 Creating $folderName folder...');
+      _log.info('Creating $folderName folder...');
       final folderMetadata = drive.File();
       folderMetadata.name = folderName;
       folderMetadata.mimeType = 'application/vnd.google-apps.folder';
@@ -131,12 +133,12 @@ class GoogleDriveService {
       final created = await _driveApi!.files.create(folderMetadata);
       
       if (created.id != null) {
-        print('✅ Folder created: ${created.id}');
+        _log.success('Folder created: ${created.id}');
       }
       
       return created.id;
     } catch (e) {
-      print('❌ Folder creation error: $e');
+      _log.error('Folder creation error: $e');
       return null;
     }
   }
@@ -149,9 +151,9 @@ class GoogleDriveService {
       permission.role = 'reader';
 
       await _driveApi!.permissions.create(permission, fileId);
-      print('✅ File sharing enabled');
+      _log.success('File sharing enabled');
     } catch (e) {
-      print('⚠️ Error setting sharing: $e');
+      _log.warn('Error setting sharing: $e');
       // Non-critical error, continue
     }
   }

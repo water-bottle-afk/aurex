@@ -10,6 +10,10 @@ SERVER_IP = '192.168.1.61'  # Local network IP (update this when you change loca
 # Block confirmation listener (RPC server sends block_confirmation here)
 BLOCK_CONFIRMATION_PORT = 23457
 
+# Gateway (RPC) server for PoW submissions
+GATEWAY_HOST = '127.0.0.1'
+GATEWAY_PORT = 5000
+
 # Broadcast Discovery Configuration
 BROADCAST_PORT = 12345   # UDP port for WHRSRV discovery
 BROADCAST_TIMEOUT = 5    # Seconds to wait for discovery response

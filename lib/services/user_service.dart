@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import '../models/user_model.dart';
+import '../utils/app_logger.dart';
 
 class UserService {
   static final UserService _instance = UserService._internal();
+  final AppLogger _log = AppLogger.get('user_service.dart');
 
   factory UserService() {
     return _instance;
@@ -40,7 +42,7 @@ class UserService {
       final jsonData = jsonDecode(contents) as List;
       return jsonData.map((user) => UserModel.fromJson(user as Map<String, dynamic>)).toList();
     } catch (e) {
-      print('Error loading users: $e');
+      _log.error('Error loading users: $e');
       return [];
     }
   }
@@ -51,7 +53,7 @@ class UserService {
       final jsonData = users.map((user) => user.toJson()).toList();
       await file.writeAsString(jsonEncode(jsonData));
     } catch (e) {
-      print('Error saving users: $e');
+      _log.error('Error saving users: $e');
     }
   }
 
@@ -207,6 +209,6 @@ class UserService {
 
   /// Clear all session data (called on logout)
   Future<void> clearSession() async {
-    print('Session cleared');
+    _log.success('Session cleared');
   }
 }

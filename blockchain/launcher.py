@@ -1,7 +1,7 @@
 """
 Aurex Blockchain System - Multi-Node Launcher with Separate Windows
 Each node runs in its own subprocess window. Supports --port and --difficulty per run.
-RPC server: run rpc_server.py separately (socket-based, no Flask); submit_transaction + block_confirmation listener.
+Gateway server: run gateway_server.py separately (socket-based, no Flask); submit_transaction + block_confirmation listener.
 """
 
 import subprocess
