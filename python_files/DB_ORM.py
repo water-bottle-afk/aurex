@@ -44,16 +44,29 @@ def convert_drive_url(drive_url):
 class User:
     """User class with salt + pepper hashing and email verification"""
     
-    def __init__(self, username, password, email, salt=None, is_verified=False, 
-                 verification_code=None, reset_time=None):
+    def __init__(
+        self,
+        username,
+        password,
+        email,
+        salt=None,
+        is_verified=False,
+        verification_code=None,
+        reset_time=None,
+        created_at=None,
+        wallet_balance=0.0,
+        wallet_updated_at=None,
+    ):
         self.username = username
         self.email = email
         self.salt = salt if salt else self._create_salt()
         self.password_hash = self._hash_password(password)
-        self.created_at = datetime.now().isoformat()
+        self.created_at = created_at or datetime.now().isoformat()
         self.is_verified = is_verified
         self.verification_code = verification_code
         self.reset_time = reset_time
+        self.wallet_balance = float(wallet_balance)
+        self.wallet_updated_at = wallet_updated_at or self.created_at
     
     def _create_salt(self):
         """Generate unique salt"""
@@ -114,15 +127,26 @@ class MarketplaceDB:
                 is_verified INTEGER DEFAULT 0,
                 verification_code TEXT,
                 reset_time TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                wallet_balance REAL NOT NULL DEFAULT 0,
+                wallet_updated_at TEXT
             )
         ''')
+
+        # Ensure wallet columns exist for older DBs
+        cursor.execute("PRAGMA table_info(users)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        if "wallet_balance" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN wallet_balance REAL NOT NULL DEFAULT 0")
+        if "wallet_updated_at" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN wallet_updated_at TEXT")
         
         # Marketplace items table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS marketplace_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 asset_name TEXT NOT NULL,
+                description TEXT,
                 username TEXT NOT NULL,
                 url TEXT NOT NULL,
                 file_type TEXT NOT NULL,
@@ -132,16 +156,12 @@ class MarketplaceDB:
                 FOREIGN KEY (username) REFERENCES users (username)
             )
         ''')
-        
-        # Wallets table (balance in coins)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wallets (
-                username TEXT PRIMARY KEY,
-                balance REAL NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (username) REFERENCES users (username)
-            )
-        ''')
+
+        # Ensure description column exists for older DBs
+        cursor.execute("PRAGMA table_info(marketplace_items)")
+        item_cols = {row[1] for row in cursor.fetchall()}
+        if "description" not in item_cols:
+            cursor.execute("ALTER TABLE marketplace_items ADD COLUMN description TEXT")
         
         conn.commit()
         conn.close()
@@ -154,9 +174,17 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO users (username, email, password_hash, salt, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user.username, user.email, user.password_hash, user.salt, user.created_at))
+                INSERT INTO users (username, email, password_hash, salt, created_at, wallet_balance, wallet_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user.username,
+                user.email,
+                user.password_hash,
+                user.salt,
+                user.created_at,
+                user.wallet_balance,
+                user.wallet_updated_at,
+            ))
             
             conn.commit()
             conn.close()
@@ -179,7 +207,7 @@ class MarketplaceDB:
             
             cursor.execute('''
                 SELECT username, email, password_hash, salt, is_verified, 
-                       verification_code, reset_time, created_at FROM users
+                       verification_code, reset_time, created_at, wallet_balance, wallet_updated_at FROM users
                 WHERE username = ?
             ''', (username,))
             
@@ -187,13 +215,12 @@ class MarketplaceDB:
             conn.close()
             
             if result:
-                user = User(result[0], "", result[1])
+                user = User(result[0], "", result[1], created_at=result[7], wallet_balance=result[8], wallet_updated_at=result[9])
                 user.password_hash = result[2]
                 user.salt = result[3]
                 user.is_verified = bool(result[4])
                 user.verification_code = result[5]
                 user.reset_time = result[6]
-                user.created_at = result[7]
                 return user
             return None
         except Exception as e:
@@ -208,7 +235,7 @@ class MarketplaceDB:
             
             cursor.execute('''
                 SELECT username, email, password_hash, salt, is_verified,
-                       verification_code, reset_time, created_at FROM users
+                       verification_code, reset_time, created_at, wallet_balance, wallet_updated_at FROM users
                 WHERE email = ?
             ''', (email,))
             
@@ -216,13 +243,12 @@ class MarketplaceDB:
             conn.close()
             
             if result:
-                user = User(result[0], "", result[1])
+                user = User(result[0], "", result[1], created_at=result[7], wallet_balance=result[8], wallet_updated_at=result[9])
                 user.password_hash = result[2]
                 user.salt = result[3]
                 user.is_verified = bool(result[4])
                 user.verification_code = result[5]
                 user.reset_time = result[6]
-                user.created_at = result[7]
                 return user
             return None
         except Exception as e:
@@ -241,7 +267,7 @@ class MarketplaceDB:
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute('SELECT balance, updated_at FROM wallets WHERE username = ?', (username,))
+            cursor.execute('SELECT wallet_balance, wallet_updated_at FROM users WHERE username = ?', (username,))
             row = cursor.fetchone()
             conn.close()
             return {'balance': row[0], 'updated_at': row[1]} if row else None
@@ -250,17 +276,18 @@ class MarketplaceDB:
             return None
 
     def ensure_wallet(self, username, initial_balance=0):
-        """Create wallet for user if not exists. Returns True on success."""
+        """Ensure wallet balance exists for user. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute('SELECT 1 FROM wallets WHERE username = ?', (username,))
-            if cursor.fetchone():
+            cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            if not row:
                 conn.close()
-                return True
+                return False
             cursor.execute(
-                'INSERT INTO wallets (username, balance, updated_at) VALUES (?, ?, ?)',
-                (username, initial_balance, datetime.now().isoformat())
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+                (float(initial_balance), datetime.now().isoformat(), username)
             )
             conn.commit()
             conn.close()
@@ -275,8 +302,8 @@ class MarketplaceDB:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                'UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
-                (new_balance, datetime.now().isoformat(), username)
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+                (float(new_balance), datetime.now().isoformat(), username)
             )
             conn.commit()
             conn.close()
@@ -291,31 +318,44 @@ class MarketplaceDB:
             return False, "Amount must be positive"
         try:
             conn = sqlite3.connect(self.db_path)
+            conn.isolation_level = None
             cursor = conn.cursor()
-            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (from_user,))
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (from_user,))
             row_from = cursor.fetchone()
-            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (to_user,))
+            cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (to_user,))
             row_to = cursor.fetchone()
             if not row_from:
+                cursor.execute("ROLLBACK")
                 conn.close()
                 return False, f"Wallet not found: {from_user}"
             if not row_to:
+                cursor.execute("ROLLBACK")
                 conn.close()
                 return False, f"Wallet not found: {to_user}"
             bal_from = row_from[0]
             bal_to = row_to[0]
             if bal_from < amount:
+                cursor.execute("ROLLBACK")
                 conn.close()
                 return False, f"Insufficient balance: {from_user} has {bal_from}"
             now = datetime.now().isoformat()
-            cursor.execute('UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
-                           (bal_from - amount, now, from_user))
-            cursor.execute('UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
-                           (bal_to + amount, now, to_user))
-            conn.commit()
+            cursor.execute(
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+                (bal_from - amount, now, from_user)
+            )
+            cursor.execute(
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+                (bal_to + amount, now, to_user)
+            )
+            cursor.execute("COMMIT")
             conn.close()
             return True, f"Transferred {amount} from {from_user} to {to_user}"
         except Exception as e:
+            try:
+                cursor.execute("ROLLBACK")
+            except Exception:
+                pass
             return False, str(e)
 
     def seed_alice_bob(self):
@@ -357,7 +397,7 @@ class MarketplaceDB:
             print(f"Error updating user: {e}")
             return False
     
-    def add_marketplace_item(self, asset_name, username, url, file_type, cost):
+    def add_marketplace_item(self, asset_name, username, url, file_type, cost, description=""):
         """Add item to marketplace"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -367,9 +407,18 @@ class MarketplaceDB:
             direct_url = convert_drive_url(url)
             
             cursor.execute('''
-                INSERT INTO marketplace_items (asset_name, username, url, file_type, cost, timestamp, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (asset_name, username, direct_url, file_type, cost, datetime.now().isoformat(), datetime.now().isoformat()))
+                INSERT INTO marketplace_items (asset_name, description, username, url, file_type, cost, timestamp, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                asset_name,
+                description,
+                username,
+                direct_url,
+                file_type,
+                cost,
+                datetime.now().isoformat(),
+                datetime.now().isoformat(),
+            ))
             
             conn.commit()
             conn.close()
@@ -384,7 +433,7 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT id, asset_name, username, url, file_type, cost, timestamp, created_at
+                SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at
                 FROM marketplace_items
                 ORDER BY created_at DESC
             ''')
@@ -397,12 +446,13 @@ class MarketplaceDB:
                 items.append({
                     'id': row[0],
                     'asset_name': row[1],
-                    'username': row[2],
-                    'url': row[3],
-                    'file_type': row[4],
-                    'cost': row[5],
-                    'timestamp': row[6],
-                    'created_at': row[7]
+                    'description': row[2],
+                    'username': row[3],
+                    'url': row[4],
+                    'file_type': row[5],
+                    'cost': row[6],
+                    'timestamp': row[7],
+                    'created_at': row[8]
                 })
             return items
         except Exception as e:
@@ -416,7 +466,7 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT id, asset_name, username, url, file_type, cost, timestamp, created_at
+                SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at
                 FROM marketplace_items WHERE id = ?
             ''', (item_id,))
             
@@ -427,12 +477,13 @@ class MarketplaceDB:
                 return {
                     'id': result[0],
                     'asset_name': result[1],
-                    'username': result[2],
-                    'url': result[3],
-                    'file_type': result[4],
-                    'cost': result[5],
-                    'timestamp': result[6],
-                    'created_at': result[7]
+                    'description': result[2],
+                    'username': result[3],
+                    'url': result[4],
+                    'file_type': result[5],
+                    'cost': result[6],
+                    'timestamp': result[7],
+                    'created_at': result[8]
                 }
             return None
         except Exception as e:
@@ -455,7 +506,7 @@ class MarketplaceDB:
             if last_timestamp:
                 # Get items older than last_timestamp
                 cursor.execute('''
-                    SELECT id, asset_name, username, url, file_type, cost, timestamp, created_at
+                    SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at
                     FROM marketplace_items
                     WHERE created_at < ?
                     ORDER BY created_at DESC
@@ -464,7 +515,7 @@ class MarketplaceDB:
             else:
                 # Get newest items
                 cursor.execute('''
-                    SELECT id, asset_name, username, url, file_type, cost, timestamp, created_at
+                    SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at
                     FROM marketplace_items
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -478,12 +529,13 @@ class MarketplaceDB:
                 items.append({
                     'id': row[0],
                     'asset_name': row[1],
-                    'username': row[2],
-                    'url': row[3],
-                    'file_type': row[4],
-                    'cost': row[5],
-                    'timestamp': row[6],
-                    'created_at': row[7]
+                    'description': row[2],
+                    'username': row[3],
+                    'url': row[4],
+                    'file_type': row[5],
+                    'cost': row[6],
+                    'timestamp': row[7],
+                    'created_at': row[8]
                 })
             return items
         except Exception as e:
@@ -504,7 +556,7 @@ class MarketplaceDB:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT id, asset_name, username, url, file_type, cost, timestamp, created_at
+                SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at
                 FROM marketplace_items
                 WHERE username = ?
                 ORDER BY created_at DESC
@@ -512,10 +564,27 @@ class MarketplaceDB:
             results = cursor.fetchall()
             conn.close()
             return [
-                {'id': row[0], 'asset_name': row[1], 'username': row[2], 'url': row[3],
-                 'file_type': row[4], 'cost': row[5], 'timestamp': row[6], 'created_at': row[7]}
+                {'id': row[0], 'asset_name': row[1], 'description': row[2], 'username': row[3], 'url': row[4],
+                 'file_type': row[5], 'cost': row[6], 'timestamp': row[7], 'created_at': row[8]}
                 for row in results
             ]
         except Exception as e:
             print(f"Error getting items by username: {e}")
             return []
+
+    def update_asset_owner(self, asset_id, new_owner):
+        """Update marketplace item owner by asset id. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE marketplace_items SET username = ? WHERE id = ?',
+                (new_owner, asset_id)
+            )
+            conn.commit()
+            updated = cursor.rowcount > 0
+            conn.close()
+            return updated
+        except Exception as e:
+            print(f"Error updating asset owner: {e}")
+            return False

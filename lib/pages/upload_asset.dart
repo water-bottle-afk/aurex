@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import '../providers/client_provider.dart';
 import '../providers/user_provider.dart';
+import '../utils/app_logger.dart';
 
 class UploadAssetPage extends StatefulWidget {
   const UploadAssetPage({super.key});
@@ -14,6 +15,7 @@ class UploadAssetPage extends StatefulWidget {
 }
 
 class _UploadAssetPageState extends State<UploadAssetPage> {
+  final AppLogger _log = AppLogger.get('upload_asset.dart');
   bool _isUploading = false;
   String? _uploadedAssetId;
   String? _statusMessage;
@@ -157,7 +159,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
 
       if (response.statusCode == 200) {
         final responseBody = await response.stream.bytesToString();
-        print('Google Apps Script Response: $responseBody');
+        _log.info('Google Apps Script Response: $responseBody');
 
         // Extract Google Drive file ID from response
         final fileId = _extractFileId(responseBody);
@@ -173,7 +175,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         );
       }
     } catch (e) {
-      print('Error uploading to Google Drive: $e');
+      _log.error('Error uploading to Google Drive: $e');
       rethrow;
     }
   }
@@ -190,7 +192,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
       // If response is just the ID
       return response.trim().replaceAll('"', '');
     } catch (e) {
-      print('Error extracting file ID: $e');
+      _log.error('Error extracting file ID: $e');
       return '';
     }
   }
@@ -410,7 +412,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                         ),
                         child: Column(
                           children: [
-                            Icon(
+                            const Icon(
                               Icons.cloud_upload_outlined,
                               size: 48,
                               color: Colors.white70,
@@ -471,7 +473,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                             onTap: () {
                               setState(() => _selectedFile = null);
                             },
-                            child: Icon(
+                            child: const Icon(
                               Icons.close,
                               color: Colors.white70,
                               size: 20,

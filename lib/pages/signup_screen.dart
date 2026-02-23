@@ -102,9 +102,9 @@ class _SignupScreenState extends State<SignupScreen> {
       }
 
       final googleEmail = googleUser.email;
-      final displayName = googleUser.displayName ?? googleEmail?.split('@')[0] ?? 'User';
+      final displayName = googleUser.displayName ?? googleEmail.split('@')[0];
 
-      if (googleEmail == null || googleEmail.isEmpty) {
+      if (googleEmail.isEmpty) {
         setState(() => _isLoading = false);
         return;
       }

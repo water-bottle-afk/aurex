@@ -49,6 +49,18 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
 
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Server connection failed')),
+            );
+          }
+          return;
+        }
+      }
+
       final result = await clientProvider.client.login(username, password);
 
       if (result != null) {
@@ -95,7 +107,7 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       final googleEmail = googleUser.email;
-      if (googleEmail == null || googleEmail.isEmpty) {
+      if (googleEmail.isEmpty) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Could not get email from Google')),

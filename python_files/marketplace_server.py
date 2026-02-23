@@ -31,7 +31,7 @@ def handle_login(args):
         
         # Verify user credentials
         if db.verify_user(username, password):
-            return "OK"
+            return f"OK|{username}"
         else:
             return "ERR|Invalid username or password"
     except Exception as e:
@@ -67,7 +67,7 @@ def handle_signup(args):
         success, message = db.add_user(username, password, email)
         
         if success:
-            return "OK"
+            return f"OK|{username}"
         else:
             return f"ERR|{message}"
     except Exception as e:
@@ -84,6 +84,24 @@ def handle_get_items(args):
         items = db.get_all_items()
         items_json = json.dumps(items)
         return f"OK|{items_json}"
+    except Exception as e:
+        return f"ERR|Error getting items: {str(e)}"
+
+
+def handle_get_items_by_user(args):
+    """
+    Handle GET_ITEMS_BY_USER request
+    Format: GET_ITEMS_BY_USER|username
+    Returns: OK|items_json or ERR|message
+    """
+    try:
+        if len(args) < 2:
+            return "ERR|Username required"
+        username = args[1].strip()
+        if not username:
+            return "ERR|Username required"
+        items = db.get_items_by_username(username)
+        return f"OK|{json.dumps(items)}"
     except Exception as e:
         return f"ERR|Error getting items: {str(e)}"
 
@@ -168,7 +186,7 @@ def handle_send_verification_code(args):
         user.set_reset_time(reset_time)
         
         # Update user in database
-        db.update_user(email, user)
+        db.update_user(user.username, user)
         
         # TODO: Send email in production
         # For now, return the code (in production, email it)
@@ -198,7 +216,7 @@ def handle_verify_code(args):
         
         if user.is_code_match_and_available(datetime.now(), code):
             user.is_verified = True
-            db.update_user(email, user)
+            db.update_user(user.username, user)
             return "OK|Email verified"
         else:
             return "ERR|Invalid or expired code"
@@ -230,10 +248,13 @@ def handle_upload_item(args):
             return "ERR|Invalid item data"
         
         # Verify file type
-        if file_type.lower() not in ['jpg', 'png']:
-            return "ERR|File type must be jpg or png"
+        normalized_type = file_type.lower()
+        if normalized_type == 'image':
+            normalized_type = 'jpg'
+        if normalized_type not in ['jpg', 'png', 'gif', 'jpeg']:
+            return "ERR|File type must be jpg, png, gif, or jpeg"
         
-        success, message = db.add_marketplace_item(asset_name, username, url, file_type, cost)
+        success, message = db.add_marketplace_item(asset_name, username, url, normalized_type, cost)
         
         if success:
             return "OK"
@@ -255,6 +276,7 @@ def process_message(message_str):
     - GET_ITEMS
     - GET_ITEM|item_id
     - GET_ITEMS_PAGINATED|limit|last_timestamp
+    - GET_ITEMS_BY_USER|username
     - SEND_CODE|email
     - VERIFY_CODE|email|code
     - UPLOAD|asset_name|username|google_drive_url|file_type|cost
@@ -275,6 +297,8 @@ def process_message(message_str):
             return handle_get_item(parts)
         elif keyword == 'GET_ITEMS_PAGINATED':
             return handle_get_items_paginated(parts)
+        elif keyword == 'GET_ITEMS_BY_USER':
+            return handle_get_items_by_user(parts)
         elif keyword == 'SEND_CODE':
             return handle_send_verification_code(parts)
         elif keyword == 'VERIFY_CODE':

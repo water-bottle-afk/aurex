@@ -52,7 +52,7 @@ class _DebugOverlayState extends State<DebugOverlay> {
             right: 0,
             child: Container(
               height: MediaQuery.of(context).size.height * 0.4,
-              decoration: BoxDecoration(
+              decoration: const BoxDecoration(
                 color: Colors.black87,
                 border: Border(
                   top: BorderSide(color: Colors.cyan, width: 2),

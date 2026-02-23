@@ -51,7 +51,7 @@ Supported Commands:
   
   11. BUY - Purchase an asset from marketplace
       Send: BUY|asset_id|username|amount
-      Recv: OK|transaction_id or ERR|error_message
+      Recv: OK|PENDING|transaction_id or ERR|error_message
   
   12. SEND - Send purchased asset to another user
       Send: SEND|asset_id|sender_username|receiver_username
@@ -64,20 +64,36 @@ Supported Commands:
   14. GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in)
       Send: GET_USER_BY_EMAIL|email
       Recv: OK|username or ERR|error_message
+
+  15. GET_TX_STATUS - Check blockchain purchase status
+      Send: GET_TX_STATUS|tx_id
+      Recv: OK|STATUS|message or ERR|error_message
+
+  16. GET_ITEMS_BY_USER - Get assets owned by a user
+      Send: GET_ITEMS_BY_USER|username
+      Recv: OK|items_json or ERR|error_message
+
+  17. GET_WALLET - Get wallet balance for a user
+      Send: GET_WALLET|username
+      Recv: OK|balance|updated_at or ERR|error_message
 """
 
 import datetime
 import json
 import logging
+import queue
 import random
 import socket
 import ssl as ssl_module
+import struct
 import threading
 import time
+import uuid
 from config import (
     SERVER_HOST, SERVER_PORT, SERVER_IP,
     BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
     LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
+    GATEWAY_HOST, GATEWAY_PORT,
 )
 from classes import PROTO, CustomLogger
 from DB_ORM import MarketplaceDB
@@ -92,9 +108,10 @@ server_logger = logging.getLogger('server')
 
 class ClientSession:
     """Represents one authenticated client connection"""
-    def __init__(self, sock, addr, logging_level):
+    def __init__(self, sock, addr, logging_level, server):
         self.socket = sock
         self.address = addr
+        self.server = server
         
         # Pass socket directly to PROTO constructor instead of assigning afterward
         self.proto = PROTO("ClientSession", logging_level=logging_level, cln_sock=sock)
@@ -122,6 +139,9 @@ class ClientSession:
             "BUY": self.handle_buy_asset,
             "SEND": self.handle_send_asset,
             "GET_PROFILE": self.handle_get_profile,
+            "GET_TX_STATUS": self.handle_get_tx_status,
+            "GET_ITEMS_BY_USER": self.handle_get_items_by_user,
+            "GET_WALLET": self.handle_get_wallet,
         }
     
     def process_message(self, message):
@@ -356,12 +376,15 @@ class ClientSession:
             if not asset_name or not username or not url or not file_type or cost < 0:
                 return "ERR01|Invalid parameters"
             
-            if file_type.lower() not in ['jpg', 'png', 'gif', 'jpeg']:
+            normalized_type = file_type.lower()
+            if normalized_type == 'image':
+                normalized_type = 'jpg'
+            if normalized_type not in ['jpg', 'png', 'gif', 'jpeg']:
                 return "ERR01|Invalid file type. Supported: jpg, png, gif, jpeg"
             
             # Add to marketplace database (ORM: DB/marketplace.db)
             marketplace_db = MarketplaceDB()
-            success, message = marketplace_db.add_marketplace_item(asset_name, username, url, file_type, cost)
+            success, message = marketplace_db.add_marketplace_item(asset_name, username, url, normalized_type, cost)
             
             if success:
                 self.Print(f"✅ Asset uploaded: {asset_name} by {username} - \\${cost}", 20)
@@ -377,29 +400,22 @@ class ClientSession:
             return f"ERR99|{str(e)}"
     
     def handle_asset_list(self, params):
-        """Protocol Message 13: ASKLST - Request asset list with pagination
-        Format: ASKLST|page|limit
+        """Protocol Message: GET_ITEMS - Get all marketplace items
+        Format: GET_ITEMS
+        Returns: OK|items_json or ERR|error_message
         """
         if not self.is_authenticated:
             return "ERR02|Not authenticated"
-        
-        if len(params) < 2:
-            return "ERR02|Invalid asset list format"
-        
+
         try:
-            page = int(params[0].strip())
-            limit = int(params[1].strip())
-        except ValueError:
-            return "ERR02|Invalid page/limit parameters"
-        items = self.db.get_items_by_username(self.username)
-        start = page * limit
-        end = start + limit
-        page_items = items[start:end]
-        tokens = ','.join(str(it['id']) for it in page_items)
-        total = len(items)
-        response = f"ASLIST|{tokens}|{total}"
-        self.Print(f"📋 Asset list requested (page {page}): {len(page_items)} assets", 20)
-        return response
+            import json
+            items = self.db.get_all_items()
+            response = f"OK|{json.dumps(items)}"
+            self.Print(f"📋 GET_ITEMS: returned {len(items)} items", 20)
+            return response
+        except Exception as e:
+            self.Print(f"? Error processing GET_ITEMS: {e}", 40)
+            return f"ERR03|Error getting items: {str(e)}"
 
     def handle_get_items_paginated(self, params):
         """Protocol Message: GET_ITEMS_PAGINATED - Get marketplace items with pagination
@@ -426,8 +442,8 @@ class ClientSession:
                 
                 if items:
                     items_list = items if isinstance(items[0], dict) else [
-                        {'id': r[0], 'asset_name': r[1], 'username': r[2], 'url': r[3],
-                         'file_type': r[4], 'cost': r[5], 'timestamp': r[6], 'created_at': r[7]}
+                        {'id': r[0], 'asset_name': r[1], 'description': r[2], 'username': r[3], 'url': r[4],
+                         'file_type': r[5], 'cost': r[6], 'timestamp': r[7], 'created_at': r[8]}
                         for r in items
                     ]
                     response = f"OK|{json.dumps(items_list)}"
@@ -451,27 +467,66 @@ class ClientSession:
         BUY - Purchase an asset from marketplace
         Format: BUY|asset_id|username|amount
         """
+        if not self.is_authenticated:
+            return "ERR03|Not authenticated"
         if len(params) < 3:
             self.Print(f"[RECV] BUY - Invalid format", 40)
             return "ERR01|Invalid format: BUY|asset_id|username|amount"
-        
+
         try:
             asset_id = params[0].strip()
             username = params[1].strip()
             amount = float(params[2].strip())
-            
+
             self.Print(f"💳 Processing purchase: {username} buying asset {asset_id} for {amount}", 20)
-            
-            # TODO: Implement transaction logic
-            # - Validate asset exists
-            # - Check buyer balance/payment method
-            # - Record transaction in blockchain
-            # - Update asset ownership
-            transaction_id = f"TXN_{asset_id}_{username}_{int(time.time())}"
-            
-            self.Print(f"✅ Purchase successful: {transaction_id}", 20)
-            return f"OK|{transaction_id}"
-            
+
+            if username != self.username:
+                return "ERR02|Cannot purchase on behalf of another user"
+
+            item = self.db.get_item_by_id(asset_id)
+            if not item:
+                return "ERR02|Asset not found"
+
+            seller = item.get('username')
+            if seller == username:
+                return "ERR02|Cannot buy your own asset"
+
+            price = float(item.get('cost', 0))
+            if abs(price - amount) > 0.01:
+                return "ERR02|Price mismatch"
+
+            wallet = self.db.get_wallet(username)
+            if not wallet:
+                return "ERR02|Wallet not found"
+            if float(wallet.get('balance', 0)) < price:
+                return "ERR02|Insufficient funds"
+
+            tx_id = f"TXN_{asset_id}_{username}_{uuid.uuid4().hex[:8]}"
+            purchase = {
+                'tx_id': tx_id,
+                'buyer': username,
+                'seller': seller,
+                'asset_id': asset_id,
+                'asset_name': item.get('asset_name'),
+                'amount': price,
+                'timestamp': datetime.datetime.utcnow().isoformat(),
+            }
+
+            with self.server.tx_status_lock:
+                self.server.tx_status[tx_id] = {
+                    'status': 'queued',
+                    'message': 'Queued for PoW',
+                    'created_at': time.time(),
+                    'asset_id': asset_id,
+                    'buyer': username,
+                    'seller': seller,
+                    'amount': price,
+                }
+            self.server.tx_queue.put(purchase)
+
+            self.Print(f"✅ Purchase queued for PoW: {tx_id}", 20)
+            return f"OK|PENDING|{tx_id}"
+
         except ValueError as ve:
             self.Print(f"[RECV] BUY - Invalid parameters: {ve}", 40)
             return "ERR01|Invalid amount format"
@@ -533,6 +588,83 @@ class ClientSession:
             self.Print(f"❌ Error processing GET_PROFILE: {e}", 40)
             return f"ERR99|{str(e)}"
 
+    def handle_get_tx_status(self, params):
+        """
+        GET_TX_STATUS - Check transaction status
+        Format: GET_TX_STATUS|tx_id
+        Returns: OK|STATUS|message or ERR|error_message
+        """
+        if len(params) < 1:
+            return "ERR01|Invalid format: GET_TX_STATUS|tx_id"
+        tx_id = params[0].strip()
+        if not tx_id:
+            return "ERR01|Invalid tx_id"
+
+        info = self.server._get_tx_info(tx_id)
+        if not info:
+            return "ERR02|Transaction not found"
+
+        status = info.get('status', 'unknown')
+        message = info.get('message', '')
+        created_at = info.get('created_at', time.time())
+
+        if status in ('queued', 'submitted'):
+            if time.time() - created_at > self.server.tx_timeout_seconds:
+                status = 'timeout'
+                message = 'PoW Timeout after 10 mins'
+                self.server._set_tx_status(tx_id, status, message)
+
+        return f"OK|{status.upper()}|{message}"
+
+    def handle_get_items_by_user(self, params):
+        """
+        GET_ITEMS_BY_USER - Get assets owned by a user
+        Format: GET_ITEMS_BY_USER|username
+        Returns: OK|items_json or ERR|error_message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 1:
+            return "ERR01|Invalid format: GET_ITEMS_BY_USER|username"
+        username = params[0].strip()
+        if not username or '|' in username:
+            return "ERR01|Invalid username"
+        if username != self.username:
+            return "ERR02|Unauthorized"
+        try:
+            items = self.db.get_items_by_username(username)
+            return f"OK|{json.dumps(items)}"
+        except Exception as e:
+            return f"ERR03|Error getting items: {str(e)}"
+
+    def handle_get_wallet(self, params):
+        """
+        GET_WALLET - Get wallet balance for a user
+        Format: GET_WALLET|username
+        Returns: OK|balance|updated_at or ERR|error_message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 1:
+            return "ERR01|Invalid format: GET_WALLET|username"
+
+        username = params[0].strip()
+        if not username or '|' in username:
+            return "ERR01|Invalid username"
+        if username != self.username:
+            return "ERR02|Unauthorized"
+
+        try:
+            self.db.ensure_wallet(username, 0)
+            wallet = self.db.get_wallet(username)
+            if not wallet:
+                return "ERR02|Wallet not found"
+            balance = wallet.get('balance', 0)
+            updated_at = wallet.get('updated_at') or ''
+            return f"OK|{balance}|{updated_at}"
+        except Exception as e:
+            return f"ERR03|Error getting wallet: {str(e)}"
+
 
 class Server:
     """Main server that handles all client connections"""
@@ -548,6 +680,16 @@ class Server:
         self.clients = {}  # addr -> ClientSession
         self.is_running = False
         self.db = MarketplaceDB()
+
+        # Purchase -> gateway queue + status tracking
+        self.tx_queue = queue.Queue()
+        self.tx_status = {}
+        self.tx_status_lock = threading.Lock()
+        self.tx_timeout_seconds = 600  # 10 minutes
+
+        # Start background worker for gateway submissions
+        worker = threading.Thread(target=self._tx_worker, daemon=True)
+        worker.start()
 
     def _start_broadcast_listener(self):
         """Start listening for WHRSRV (Where's Server) broadcast queries"""
@@ -630,7 +772,9 @@ class Server:
                                         data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
                                         from_user = data.get('from') or tx.get('sender')
                                         to_user = data.get('to')
-                                        amount = data.get('amount')
+                                        amount = data.get('amount') if data.get('amount') is not None else data.get('price')
+                                        asset_id = data.get('asset_id')
+                                        tx_id = data.get('tx_id')
                                         if from_user and to_user is not None and amount is not None:
                                             try:
                                                 amount = float(amount)
@@ -641,8 +785,18 @@ class Server:
                                                     wa, wb = self.db.get_wallet(from_user), self.db.get_wallet(to_user)
                                                     if wa and wb:
                                                         server_logger.info("balances: %s=%.2f %s=%.2f", from_user, wa['balance'], to_user, wb['balance'])
+                                                    if asset_id:
+                                                        updated = self.db.update_asset_owner(asset_id, to_user)
+                                                        if updated:
+                                                            server_logger.info("asset ownership updated: asset_id=%s owner=%s", asset_id, to_user)
+                                                        else:
+                                                            server_logger.warning("asset ownership update failed: asset_id=%s", asset_id)
+                                                    if tx_id:
+                                                        self._set_tx_status(tx_id, "confirmed", "Transaction confirmed")
                                                 else:
                                                     server_logger.warning("wallet transfer failed: %s", res)
+                                                    if tx_id:
+                                                        self._set_tx_status(tx_id, "failed", res)
                                             except (ValueError, TypeError) as e:
                                                 server_logger.warning("skip tx (bad amount): %s", e)
                     except socket.timeout:
@@ -657,6 +811,84 @@ class Server:
                 server_logger.error("block_confirmation listener failed: %s", e)
         thread = threading.Thread(target=listen_loop, daemon=True)
         thread.start()
+
+    def _set_tx_status(self, tx_id, status, message=None):
+        with self.tx_status_lock:
+            info = self.tx_status.get(tx_id)
+            if not info:
+                self.tx_status[tx_id] = {
+                    'status': status,
+                    'message': message or '',
+                    'created_at': time.time(),
+                }
+                return
+            info['status'] = status
+            if message is not None:
+                info['message'] = message
+
+    def _get_tx_info(self, tx_id):
+        with self.tx_status_lock:
+            info = self.tx_status.get(tx_id)
+            return dict(info) if info else None
+
+    def _tx_worker(self):
+        while True:
+            purchase = self.tx_queue.get()
+            if not purchase:
+                self.tx_queue.task_done()
+                continue
+            tx_id = purchase.get('tx_id')
+            try:
+                response = self._submit_purchase_to_gateway(purchase)
+                if response and response.get('status') == 'submitted':
+                    self._set_tx_status(tx_id, "submitted", response.get('message', 'Submitted to gateway'))
+                else:
+                    msg = response.get('message') if response else "Gateway did not respond"
+                    self._set_tx_status(tx_id, "failed", msg)
+            except Exception as e:
+                self._set_tx_status(tx_id, "failed", f"Gateway error: {e}")
+            finally:
+                self.tx_queue.task_done()
+
+    def _submit_purchase_to_gateway(self, purchase):
+        payload = {
+            'action': 'submit_purchase',
+            'body': {
+                'tx_id': purchase.get('tx_id'),
+                'buyer': purchase.get('buyer'),
+                'seller': purchase.get('seller'),
+                'asset_id': purchase.get('asset_id'),
+                'asset_name': purchase.get('asset_name'),
+                'price': purchase.get('amount'),
+                'timestamp': purchase.get('timestamp'),
+            }
+        }
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect((GATEWAY_HOST, GATEWAY_PORT))
+        raw = json.dumps(payload).encode()
+        sock.send(struct.pack('>H', len(raw)) + raw)
+        response = self._recv_gateway_json(sock)
+        sock.close()
+        return response
+
+    def _recv_gateway_json(self, sock, max_size=65536):
+        len_buf = sock.recv(2)
+        if len(len_buf) < 2:
+            return None
+        size = struct.unpack('>H', len_buf)[0]
+        if size > max_size:
+            return None
+        data = b''
+        while len(data) < size:
+            chunk = sock.recv(min(size - len(data), 4096))
+            if not chunk:
+                return None
+            data += chunk
+        try:
+            return json.loads(data.decode())
+        except Exception:
+            return None
     
     def start(self):
         """Start the server"""
@@ -732,7 +964,7 @@ class Server:
             self.Print(f"✅ New client connection established: {addr[0]}:{addr[1]}", 20)
             
             # Create session for this client
-            session = ClientSession(sock, addr, self.logging_level)
+            session = ClientSession(sock, addr, self.logging_level, server=self)
             self.clients[addr] = session
             self.Print(f"👤 Client session created for {addr[0]}:{addr[1]}", 20)
             

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../providers/client_provider.dart';
+import '../utils/app_logger.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
@@ -16,6 +17,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   late Animation<double> _fadeAnimation;
   late Animation<double> _scaleAnimation;
   bool _connectionFailed = false;
+  final AppLogger _log = AppLogger.get('welcome_screen.dart');
 
   @override
   void initState() {
@@ -52,7 +54,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       
       // Check if already connected (connection started at app level)
       if (clientProvider.isConnected) {
-        print('✅ Already connected to server');
+        _log.success('Already connected to server');
         if (mounted) {
           context.go('/login');
         }
@@ -76,7 +78,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
         }
       }
     } catch (e) {
-      print('❌ Connection error: $e');
+      _log.error('Connection error: $e');
       if (mounted) {
         setState(() => _connectionFailed = true);
       }
@@ -152,7 +154,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
         }
       }
     } catch (e) {
-      print('❌ Retry error: $e');
+      _log.error('Retry error: $e');
       if (mounted) {
         Navigator.pop(context);
         setState(() => _connectionFailed = true);

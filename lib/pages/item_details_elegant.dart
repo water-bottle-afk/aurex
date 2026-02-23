@@ -95,12 +95,12 @@ class _ItemDetailsPageState extends State<ItemDetailsPage> {
                         ],
                       ),
                       const SizedBox(height: 12),
-                      Row(
+                      const Row(
                         children: [
-                          const Icon(Icons.star, color: Colors.orange, size: 20),
-                          const SizedBox(width: 4),
-                          const Text('4.8', style: TextStyle(fontWeight: FontWeight.bold)),
-                          const Text(' (124 reviews)', style: TextStyle(color: Colors.grey)),
+                          Icon(Icons.star, color: Colors.orange, size: 20),
+                          SizedBox(width: 4),
+                          Text('4.8', style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text(' (124 reviews)', style: TextStyle(color: Colors.grey)),
                         ],
                       ),
                     ],

@@ -44,7 +44,7 @@
 ///
 /// 12. BUY - Purchase an asset from marketplace
 ///     Send: BUY|asset_id|username|amount
-///     Recv: OK|transaction_id or ERR|error_message
+///     Recv: OK|PENDING|transaction_id or ERR|error_message
 ///
 /// 13. SEND - Send purchased asset to another user
 ///     Send: SEND|asset_id|sender_username|receiver_username
@@ -53,6 +53,18 @@
 /// 14. GET_PROFILE - Get user profile (anonymous)
 ///     Send: GET_PROFILE|username
 ///     Recv: OK|username|email|created_at or ERR|error_message
+///
+/// 15. GET_TX_STATUS - Check blockchain purchase status
+///     Send: GET_TX_STATUS|tx_id
+///     Recv: OK|STATUS|message or ERR|error_message
+///
+/// 16. GET_ITEMS_BY_USER - Get assets owned by a user
+///     Send: GET_ITEMS_BY_USER|username
+///     Recv: OK|items_json or ERR|error_message
+///
+/// 17. GET_WALLET - Get wallet balance for a user
+///     Send: GET_WALLET|username
+///     Recv: OK|balance|updated_at or ERR|error_message
 library;
 
 import 'dart:io';
@@ -61,6 +73,7 @@ import 'dart:convert';
 import 'package:logging/logging.dart';
 import 'package:flutter/foundation.dart';
 import 'config.dart';
+import 'utils/app_logger.dart';
 
 /// Message event for debugging - tracks sent/received messages
 class MessageEvent {
@@ -80,12 +93,35 @@ class MessageEvent {
       '[${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}:${timestamp.second.toString().padLeft(2, '0')}] $type: $message ($status)';
 }
 
+class BuyResult {
+  final String status;
+  final String? txId;
+  final String? message;
+
+  const BuyResult({
+    required this.status,
+    this.txId,
+    this.message,
+  });
+}
+
+class TxStatusResult {
+  final String status;
+  final String message;
+
+  const TxStatusResult({
+    required this.status,
+    required this.message,
+  });
+}
+
 /// Protocol message handler for Blockchain Communication Protocol
 class Client extends ChangeNotifier {
   SecureSocket? _socket;
   late String host;
   late int port;
   final Logger _logger = Logger('Client');
+  final AppLogger _log = AppLogger.get('client_class.dart');
   bool _isConnected = false;
   bool _isAuthenticated = false;
 
@@ -189,7 +225,7 @@ class Client extends ChangeNotifier {
         broadcastPort,
       );
 
-      print('📡 Broadcast WHRSRV sent');
+      _log.info('Broadcast WHRSRV sent');
 
       // Listen for response with timeout
       final future = socket.timeout(timeout);
@@ -200,7 +236,7 @@ class Client extends ChangeNotifier {
             final datagram = socket.receive();
             if (datagram != null) {
               final response = utf8.decode(datagram.data);
-              print('📡 Received broadcast response: $response');
+              _log.info('Received broadcast response: $response');
 
               if (response.startsWith("SRVRSP|")) {
                 final parts = response.split('|');
@@ -216,13 +252,13 @@ class Client extends ChangeNotifier {
           }
         }
       } on TimeoutException {
-        print('📡 Broadcast discovery timeout');
+        _log.warn('Broadcast discovery timeout');
       }
 
       socket.close();
       return null;
     } catch (e) {
-      print('📡 Broadcast error: $e');
+      _log.error('Broadcast error: $e');
       return null;
     }
   }
@@ -268,7 +304,7 @@ class Client extends ChangeNotifier {
       // Send START message for connection initialization
       await _sendStartMessage();
       
-      print('✅ Connection successful and handshake complete');
+      _log.success('Connection successful and handshake complete');
     } catch (e) {
       pushMessageToScreen(
         type: 'system',
@@ -309,11 +345,11 @@ class Client extends ChangeNotifier {
       );
 
       await sendMessage(startMsg);
-      print('📤 START message sent');
+      _log.info('START message sent');
 
       // Wait for ACCPT response
       final response = await receiveMessage();
-      print('📥 Received response: $response');
+      _log.info('Received response: $response');
 
       if (response.startsWith("ACCPT")) {
         pushMessageToScreen(
@@ -321,7 +357,7 @@ class Client extends ChangeNotifier {
           message: response,
           status: 'success',
         );
-        print('✅ ACCPT received - connection established!');
+        _log.success('ACCPT received - connection established');
       } else {
         throw Exception("Unexpected response to START: $response");
       }
@@ -331,7 +367,7 @@ class Client extends ChangeNotifier {
         message: 'START message failed: $e',
         status: 'error',
       );
-      print('❌ START handshake failed: $e');
+      _log.error('START handshake failed: $e');
       rethrow;
     }
   }
@@ -357,7 +393,7 @@ class Client extends ChangeNotifier {
       // Extract protocol preview for cleaner logging
       final preview = message.length > 50 ? '${message.substring(0, 50)}...' : message;
       
-      print('$timestamp - Client - INFO - [SEND] $preview');
+      _log.info('[SEND] $preview');
 
       pushMessageToScreen(
         type: 'sent',
@@ -366,7 +402,7 @@ class Client extends ChangeNotifier {
       );
     } catch (e) {
       final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
-      print('$timestamp - Client - ERROR - [SEND FAILED] $e');
+      _log.error('[SEND FAILED] $e');
       
       pushMessageToScreen(
         type: 'sent',
@@ -406,7 +442,7 @@ class Client extends ChangeNotifier {
       
       // Extract protocol command and log
       final preview = message.length > 50 ? '${message.substring(0, 50)}...' : message;
-      print('$timestamp - Client - INFO - [RECV] $preview');
+      _log.info('[RECV] $preview');
 
       pushMessageToScreen(
         type: 'received',
@@ -417,7 +453,7 @@ class Client extends ChangeNotifier {
       return message;
     } catch (e) {
       final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
-      print('$timestamp - Client - ERROR - [RECV FAILED] $e');
+      _log.error('[RECV FAILED] $e');
       
       pushMessageToScreen(
         type: 'system',
@@ -543,7 +579,7 @@ class Client extends ChangeNotifier {
           status: 'success',
         );
         return returnedUsername;
-      } else if (code == "ERR") {
+      } else if (code.startsWith("ERR")) {
         final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
         pushMessageToScreen(
           type: 'received',
@@ -635,7 +671,7 @@ class Client extends ChangeNotifier {
           status: 'success',
         );
         return "success";
-      } else if (code == "ERR") {
+      } else if (code.startsWith("ERR")) {
         final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
         pushMessageToScreen(
           type: 'received',
@@ -1000,8 +1036,8 @@ class Client extends ChangeNotifier {
 
   /// Buy marketplace asset
   /// Send: BUY|asset_id|username|amount
-  /// Receive: OK|transaction_id or ERR|error_message
-  Future<String> buyAsset({
+  /// Receive: OK|PENDING|transaction_id or ERR|error_message
+  Future<BuyResult> buyAsset({
     required String assetId,
     required String username,
     required double amount,
@@ -1020,13 +1056,14 @@ class Client extends ChangeNotifier {
       final parts = response.split('|');
 
       if (parts[0] == "OK") {
-        final transactionId = parts.length > 1 ? parts[1] : "unknown";
+        final status = parts.length > 1 ? parts[1].toUpperCase() : "OK";
+        final transactionId = parts.length > 2 ? parts[2] : null;
         pushMessageToScreen(
           type: 'received',
-          message: "Asset purchased: $transactionId",
+          message: "Purchase status: $status",
           status: 'success',
         );
-        return "success";
+        return BuyResult(status: status, txId: transactionId);
       } else {
         final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
         pushMessageToScreen(
@@ -1034,7 +1071,7 @@ class Client extends ChangeNotifier {
           message: "Purchase failed: $errorMsg",
           status: 'error',
         );
-        return "error";
+        return BuyResult(status: "ERROR", message: errorMsg);
       }
     } catch (e) {
       pushMessageToScreen(
@@ -1042,7 +1079,91 @@ class Client extends ChangeNotifier {
         message: 'Error purchasing asset: $e',
         status: 'error',
       );
-      rethrow;
+      return BuyResult(status: "ERROR", message: e.toString());
+    }
+  }
+
+  /// Check blockchain transaction status
+  /// Send: GET_TX_STATUS|tx_id
+  /// Receive: OK|STATUS|message or ERR|error_message
+  Future<TxStatusResult> getTransactionStatus(String txId) async {
+    try {
+      final message = "GET_TX_STATUS|$txId";
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK" && parts.length >= 2) {
+        final status = parts[1].toUpperCase();
+        final msg = parts.length > 2 ? parts.sublist(2).join('|') : '';
+        return TxStatusResult(status: status, message: msg);
+      } else {
+        final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+        return TxStatusResult(status: "ERROR", message: errorMsg);
+      }
+    } catch (e) {
+      return TxStatusResult(status: "ERROR", message: e.toString());
+    }
+  }
+
+  /// Get assets owned by a user
+  /// Send: GET_ITEMS_BY_USER|username
+  /// Receive: OK|items_json or ERR|error_message
+  Future<List<dynamic>> getUserAssets(String username) async {
+    try {
+      if (username.isEmpty || username.contains('|')) {
+        throw Exception("Invalid username");
+      }
+      final message = "GET_ITEMS_BY_USER|$username";
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK" && parts.length > 1) {
+        return jsonDecode(parts[1]) as List;
+      }
+      final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+      throw Exception(errorMsg);
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'getUserAssets error: $e',
+        status: 'error',
+      );
+      return [];
+    }
+  }
+
+  /// Get wallet balance for a user
+  /// Send: GET_WALLET|username
+  /// Receive: OK|balance|updated_at or ERR|error_message
+  Future<Map<String, dynamic>?> getWallet(String username) async {
+    try {
+      if (username.isEmpty || username.contains('|')) {
+        throw Exception("Invalid username");
+      }
+      final message = "GET_WALLET|$username";
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK" && parts.length >= 2) {
+        final balance = double.tryParse(parts[1]) ?? 0.0;
+        final updatedAt = parts.length > 2 ? parts[2] : '';
+        return {
+          'balance': balance,
+          'updated_at': updatedAt,
+        };
+      }
+      final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+      throw Exception(errorMsg);
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'getWallet error: $e',
+        status: 'error',
+      );
+      return null;
     }
   }
 

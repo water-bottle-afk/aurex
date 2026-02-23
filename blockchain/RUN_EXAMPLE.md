@@ -34,19 +34,19 @@ python launcher.py --nodes 3 --difficulty 2
 
 ---
 
-## 2. Start the RPC server (second terminal)
+## 2. Start the gateway server (second terminal)
 
 Open a **new** terminal:
 
 ```bash
 cd c:\dev\aurex\blockchain
-python rpc_server.py
+python gateway_server.py
 ```
 
 You should see:
 
-- `RPC server starting ... submit_transaction -> nodes [13245, 13246, 13247, ...]`
-- `RPC listening on 0.0.0.0:5000 ...`
+- `Gateway server starting ... submit_transaction -> nodes [13245, 13246, 13247, ...]`
+- `Gateway listening on 0.0.0.0:5000 ...`
 
 Leave this terminal open.
 
@@ -93,7 +93,7 @@ Then when a block is confirmed, the server will log "Saved: Transferred 10 from 
     - `validation: chain ok prev_hash link`
     - `gossip: block accepted index=0 hash=00...`
 
-- **RPC terminal:**
+- **Gateway terminal:**
   - `=== TRANSACTION SUBMITTED === timestamp=... sender=alice data=...`
   - `broadcast tx to node port=13245` (and 13246, 13247)
   - `=== TRANSACTION CONFIRMED (block committed) === block_index=0 ...`
@@ -116,7 +116,7 @@ Config: `blockchain/config.py` has `SERVER_NOTIFY_PORT = 23457`; `python_files/c
 ## Troubleshooting
 
 - **"Could not connect to RPC"**  
-  Start `rpc_server.py` first and wait until it prints "RPC listening on ...".
+  Start `gateway_server.py` first and wait until it prints "Gateway listening on ...".
 
 - **"Transaction sent to 0/3 nodes"**  
   Start the 3 nodes (launcher) and wait until each window shows "listening on ...".

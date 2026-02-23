@@ -70,7 +70,6 @@
 - SQLite database working
 - Pickle dependency removed
 - All DB methods functional
-- Firebase imports (optional) - not required
 - Ready to handle UPLOAD protocol
 
 ### Database ✅
@@ -119,7 +118,6 @@ python server_moudle.py
 **Expected Output**:
 ```
 ✅ Config loaded: Server running on 192.168.1.61:23456
-✅ Firebase initialized successfully from C:\dev\aurex\python_files\serviceAccountKey.json
 ✅ Database initialized (SQLite)
 [Server listening for WHRSRV broadcasts...]
 ```

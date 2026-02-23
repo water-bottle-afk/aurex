@@ -9,6 +9,7 @@ import 'pages/connection_loading_page.dart';
 import 'pages/forgot_password.dart';
 import 'pages/login_screen.dart';
 import 'pages/marketplace_page.dart';
+import 'pages/my_assets_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/signup_screen.dart';
 import 'pages/upload_asset.dart';
@@ -17,9 +18,12 @@ import 'providers/user_provider.dart';
 import 'providers/client_provider.dart';
 import 'providers/settings_provider.dart';
 import 'providers/assets_provider.dart';
+import 'providers/my_assets_provider.dart';
+import 'utils/app_logger.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  AppLogger.init();
 
   final clientProvider = ClientProvider();
   runApp(MyApp(initialClientProvider: clientProvider));
@@ -27,15 +31,16 @@ void main() async {
 
 /// Clear app cache
 Future<void> clearAppCache() async {
+  final log = AppLogger.get('main.dart');
   try {
     final appDir = await getApplicationCacheDirectory();
     if (await appDir.exists()) {
       appDir.deleteSync(recursive: true);
       await appDir.create(recursive: true);
-      print('✅ Cache cleared successfully');
+      log.success('Cache cleared successfully');
     }
   } catch (e) {
-    print('⚠️ Error clearing cache: $e');
+    log.error('Error clearing cache: $e');
   }
 }
 
@@ -95,6 +100,10 @@ final _router = GoRouter(
       path: '/settings',
       builder: (context, state) => const SettingsPage(),
     ),
+    GoRoute(
+      path: '/my-assets',
+      builder: (context, state) => const MyAssetsPage(),
+    ),
   ],
 );
 
@@ -135,6 +144,12 @@ class _MyAppState extends State<MyApp> {
         ChangeNotifierProvider(
           create: (context) => AssetsProvider(
             clientProvider: _clientProvider,
+          ),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => MyAssetsProvider(
+            clientProvider: _clientProvider,
+            userProvider: Provider.of<UserProvider>(context, listen: false),
           ),
         ),
       ],

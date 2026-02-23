@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../utils/app_logger.dart';
 
 class UserModel {
   final String username;
@@ -15,6 +16,7 @@ class UserProvider with ChangeNotifier {
   UserModel? _localUser;
   late SharedPreferences _prefs;
   bool _isInitialized = false;
+  final AppLogger _log = AppLogger.get('user_provider.dart');
 
   UserModel? get localUser => _localUser;
   bool get isInitialized => _isInitialized;
@@ -38,7 +40,7 @@ class UserProvider with ChangeNotifier {
       _isInitialized = true;
       notifyListeners();
     } catch (e) {
-      print('Error initializing SharedPreferences: $e');
+      _log.error('Error initializing SharedPreferences: $e');
       _isInitialized = true;
       notifyListeners();
     }
@@ -58,9 +60,9 @@ class UserProvider with ChangeNotifier {
       }
       await _prefs.setString('username', username);
       await _prefs.setString('email', email);
-      print('✅ User data saved locally: $username');
+      _log.success('User data saved locally: $username');
     } catch (e) {
-      print('⚠️ Error saving user data: $e');
+      _log.error('Error saving user data: $e');
     }
   }
 
@@ -84,9 +86,9 @@ class UserProvider with ChangeNotifier {
       await _prefs.remove('email');
       _localUser = null;
       notifyListeners();
-      print('✅ User data cleared');
+      _log.success('User data cleared');
     } catch (e) {
-      print('⚠️ Error clearing user data: $e');
+      _log.error('Error clearing user data: $e');
     }
   }
 }

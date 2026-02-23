@@ -150,7 +150,6 @@ python server_moudle.py
 Expected output:
 ```
 ✅ Config loaded: Server running on 192.168.1.61:23456
-✅ Firebase initialized successfully
 ✅ Database initialized (SQLite)
 [Server listening for connections...]
 ```

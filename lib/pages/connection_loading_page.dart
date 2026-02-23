@@ -282,7 +282,7 @@ class _ConnectionLoadingPageState extends State<ConnectionLoadingPage> {
                 const SizedBox(height: 32),
 
                 // Help text
-                Text(
+                const Text(
                   'Make sure the server is running on your local network',
                   textAlign: TextAlign.center,
                   style: TextStyle(

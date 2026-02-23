@@ -6,6 +6,7 @@ import '../providers/client_provider.dart';
 import '../providers/assets_provider.dart';
 import '../providers/user_provider.dart';
 import '../services/google_drive_image_loader.dart';
+import '../utils/app_logger.dart';
 
 class MarketplacePage extends StatefulWidget {
   const MarketplacePage({super.key});
@@ -17,6 +18,9 @@ class MarketplacePage extends StatefulWidget {
 class _MarketplacePageState extends State<MarketplacePage> {
   final GoogleSignIn _googleSignIn = GoogleSignIn();
   late ScrollController _scrollController;
+  double? _walletBalance;
+  bool _walletLoading = false;
+  String? _walletError;
 
   @override
   void initState() {
@@ -31,6 +35,8 @@ class _MarketplacePageState extends State<MarketplacePage> {
         assetsProvider.loadNextPage();
       }
     });
+
+    Future.microtask(_loadWalletBalance);
   }
 
   @override
@@ -52,6 +58,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
   }
 
   Future<void> _handleLogout(BuildContext context) async {
+    final log = AppLogger.get('marketplace_page.dart');
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
       await clientProvider.disconnect();
@@ -64,7 +71,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
         context.go('/login');
       }
     } catch (e) {
-      print('Error during logout: $e');
+      log.error('Error during logout: $e');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error logging out: $e')),
@@ -73,12 +80,98 @@ class _MarketplacePageState extends State<MarketplacePage> {
     }
   }
 
+  Future<void> _loadWalletBalance({bool force = false}) async {
+    if (_walletLoading && !force) return;
+
+    setState(() {
+      _walletLoading = true;
+      _walletError = null;
+    });
+
+    try {
+      final userProvider = Provider.of<UserProvider>(context, listen: false);
+      final username = userProvider.localUser?.username;
+      if (username == null || username.isEmpty) {
+        setState(() {
+          _walletError = 'Not signed in';
+          _walletLoading = false;
+        });
+        return;
+      }
+
+      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+      if (!clientProvider.isConnected) {
+        await clientProvider.initializeConnection();
+      }
+
+      final wallet = await clientProvider.client.getWallet(username);
+      if (!mounted) return;
+
+      if (wallet == null) {
+        setState(() {
+          _walletError = 'Balance unavailable';
+          _walletLoading = false;
+        });
+        return;
+      }
+
+      setState(() {
+        _walletBalance = (wallet['balance'] as double?) ?? 0.0;
+        _walletLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _walletError = 'Balance unavailable';
+        _walletLoading = false;
+      });
+    }
+  }
+
+  Widget _buildBalanceChip() {
+    if (_walletLoading) {
+      return const SizedBox(
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+
+    if (_walletError != null) {
+      return Text(
+        _walletError!,
+        style: const TextStyle(fontSize: 12, color: Colors.white70),
+      );
+    }
+
+    final balanceText = _walletBalance != null
+        ? _walletBalance!.toStringAsFixed(2)
+        : '--';
+
+    return Row(
+      children: [
+        Image.asset(
+          'assets/images/bitcoin.png',
+          width: 18,
+          height: 18,
+        ),
+        const SizedBox(width: 6),
+        Text(
+          balanceText,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final userProvider = Provider.of<UserProvider>(context);
-    final username = userProvider.localUser?.username ?? 
-                     userProvider.user?.email?.split('@')[0] ?? 
-                     'User';
+    final username = userProvider.localUser?.username ?? 'User';
 
     return Scaffold(
       appBar: AppBar(
@@ -87,6 +180,17 @@ class _MarketplacePageState extends State<MarketplacePage> {
         elevation: 0,
         backgroundColor: Colors.blue[600],
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            tooltip: 'Refresh balance',
+            onPressed: _loadWalletBalance,
+            icon: const Icon(Icons.refresh),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: _buildBalanceChip(),
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
@@ -147,6 +251,14 @@ class _MarketplacePageState extends State<MarketplacePage> {
               title: const Text('Marketplace'),
               onTap: () {
                 Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.inventory_2),
+              title: const Text('My Assets'),
+              onTap: () {
+                Navigator.pop(context);
+                context.go('/my-assets');
               },
             ),
             ListTile(
@@ -292,13 +404,23 @@ class _MarketplacePageState extends State<MarketplacePage> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                Text(
-                                  '\$${item.price.toStringAsFixed(2)}',
-                                  style: TextStyle(
-                                    color: Colors.green[600],
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                  ),
+                                Row(
+                                  children: [
+                                    Image.asset(
+                                      'assets/images/bitcoin.png',
+                                      width: 14,
+                                      height: 14,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '\$${item.price.toStringAsFixed(2)}',
+                                      style: TextStyle(
+                                        color: Colors.green[600],
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                                 Container(
                                   padding: const EdgeInsets.symmetric(

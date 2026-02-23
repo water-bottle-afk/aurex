@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import '../client_class.dart';
+import '../utils/app_logger.dart';
 
 class ClientProvider with ChangeNotifier {
   final Client _client = Client();
+  final AppLogger _log = AppLogger.get('client_provider.dart');
   bool _isConnecting = false;
   String? _connectionError;
 
@@ -46,7 +48,7 @@ class ClientProvider with ChangeNotifier {
       await _client.close();
       notifyListeners();
     } catch (e) {
-      print('Error disconnecting: $e');
+      _log.error('Error disconnecting: $e');
     }
   }
 

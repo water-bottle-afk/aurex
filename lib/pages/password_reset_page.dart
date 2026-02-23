@@ -9,7 +9,7 @@ import '../providers/client_provider.dart';
 /// 4. Confirm success
 
 class PasswordResetPage extends StatefulWidget {
-  const PasswordResetPage({Key? key}) : super(key: key);
+  const PasswordResetPage({super.key});
 
   @override
   State<PasswordResetPage> createState() => _PasswordResetPageState();
