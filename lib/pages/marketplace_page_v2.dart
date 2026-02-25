@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../services/google_drive_image_loader.dart';
 import 'item_details_elegant.dart';
-import 'upload_item_page.dart';
+import 'upload_asset.dart';
 import '../utils/app_logger.dart';
 
 /// Model for marketplace item
@@ -168,7 +168,7 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (context) => const UploadItemPage()),
+            MaterialPageRoute(builder: (context) => const UploadAssetPage()),
           );
         },
         icon: const Icon(Icons.add),
