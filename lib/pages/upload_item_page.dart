@@ -114,7 +114,15 @@ class _UploadItemPageState extends State<UploadItemPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Sell on Marketplace'), centerTitle: true, elevation: 0),
+      appBar: AppBar(
+        title: const Text('Sell on Marketplace'),
+        centerTitle: true,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Form(

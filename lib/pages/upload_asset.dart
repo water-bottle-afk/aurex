@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:http/http.dart' as http;
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import '../providers/client_provider.dart';
 import '../providers/user_provider.dart';
-import '../utils/app_logger.dart';
 
 class UploadAssetPage extends StatefulWidget {
   const UploadAssetPage({super.key});
@@ -15,32 +13,38 @@ class UploadAssetPage extends StatefulWidget {
 }
 
 class _UploadAssetPageState extends State<UploadAssetPage> {
-  final AppLogger _log = AppLogger.get('upload_asset.dart');
+  static const int _alpha05 = 13;
+  static const int _alpha10 = 26;
+  static const int _alpha20 = 51;
+  static const int _alpha30 = 77;
   bool _isUploading = false;
   String? _uploadedAssetId;
   String? _statusMessage;
   String _assetName = '';
   String _assetDescription = '';
   double _assetCost = 0.0;
-  String? _googleDriveUrl;
   File? _selectedFile;
-  String _fileType = 'image';
-
-  final String _googleAppsScriptUrl =
-      'https://script.google.com/macros/s/AKfycbzwVFRyAb1d0dXGm2Xmjz8aemXivoAzK2-OWyRmywt4_Sw1IH8g2YmlSlQnoLkPq1a/exec';
+  String _fileType = 'jpg';
 
   /// Pick a file from device and get it ready for upload
   Future<void> _pickFile() async {
     try {
       final result = await FilePicker.platform.pickFiles(
-        type: FileType.image,
+        type: FileType.custom,
+        allowedExtensions: ['jpg', 'jpeg', 'png'],
         allowMultiple: false,
       );
 
       if (result != null && result.files.single.path != null) {
+        final extension = result.files.single.extension?.toLowerCase();
+        if (extension != 'jpg' && extension != 'jpeg' && extension != 'png') {
+          _showErrorSnackBar('Only JPG and PNG images are supported');
+          return;
+        }
+
         setState(() {
           _selectedFile = File(result.files.single.path!);
-          _fileType = result.files.single.extension ?? 'image';
+          _fileType = extension == 'jpeg' ? 'jpg' : (extension ?? 'jpg');
           _statusMessage = 'File selected: ${result.files.single.name}';
         });
       }
@@ -49,15 +53,15 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
     }
   }
 
-  /// Upload file to Google Drive via Apps Script, then register with server
+  /// Upload file to server (chunked) and register on marketplace
   Future<void> _uploadAssetViaServer() async {
     // Validation
     if (_assetName.isEmpty) {
       _showErrorSnackBar('Please enter an asset name');
       return;
     }
-    if (_selectedFile == null && _googleDriveUrl == null) {
-      _showErrorSnackBar('Please select a file or enter Google Drive URL');
+    if (_selectedFile == null) {
+      _showErrorSnackBar('Please select a file');
       return;
     }
     if (_assetCost <= 0) {
@@ -73,40 +77,20 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
     try {
       final userProvider = Provider.of<UserProvider>(context, listen: false);
       final username = userProvider.username;
-      
-      String googleDriveUrl = _googleDriveUrl ?? '';
 
-      // If file was selected, upload to Google Drive first
-      if (_selectedFile != null && _googleDriveUrl == null) {
-        setState(() {
-          _statusMessage = 'Uploading file to Google Drive...';
-        });
-
-        googleDriveUrl = await _uploadToGoogleDrive(_selectedFile!);
-        if (googleDriveUrl.isEmpty) {
-          throw Exception('Failed to upload file to Google Drive');
-        }
-
-        setState(() {
-          _googleDriveUrl = googleDriveUrl;
-          _statusMessage = 'File uploaded to Google Drive';
-        });
-      }
-
-      // Now register with marketplace server via protocol
+      // Upload file to server via chunked protocol
       setState(() {
-        _statusMessage = 'Registering asset with server...';
+        _statusMessage = 'Uploading file to server...';
       });
 
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
       final client = clientProvider.client;
 
-      // Send UPLOAD protocol message to server
-      // UPLOAD|asset_name|username|google_drive_url|file_type|cost
-      final result = await client.uploadMarketplaceItem(
+      final result = await client.uploadMarketplaceItemChunked(
+        file: _selectedFile!,
         assetName: _assetName,
+        description: _assetDescription,
         username: username,
-        googleDriveUrl: googleDriveUrl,
         fileType: _fileType,
         cost: _assetCost,
       );
@@ -132,68 +116,6 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
     } catch (e) {
       _showErrorSnackBar('Error uploading asset: $e');
       setState(() => _isUploading = false);
-    }
-  }
-
-  /// Upload file to Google Drive and return the direct view URL
-  Future<String> _uploadToGoogleDrive(File file) async {
-    try {
-      final http.MultipartRequest request =
-          http.MultipartRequest('POST', Uri.parse(_googleAppsScriptUrl));
-
-      request.fields['name'] = _assetName;
-      request.fields['description'] = _assetDescription;
-      request.fields['timestamp'] = DateTime.now().toString();
-
-      // Read file as bytes
-      final bytes = await file.readAsBytes();
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'file',
-          bytes,
-          filename: _assetName,
-        ),
-      );
-
-      final http.StreamedResponse response = await request.send();
-
-      if (response.statusCode == 200) {
-        final responseBody = await response.stream.bytesToString();
-        _log.info('Google Apps Script Response: $responseBody');
-
-        // Extract Google Drive file ID from response
-        final fileId = _extractFileId(responseBody);
-        if (fileId.isEmpty) {
-          throw Exception('Could not extract file ID from response');
-        }
-
-        // Return direct view URL (uses thumbnail for faster load)
-        return 'https://drive.google.com/uc?export=view&id=$fileId';
-      } else {
-        throw Exception(
-          'Google Drive upload failed: ${response.statusCode} ${response.reasonPhrase}',
-        );
-      }
-    } catch (e) {
-      _log.error('Error uploading to Google Drive: $e');
-      rethrow;
-    }
-  }
-
-  /// Extract file ID from Google Apps Script response
-  String _extractFileId(String response) {
-    try {
-      // Handle JSON response format
-      if (response.contains('"id"')) {
-        final startIndex = response.indexOf('"id"') + 5;
-        final endIndex = response.indexOf('"', startIndex);
-        return response.substring(startIndex, endIndex).trim().replaceAll('"', '');
-      }
-      // If response is just the ID
-      return response.trim().replaceAll('"', '');
-    } catch (e) {
-      _log.error('Error extracting file ID: $e');
-      return '';
     }
   }
 
@@ -224,6 +146,12 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         title: const Text('Upload Asset'),
         elevation: 0,
         backgroundColor: Colors.blue.shade700,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            Navigator.of(context).maybePop();
+          },
+        ),
       ),
       body: Container(
         decoration: BoxDecoration(
@@ -277,17 +205,17 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                       hintText: 'e.g., Blockchain Asset',
                       hintStyle: const TextStyle(color: Colors.white60),
                       filled: true,
-                      fillColor: Colors.white.withOpacity(0.1),
+                      fillColor: Colors.white.withAlpha(_alpha10),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
+                          color: Colors.white.withAlpha(_alpha30),
                         ),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
+                          color: Colors.white.withAlpha(_alpha30),
                         ),
                       ),
                       prefixIcon: const Icon(
@@ -318,17 +246,17 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                       hintText: 'Describe your asset...',
                       hintStyle: const TextStyle(color: Colors.white60),
                       filled: true,
-                      fillColor: Colors.white.withOpacity(0.1),
+                      fillColor: Colors.white.withAlpha(_alpha10),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
+                          color: Colors.white.withAlpha(_alpha30),
                         ),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
+                          color: Colors.white.withAlpha(_alpha30),
                         ),
                       ),
                       prefixIcon: const Icon(
@@ -360,17 +288,17 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                       hintText: 'Enter price',
                       hintStyle: const TextStyle(color: Colors.white60),
                       filled: true,
-                      fillColor: Colors.white.withOpacity(0.1),
+                      fillColor: Colors.white.withAlpha(_alpha10),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
+                          color: Colors.white.withAlpha(_alpha30),
                         ),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
+                          color: Colors.white.withAlpha(_alpha30),
                         ),
                       ),
                       prefixIcon: const Icon(
@@ -389,7 +317,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
 
                   // File Selection Section
                   Text(
-                    'Upload Image',
+                    'Upload Image (JPG/PNG)',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Colors.white70,
                           fontWeight: FontWeight.w600,
@@ -403,12 +331,12 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                         padding: const EdgeInsets.all(24),
                         decoration: BoxDecoration(
                           border: Border.all(
-                            color: Colors.white.withOpacity(0.3),
+                            color: Colors.white.withAlpha(_alpha30),
                             style: BorderStyle.solid,
                             width: 2,
                           ),
                           borderRadius: BorderRadius.circular(12),
-                          color: Colors.white.withOpacity(0.05),
+                          color: Colors.white.withAlpha(_alpha05),
                         ),
                         child: Column(
                           children: [
@@ -429,15 +357,6 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                                   ),
                             ),
                             const SizedBox(height: 4),
-                            Text(
-                              'or paste Google Drive URL below',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: Colors.white54,
-                                  ),
-                            ),
                           ],
                         ),
                       ),
@@ -446,7 +365,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: Colors.green.shade900.withOpacity(0.3),
+                        color: Colors.green.shade900.withAlpha(_alpha30),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
                           color: Colors.green.shade400,
@@ -483,47 +402,6 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                       ),
                     ),
 
-                  const SizedBox(height: 24),
-
-                  // Google Drive URL Alternative
-                  Text(
-                    'Or paste Google Drive URL',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Colors.white70,
-                          fontWeight: FontWeight.w600,
-                        ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    style: const TextStyle(color: Colors.white),
-                    enabled: !_isUploading && _selectedFile == null,
-                    decoration: InputDecoration(
-                      hintText: 'https://drive.google.com/...',
-                      hintStyle: const TextStyle(color: Colors.white60),
-                      filled: true,
-                      fillColor: Colors.white.withOpacity(0.1),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
-                        ),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(
-                          color: Colors.white.withOpacity(0.3),
-                        ),
-                      ),
-                      prefixIcon: const Icon(
-                        Icons.link,
-                        color: Colors.white60,
-                      ),
-                    ),
-                    onChanged: (value) {
-                      setState(() => _googleDriveUrl = value.isEmpty ? null : value);
-                    },
-                  ),
-
                   const SizedBox(height: 30),
 
                   // Upload Progress
@@ -553,8 +431,8 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: _uploadedAssetId != null
-                            ? Colors.green.shade400.withOpacity(0.2)
-                            : Colors.orange.shade400.withOpacity(0.2),
+                            ? Colors.green.shade400.withAlpha(_alpha20)
+                            : Colors.orange.shade400.withAlpha(_alpha20),
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(
                           color: _uploadedAssetId != null
@@ -595,7 +473,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                       height: 56,
                       child: ElevatedButton.icon(
                         onPressed: (_assetName.isEmpty ||
-                                (_selectedFile == null && _googleDriveUrl == null) ||
+                                (_selectedFile == null) ||
                                 _assetCost <= 0)
                             ? null
                             : _uploadAssetViaServer,
@@ -603,7 +481,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                         label: const Text('Upload & Register Asset'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: (_assetName.isEmpty ||
-                                  (_selectedFile == null && _googleDriveUrl == null) ||
+                                  (_selectedFile == null) ||
                                   _assetCost <= 0)
                               ? Colors.grey.shade400
                               : Colors.white,
@@ -621,7 +499,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: Colors.green.shade900.withOpacity(0.3),
+                        color: Colors.green.shade900.withAlpha(_alpha30),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
                           color: Colors.green.shade400,

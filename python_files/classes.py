@@ -328,7 +328,14 @@ class DB:
 class PROTO:
     def log(self, dirct, data):
         try:
-            data = data.decode()
+            decoded = data.decode()
+            if decoded.startswith("UPLOAD_CHUNK|"):
+                parts = decoded.split("|", 4)
+                if len(parts) >= 4:
+                    decoded = f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|<chunk>"
+            elif decoded.startswith("UPLOAD_INIT|"):
+                decoded = "UPLOAD_INIT|<payload>"
+            data = decoded
         except Exception as e:
             if data[:5] != b'GETKY':  # raise exception but only if received bytes after the encryption stage
                 self.Print("the data received is in bytes", 50)
@@ -434,6 +441,7 @@ class CustomLogger:
     def __init__(self, name, logging_level=logging.DEBUG):
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging_level)
+        self.logger.propagate = False
 
         # Only add handler if none exist
         if not self.logger.handlers:

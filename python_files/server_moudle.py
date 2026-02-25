@@ -37,50 +37,68 @@ Supported Commands:
      Send: LOGOUT|username
      Recv: OK or ERR|error_message
   
-  8. UPLOAD - Upload/register marketplace item (asset)
-     Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
-     Recv: OK|asset_id or ERR|error_message
+  8. UPLOAD_INIT - Start chunked upload session
+     Send: UPLOAD_INIT|base64(json)
+     Recv: OK|upload_id|chunk_size or ERR|error_message
+
+  9. UPLOAD_CHUNK - Send file chunk (base64)
+     Send: UPLOAD_CHUNK|upload_id|seq|total|base64(chunk)
+     Recv: OK|seq or ERR|error_message
+
+  10. UPLOAD_FINISH - Finalize upload (Drive + DB)
+      Send: UPLOAD_FINISH|upload_id
+      Recv: OK|asset_name|drive_url or ERR|error_message
+
+  11. UPLOAD_ABORT - Cancel an in-progress upload
+      Send: UPLOAD_ABORT|upload_id
+      Recv: OK|message or ERR|error_message
+
+  12. UPLOAD - Legacy direct-URL upload/register
+      Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
+      Recv: OK|asset_id or ERR|error_message
   
-  9. GET_ITEMS - Get all marketplace items
+  13. GET_ITEMS - Get all marketplace items
      Send: GET_ITEMS
      Recv: OK|item1|item2|... or ERR|error_message
   
-  10. GET_ITEMS_PAGINATED - Lazy scrolling with timestamp cursor
+  14. GET_ITEMS_PAGINATED - Lazy scrolling with timestamp cursor
       Send: GET_ITEMS_PAGINATED|limit[|timestamp]
       Recv: OK|item1|item2|... or ERR|error_message
   
-  11. BUY - Purchase an asset from marketplace
+  15. BUY - Purchase an asset from marketplace
       Send: BUY|asset_id|username|amount
       Recv: OK|PENDING|transaction_id or ERR|error_message
   
-  12. SEND - Send purchased asset to another user
+  16. SEND - Send purchased asset to another user
       Send: SEND|asset_id|sender_username|receiver_username
       Recv: OK|transaction_id or ERR|error_message
   
-  13. GET_PROFILE - Get user profile (anonymous - username only)
+  17. GET_PROFILE - Get user profile (anonymous - username only)
       Send: GET_PROFILE|username
       Recv: OK|username|email|created_at or ERR|error_message
 
-  14. GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in)
+  18. GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in)
       Send: GET_USER_BY_EMAIL|email
       Recv: OK|username or ERR|error_message
 
-  15. GET_TX_STATUS - Check blockchain purchase status
+  19. GET_TX_STATUS - Check blockchain purchase status
       Send: GET_TX_STATUS|tx_id
       Recv: OK|STATUS|message or ERR|error_message
 
-  16. GET_ITEMS_BY_USER - Get assets owned by a user
+  20. GET_ITEMS_BY_USER - Get assets owned by a user
       Send: GET_ITEMS_BY_USER|username
       Recv: OK|items_json or ERR|error_message
 
-  17. GET_WALLET - Get wallet balance for a user
+  21. GET_WALLET - Get wallet balance for a user
       Send: GET_WALLET|username
       Recv: OK|balance|updated_at or ERR|error_message
 """
 
+import base64
 import datetime
 import json
 import logging
+import os
 import queue
 import random
 import socket
@@ -89,21 +107,41 @@ import struct
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
 from config import (
     SERVER_HOST, SERVER_PORT, SERVER_IP,
     BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
     LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
     GATEWAY_HOST, GATEWAY_PORT,
+    GOOGLE_DRIVE_PARENT_FOLDER_ID, GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
+    GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL,
+    UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
 )
 from classes import PROTO, CustomLogger
 from DB_ORM import MarketplaceDB
+from google_drive_uploader import upload_file_to_drive
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-)
-server_logger = logging.getLogger('server')
+server_logger = CustomLogger("server", LOGGING_LEVEL).logger
+
+
+@dataclass
+class UploadSession:
+    """Track a chunked upload session per client."""
+    upload_id: str
+    username: str
+    asset_name: str
+    description: str
+    file_type: str
+    cost: float
+    file_size: int
+    original_name: str
+    temp_path: str
+    total_chunks: int = 0
+    received_chunks: int = 0
+    next_seq: int = 0
+    bytes_received: int = 0
+    created_at: float = field(default_factory=time.time)
 
 
 class ClientSession:
@@ -123,6 +161,13 @@ class ClientSession:
         self.is_authenticated = False
         self.is_connected = True
         self.db = MarketplaceDB()  # ORM: DB/marketplace.db (users + marketplace_items)
+        self.upload_sessions = {}
+
+        # Ensure upload temp directory exists
+        self.upload_tmp_dir = Path(UPLOAD_TMP_DIR)
+        if not self.upload_tmp_dir.is_absolute():
+            self.upload_tmp_dir = (Path(__file__).parent / self.upload_tmp_dir).resolve()
+        self.upload_tmp_dir.mkdir(parents=True, exist_ok=True)
 
         self.handlers = {
             "START": self.handle_start,
@@ -134,6 +179,10 @@ class ClientSession:
             "UPDATE_PASSWORD": self.handle_update_password,
             "LOGOUT": self.handle_logout,
             "UPLOAD": self.handle_log_asset,
+            "UPLOAD_INIT": self.handle_upload_init,
+            "UPLOAD_CHUNK": self.handle_upload_chunk,
+            "UPLOAD_FINISH": self.handle_upload_finish,
+            "UPLOAD_ABORT": self.handle_upload_abort,
             "GET_ITEMS": self.handle_asset_list,
             "GET_ITEMS_PAGINATED": self.handle_get_items_paginated,
             "BUY": self.handle_buy_asset,
@@ -349,9 +398,37 @@ class ClientSession:
         self.username = None
         self.Print(f"👋 User {username} logged out", 20)
         return "EXTLG|Logout successful"
+
+    def _normalize_file_type(self, file_type: str) -> str:
+        """Normalize file type to a supported extension."""
+        normalized = (file_type or "").strip().lower()
+        if normalized == "jpeg":
+            normalized = "jpg"
+        if normalized == "image":
+            normalized = "jpg"
+        return normalized
+
+    def _validate_file_signature(self, file_type: str, first_bytes: bytes) -> bool:
+        """Validate PNG/JPG magic bytes."""
+        if file_type == "png":
+            return first_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        if file_type == "jpg":
+            return first_bytes.startswith(b"\xff\xd8\xff")
+        return False
+
+    def _cleanup_upload(self, upload_id: str) -> None:
+        """Remove temp file and session data for a given upload."""
+        session = self.upload_sessions.pop(upload_id, None)
+        if not session:
+            return
+        try:
+            if os.path.exists(session.temp_path):
+                os.remove(session.temp_path)
+        except Exception:
+            pass
     
     def handle_log_asset(self, params):
-        """Protocol Message: UPLOAD - Upload marketplace item
+        """Protocol Message: UPLOAD - Legacy direct-URL upload
         Format: UPLOAD|asset_name|username|google_drive_url|file_type|cost
         """
         if not self.is_authenticated:
@@ -376,11 +453,9 @@ class ClientSession:
             if not asset_name or not username or not url or not file_type or cost < 0:
                 return "ERR01|Invalid parameters"
             
-            normalized_type = file_type.lower()
-            if normalized_type == 'image':
-                normalized_type = 'jpg'
-            if normalized_type not in ['jpg', 'png', 'gif', 'jpeg']:
-                return "ERR01|Invalid file type. Supported: jpg, png, gif, jpeg"
+            normalized_type = self._normalize_file_type(file_type)
+            if normalized_type not in ['jpg', 'png']:
+                return "ERR01|Invalid file type. Supported: jpg, png"
             
             # Add to marketplace database (ORM: DB/marketplace.db)
             marketplace_db = MarketplaceDB()
@@ -398,6 +473,195 @@ class ClientSession:
         except Exception as e:
             self.Print(f"❌ Error processing UPLOAD: {e}", 40)
             return f"ERR99|{str(e)}"
+
+    def handle_upload_init(self, params):
+        """
+        Protocol: UPLOAD_INIT - Start a chunked upload session.
+        Format: UPLOAD_INIT|base64(json)
+        Response: OK|upload_id|chunk_size or ERR|message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 1:
+            return "ERR01|Invalid format: UPLOAD_INIT|base64(json)"
+        try:
+            payload = base64.b64decode(params[0].encode("utf-8"))
+            data = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return "ERR01|Invalid init payload"
+
+        asset_name = str(data.get("asset_name", "")).strip()
+        username = str(data.get("username", "")).strip()
+        description = str(data.get("description", "")).strip()
+        file_type = self._normalize_file_type(data.get("file_type", ""))
+        original_name = str(data.get("original_name", "")).strip()
+        file_size = int(data.get("file_size", 0) or 0)
+        try:
+            cost = float(data.get("cost", 0))
+        except Exception:
+            cost = -1
+
+        if username != self.username:
+            return "ERR02|Unauthorized"
+        if not asset_name or not username or cost <= 0 or file_size <= 0:
+            return "ERR01|Invalid parameters"
+        if file_type not in ("jpg", "png"):
+            return "ERR01|Invalid file type. Supported: jpg, png"
+
+        upload_id = uuid.uuid4().hex
+        temp_path = str(self.upload_tmp_dir / f"upload_{upload_id}.bin")
+
+        session = UploadSession(
+            upload_id=upload_id,
+            username=username,
+            asset_name=asset_name,
+            description=description,
+            file_type=file_type,
+            cost=cost,
+            file_size=file_size,
+            original_name=original_name or f"{asset_name}.{file_type}",
+            temp_path=temp_path,
+        )
+        self.upload_sessions[upload_id] = session
+
+        return f"OK|{upload_id}|{UPLOAD_CHUNK_SIZE}"
+
+    def handle_upload_chunk(self, params):
+        """
+        Protocol: UPLOAD_CHUNK - Send a file chunk.
+        Format: UPLOAD_CHUNK|upload_id|seq|total|base64(chunk)
+        Response: OK|seq or ERR|message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 4:
+            return "ERR01|Invalid format: UPLOAD_CHUNK|upload_id|seq|total|data"
+
+        upload_id = params[0].strip()
+        session = self.upload_sessions.get(upload_id)
+        if not session:
+            return "ERR04|Upload session not found"
+        if session.username != self.username:
+            return "ERR02|Unauthorized"
+
+        try:
+            seq = int(params[1])
+            total = int(params[2])
+        except Exception:
+            return "ERR01|Invalid chunk metadata"
+
+        if total <= 0 or seq < 0:
+            return "ERR01|Invalid chunk indices"
+        if session.total_chunks and session.total_chunks != total:
+            return "ERR01|Total chunk mismatch"
+        session.total_chunks = total
+
+        if seq != session.next_seq:
+            return f"ERR05|Out of order chunk (expected {session.next_seq})"
+
+        try:
+            chunk_bytes = base64.b64decode(params[3].encode("utf-8"))
+        except Exception:
+            return "ERR01|Invalid chunk encoding"
+
+        if seq == 0 and not self._validate_file_signature(session.file_type, chunk_bytes):
+            self._cleanup_upload(upload_id)
+            return "ERR06|Invalid file signature"
+
+        session.bytes_received += len(chunk_bytes)
+        if session.bytes_received > session.file_size:
+            self._cleanup_upload(upload_id)
+            return "ERR06|File size mismatch"
+
+        try:
+            with open(session.temp_path, "ab") as handle:
+                handle.write(chunk_bytes)
+        except Exception as e:
+            self._cleanup_upload(upload_id)
+            return f"ERR99|Failed to write chunk: {e}"
+
+        session.received_chunks += 1
+        session.next_seq += 1
+        return f"OK|{seq}"
+
+    def handle_upload_finish(self, params):
+        """
+        Protocol: UPLOAD_FINISH - Finalize upload, push to Drive, register asset.
+        Format: UPLOAD_FINISH|upload_id
+        Response: OK|asset_name|url or ERR|message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 1:
+            return "ERR01|Invalid format: UPLOAD_FINISH|upload_id"
+
+        upload_id = params[0].strip()
+        session = self.upload_sessions.get(upload_id)
+        if not session:
+            return "ERR04|Upload session not found"
+        if session.username != self.username:
+            return "ERR02|Unauthorized"
+        if session.total_chunks == 0 or session.received_chunks != session.total_chunks:
+            return "ERR06|Upload incomplete"
+
+        try:
+            actual_size = os.path.getsize(session.temp_path)
+        except Exception:
+            actual_size = 0
+        if actual_size != session.file_size:
+            self._cleanup_upload(upload_id)
+            return "ERR06|File size mismatch"
+
+        file_name = f"{session.asset_name}.{session.file_type}"
+        try:
+            if GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL:
+                self.Print(
+                    f"Drive upload account: {GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL}",
+                    10,
+                )
+            drive_url = upload_file_to_drive(
+                session.temp_path,
+                file_name,
+                session.description,
+                parent_folder_id=GOOGLE_DRIVE_PARENT_FOLDER_ID,
+                service_account_file=GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
+                username=session.username,
+                asset_name=session.asset_name,
+            )
+        except Exception as e:
+            self._cleanup_upload(upload_id)
+            return f"ERR03|Drive upload failed: {e}"
+
+        try:
+            marketplace_db = MarketplaceDB()
+            success, message = marketplace_db.add_marketplace_item(
+                session.asset_name,
+                session.username,
+                drive_url,
+                session.file_type,
+                session.cost,
+                session.description,
+            )
+        except Exception as e:
+            self._cleanup_upload(upload_id)
+            return f"ERR03|DB error: {e}"
+
+        self._cleanup_upload(upload_id)
+        if not success:
+            return f"ERR03|{message}"
+        self.Print(f"✅ Asset uploaded: {session.asset_name} by {session.username} - ${session.cost}", 20)
+        return f"OK|{session.asset_name}|{drive_url}"
+
+    def handle_upload_abort(self, params):
+        """
+        Protocol: UPLOAD_ABORT - Cancel an in-progress upload.
+        Format: UPLOAD_ABORT|upload_id
+        """
+        if len(params) < 1:
+            return "ERR01|Invalid format: UPLOAD_ABORT|upload_id"
+        upload_id = params[0].strip()
+        self._cleanup_upload(upload_id)
+        return "OK|Upload aborted"
     
     def handle_asset_list(self, params):
         """Protocol Message: GET_ITEMS - Get all marketplace items
@@ -655,7 +919,7 @@ class ClientSession:
             return "ERR02|Unauthorized"
 
         try:
-            self.db.ensure_wallet(username, 0)
+            self.db.ensure_wallet(username, 100)
             wallet = self.db.get_wallet(username)
             if not wallet:
                 return "ERR02|Wallet not found"
@@ -983,7 +1247,14 @@ class Server:
                     # Decode and process
                     try:
                         msg_str = message.decode() if isinstance(message, bytes) else message
-                        self.Print(f"📩 Received from {addr[0]}:{addr[1]}: {msg_str}", 20)
+                        log_msg = msg_str
+                        if isinstance(msg_str, str) and msg_str.startswith("UPLOAD_CHUNK|"):
+                            parts = msg_str.split("|", 4)
+                            if len(parts) >= 4:
+                                log_msg = f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|<chunk>"
+                        elif isinstance(msg_str, str) and msg_str.startswith("UPLOAD_INIT|"):
+                            log_msg = "UPLOAD_INIT|<payload>"
+                        self.Print(f"📩 Received from {addr[0]}:{addr[1]}: {log_msg}", 20)
                         
                         response = session.process_message(msg_str)
                         
@@ -1017,6 +1288,9 @@ class Server:
         finally:
             # Clean up
             try:
+                if session:
+                    for upload_id in list(session.upload_sessions.keys()):
+                        session._cleanup_upload(upload_id)
                 if addr in self.clients:
                     del self.clients[addr]
                     self.Print(f"🗑️ Client session removed for {addr[0]}:{addr[1]}", 20)

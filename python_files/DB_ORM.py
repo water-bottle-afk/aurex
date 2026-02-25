@@ -116,7 +116,7 @@ class MarketplaceDB:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Users table with email verification
+        # Users table with email verification + wallet
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,6 +132,10 @@ class MarketplaceDB:
                 wallet_updated_at TEXT
             )
         ''')
+
+        # Track columns for migration checks
+        cursor.execute("PRAGMA table_info(users)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
 
         # Ensure wallet columns exist for older DBs
         cursor.execute("PRAGMA table_info(users)")
@@ -162,6 +166,11 @@ class MarketplaceDB:
         item_cols = {row[1] for row in cursor.fetchall()}
         if "description" not in item_cols:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN description TEXT")
+
+        # Normalize empty wallet balances to default
+        cursor.execute(
+            "UPDATE users SET wallet_balance = 100 WHERE wallet_balance IS NULL OR wallet_balance = ''"
+        )
         
         conn.commit()
         conn.close()
@@ -182,8 +191,8 @@ class MarketplaceDB:
                 user.password_hash,
                 user.salt,
                 user.created_at,
-                user.wallet_balance,
-                user.wallet_updated_at,
+                100.0,
+                user.created_at,
             ))
             
             conn.commit()
@@ -215,7 +224,8 @@ class MarketplaceDB:
             conn.close()
             
             if result:
-                user = User(result[0], "", result[1], created_at=result[7], wallet_balance=result[8], wallet_updated_at=result[9])
+                user = User(result[0], "", result[1], created_at=result[7],
+                            wallet_balance=result[8], wallet_updated_at=result[9])
                 user.password_hash = result[2]
                 user.salt = result[3]
                 user.is_verified = bool(result[4])
@@ -243,7 +253,8 @@ class MarketplaceDB:
             conn.close()
             
             if result:
-                user = User(result[0], "", result[1], created_at=result[7], wallet_balance=result[8], wallet_updated_at=result[9])
+                user = User(result[0], "", result[1], created_at=result[7],
+                            wallet_balance=result[8], wallet_updated_at=result[9])
                 user.password_hash = result[2]
                 user.salt = result[3]
                 user.is_verified = bool(result[4])
@@ -263,7 +274,7 @@ class MarketplaceDB:
         return False
 
     def get_wallet(self, username):
-        """Get wallet balance for user. Returns balance or None if no wallet."""
+        """Get wallet balance for user from users table."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -275,8 +286,8 @@ class MarketplaceDB:
             print(f"Error getting wallet: {e}")
             return None
 
-    def ensure_wallet(self, username, initial_balance=0):
-        """Ensure wallet balance exists for user. Returns True on success."""
+    def ensure_wallet(self, username, initial_balance=100):
+        """Ensure wallet fields are initialized for user. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -285,9 +296,13 @@ class MarketplaceDB:
             if not row:
                 conn.close()
                 return False
+            now = datetime.now().isoformat()
+            current_balance = row[0]
+            if current_balance in (None, ""):
+                current_balance = initial_balance
             cursor.execute(
                 'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
-                (float(initial_balance), datetime.now().isoformat(), username)
+                (float(current_balance), now, username)
             )
             conn.commit()
             conn.close()
@@ -297,7 +312,7 @@ class MarketplaceDB:
             return False
 
     def update_balance(self, username, new_balance):
-        """Set wallet balance. Returns True on success."""
+        """Set wallet balance in users table. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -313,7 +328,7 @@ class MarketplaceDB:
             return False
 
     def transfer(self, from_user, to_user, amount):
-        """Transfer amount from from_user to to_user. Returns (success, message)."""
+        """Transfer amount between wallets. Returns (success, message)."""
         if amount <= 0:
             return False, "Amount must be positive"
         try:

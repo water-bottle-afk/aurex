@@ -30,39 +30,55 @@
 ///    Send: LOGOUT|username
 ///    Recv: OK or ERR|error_message
 ///
-/// 8. UPLOAD - Upload/register marketplace item (asset)
-///    Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
-///    Recv: OK|asset_id or ERR|error_message
+/// 8. UPLOAD_INIT - Start chunked upload session
+///    Send: UPLOAD_INIT|base64(json)
+///    Recv: OK|upload_id|chunk_size or ERR|error_message
 ///
-/// 9. GET_ITEMS - Get all marketplace items
-///    Send: GET_ITEMS
-///    Recv: OK|item1|item2|... or ERR|error_message
+/// 9. UPLOAD_CHUNK - Send file chunk
+///    Send: UPLOAD_CHUNK|upload_id|seq|total|base64(chunk)
+///    Recv: OK|seq or ERR|error_message
 ///
-/// 10. GET_ITEMS_PAGINATED - Lazy scrolling with timestamp cursor
+/// 10. UPLOAD_FINISH - Finalize upload
+///     Send: UPLOAD_FINISH|upload_id
+///     Recv: OK|asset_name|drive_url or ERR|error_message
+///
+/// 11. UPLOAD_ABORT - Cancel an upload
+///     Send: UPLOAD_ABORT|upload_id
+///     Recv: OK|message or ERR|error_message
+///
+/// 12. UPLOAD - Legacy direct-URL upload/register
+///     Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
+///     Recv: OK|asset_id or ERR|error_message
+///
+/// 13. GET_ITEMS - Get all marketplace items
+///     Send: GET_ITEMS
+///     Recv: OK|item1|item2|... or ERR|error_message
+///
+/// 14. GET_ITEMS_PAGINATED - Lazy scrolling with timestamp cursor
 ///     Send: GET_ITEMS_PAGINATED|limit[|timestamp]
 ///     Recv: OK|item1|item2|... or ERR|error_message
 ///
-/// 12. BUY - Purchase an asset from marketplace
+/// 15. BUY - Purchase an asset from marketplace
 ///     Send: BUY|asset_id|username|amount
 ///     Recv: OK|PENDING|transaction_id or ERR|error_message
 ///
-/// 13. SEND - Send purchased asset to another user
+/// 16. SEND - Send purchased asset to another user
 ///     Send: SEND|asset_id|sender_username|receiver_username
 ///     Recv: OK|transaction_id or ERR|error_message
 ///
-/// 14. GET_PROFILE - Get user profile (anonymous)
+/// 17. GET_PROFILE - Get user profile (anonymous)
 ///     Send: GET_PROFILE|username
 ///     Recv: OK|username|email|created_at or ERR|error_message
 ///
-/// 15. GET_TX_STATUS - Check blockchain purchase status
+/// 18. GET_TX_STATUS - Check blockchain purchase status
 ///     Send: GET_TX_STATUS|tx_id
 ///     Recv: OK|STATUS|message or ERR|error_message
 ///
-/// 16. GET_ITEMS_BY_USER - Get assets owned by a user
+/// 19. GET_ITEMS_BY_USER - Get assets owned by a user
 ///     Send: GET_ITEMS_BY_USER|username
 ///     Recv: OK|items_json or ERR|error_message
 ///
-/// 17. GET_WALLET - Get wallet balance for a user
+/// 20. GET_WALLET - Get wallet balance for a user
 ///     Send: GET_WALLET|username
 ///     Recv: OK|balance|updated_at or ERR|error_message
 library;
@@ -374,7 +390,11 @@ class Client extends ChangeNotifier {
 
   /// Send a message with 2-byte length prefix
   /// Format: [2-byte length][message]
-  Future<void> sendMessage(String message) async {
+  Future<void> sendMessage(
+    String message, {
+    String? logPreview,
+    bool logToScreen = true,
+  }) async {
     if (_socket == null || !_isConnected) {
       throw Exception("Not connected to server");
     }
@@ -391,24 +411,30 @@ class Client extends ChangeNotifier {
       await _socket!.flush();
 
       // Extract protocol preview for cleaner logging
-      final preview = message.length > 50 ? '${message.substring(0, 50)}...' : message;
-      
+      final preview = logPreview ??
+          (message.length > 50 ? '${message.substring(0, 50)}...' : message);
+      final displayMessage = logPreview ?? message;
+
       _log.info('[SEND] $preview');
 
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'success',
-      );
+      if (logToScreen) {
+        pushMessageToScreen(
+          type: 'sent',
+          message: displayMessage,
+          status: 'success',
+        );
+      }
     } catch (e) {
       final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
       _log.error('[SEND FAILED] $e');
       
-      pushMessageToScreen(
-        type: 'sent',
-        message: message,
-        status: 'error',
-      );
+      if (logToScreen) {
+        pushMessageToScreen(
+          type: 'sent',
+          message: message,
+          status: 'error',
+        );
+      }
       rethrow;
     }
   }
@@ -848,7 +874,7 @@ class Client extends ChangeNotifier {
     }
   }
 
-  /// Upload marketplace item
+  /// Upload marketplace item (legacy: URL already on Drive)
   /// Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
   /// Receive: OK or ERR|error_message
   Future<String> uploadMarketplaceItem({
@@ -889,6 +915,131 @@ class Client extends ChangeNotifier {
         return "error";
       }
     } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'Error uploading item: $e',
+        status: 'error',
+      );
+      rethrow;
+    }
+  }
+
+  /// Upload marketplace item using chunked file transfer.
+  /// Flow: UPLOAD_INIT -> UPLOAD_CHUNK (n) -> UPLOAD_FINISH
+  Future<String> uploadMarketplaceItemChunked({
+    required File file,
+    required String assetName,
+    required String description,
+    required String username,
+    required String fileType,
+    required double cost,
+  }) async {
+    String? uploadId;
+    try {
+      final normalizedType =
+          fileType.toLowerCase() == 'jpeg' ? 'jpg' : fileType.toLowerCase();
+      final fileSize = await file.length();
+      final originalName = file.path.split(Platform.pathSeparator).last;
+      final initPayload = {
+        "asset_name": assetName,
+        "username": username,
+        "description": description,
+        "file_type": normalizedType,
+        "cost": cost,
+        "file_size": fileSize,
+        "original_name": originalName,
+      };
+
+      final initMessage =
+          "UPLOAD_INIT|${base64Encode(utf8.encode(jsonEncode(initPayload)))}";
+
+      pushMessageToScreen(
+        type: 'sent',
+        message: "UPLOAD_INIT|<payload>",
+        status: 'pending',
+      );
+
+      await sendMessage(initMessage, logPreview: "UPLOAD_INIT|<payload>");
+      final initResponse = await receiveMessage();
+      final initParts = initResponse.split('|');
+
+      if (initParts.isEmpty || initParts[0] != "OK") {
+        final errorMsg = initParts.length > 1 ? initParts[1] : "Init failed";
+        pushMessageToScreen(
+          type: 'received',
+          message: "Upload init failed: $errorMsg",
+          status: 'error',
+        );
+        return "error";
+      }
+
+      uploadId = initParts.length > 1 ? initParts[1] : null;
+      final chunkSize = initParts.length > 2
+          ? int.tryParse(initParts[2]) ?? 32768
+          : 32768;
+
+      if (uploadId == null || uploadId!.isEmpty) {
+        throw Exception("Missing upload_id");
+      }
+
+      final totalChunks = ((fileSize + chunkSize - 1) ~/ chunkSize);
+      final raf = await file.open();
+      try {
+        for (var seq = 0; seq < totalChunks; seq++) {
+          final bytes = await raf.read(chunkSize);
+          if (bytes.isEmpty) {
+            throw Exception("Unexpected end of file");
+          }
+
+          final chunkMessage =
+              "UPLOAD_CHUNK|$uploadId|$seq|$totalChunks|${base64Encode(bytes)}";
+
+          await sendMessage(
+            chunkMessage,
+            logPreview: "UPLOAD_CHUNK|$uploadId|$seq/$totalChunks",
+            logToScreen: false,
+          );
+
+          final chunkResponse = await receiveMessage();
+          final chunkParts = chunkResponse.split('|');
+          if (chunkParts.isEmpty || chunkParts[0] != "OK") {
+            final errorMsg =
+                chunkParts.length > 1 ? chunkParts[1] : "Chunk failed";
+            throw Exception("Chunk $seq failed: $errorMsg");
+          }
+        }
+      } finally {
+        await raf.close();
+      }
+
+      await sendMessage("UPLOAD_FINISH|$uploadId");
+      final finishResponse = await receiveMessage();
+      final finishParts = finishResponse.split('|');
+
+      if (finishParts.isNotEmpty && finishParts[0] == "OK") {
+        pushMessageToScreen(
+          type: 'received',
+          message: "Item uploaded successfully",
+          status: 'success',
+        );
+        return "success";
+      }
+
+      final errorMsg =
+          finishParts.length > 1 ? finishParts[1] : "Upload failed";
+      pushMessageToScreen(
+        type: 'received',
+        message: "Upload failed: $errorMsg",
+        status: 'error',
+      );
+      return "error";
+    } catch (e) {
+      if (uploadId != null) {
+        try {
+          await sendMessage("UPLOAD_ABORT|$uploadId");
+          await receiveMessage();
+        } catch (_) {}
+      }
       pushMessageToScreen(
         type: 'system',
         message: 'Error uploading item: $e',
