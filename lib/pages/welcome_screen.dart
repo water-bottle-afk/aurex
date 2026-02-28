@@ -176,7 +176,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.red.withOpacity(0.1),
+                  color: Colors.red.withAlpha((0.1 * 255).round()),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
@@ -255,7 +255,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             end: Alignment.bottomRight,
             colors: [
               const Color(0xFF6366F1),
-              const Color(0xFF6366F1).withOpacity(0.8),
+              const Color(0xFF6366F1).withAlpha((0.8 * 255).round()),
               const Color(0xFF4F46E5),
             ],
           ),
@@ -271,11 +271,11 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                   Container(
                     padding: const EdgeInsets.all(24),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.95),
+                      color: Colors.white.withAlpha((0.95 * 255).round()),
                       shape: BoxShape.circle,
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.15),
+                          color: Colors.black.withAlpha((0.15 * 255).round()),
                           blurRadius: 20,
                           offset: const Offset(0, 10),
                         ),
@@ -302,7 +302,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     'Blockchain Marketplace',
                     style: TextStyle(
                       fontSize: 16,
-                      color: Colors.white.withOpacity(0.8),
+                      color: Colors.white.withAlpha((0.8 * 255).round()),
                       letterSpacing: 0.5,
                     ),
                   ),
@@ -313,7 +313,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     child: CircularProgressIndicator(
                       strokeWidth: 4,
                       valueColor: AlwaysStoppedAnimation(
-                        Colors.white.withOpacity(0.8),
+                        Colors.white.withAlpha((0.8 * 255).round()),
                       ),
                     ),
                   ),
@@ -322,7 +322,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     'Connecting to server...',
                     style: TextStyle(
                       fontSize: 14,
-                      color: Colors.white.withOpacity(0.7),
+                      color: Colors.white.withAlpha((0.7 * 255).round()),
                       fontWeight: FontWeight.w500,
                     ),
                   ),

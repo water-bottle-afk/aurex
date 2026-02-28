@@ -6,18 +6,21 @@ class AssetFocusCard extends StatelessWidget {
   final ItemOffering asset;
   final VoidCallback? onPrimaryAction;
   final String primaryActionLabel;
+  final bool isPrimaryDisabled;
 
   const AssetFocusCard({
     super.key,
     required this.asset,
     this.onPrimaryAction,
     this.primaryActionLabel = 'Buy Now',
+    this.isPrimaryDisabled = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final price = '\$${asset.price.toStringAsFixed(2)}';
+    final action = isPrimaryDisabled ? null : onPrimaryAction;
 
     return Card(
       elevation: 6,
@@ -42,7 +45,7 @@ class AssetFocusCard extends StatelessWidget {
                       end: Alignment.bottomCenter,
                       colors: [
                         Colors.transparent,
-                        Colors.black.withOpacity(0.35),
+                        Colors.black.withAlpha((0.35 * 255).round()),
                       ],
                     ),
                   ),
@@ -56,7 +59,7 @@ class AssetFocusCard extends StatelessWidget {
                       vertical: 6,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.9),
+                      color: Colors.white.withAlpha((0.9 * 255).round()),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
@@ -121,13 +124,23 @@ class AssetFocusCard extends StatelessWidget {
                   width: double.infinity,
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green[600],
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
                       padding: const EdgeInsets.symmetric(vertical: 14),
+                    ).copyWith(
+                      backgroundColor: WidgetStateProperty.resolveWith(
+                        (states) => states.contains(WidgetState.disabled)
+                            ? Colors.grey.shade400
+                            : Colors.green.shade600,
+                      ),
+                      foregroundColor: WidgetStateProperty.resolveWith(
+                        (states) => states.contains(WidgetState.disabled)
+                            ? Colors.grey.shade800
+                            : Colors.white,
+                      ),
                     ),
-                    onPressed: onPrimaryAction,
+                    onPressed: action,
                     child: Text(primaryActionLabel),
                   ),
                 ),

@@ -89,6 +89,25 @@ def broadcast_transaction(transaction_data):
     return success
 
 
+def broadcast_stop_mining(block_index=None, block_hash=None):
+    """Tell all nodes to stop mining (safety stop after a block is confirmed)."""
+    message = {
+        'type': 'STOP_MINING',
+        'block_index': block_index,
+        'block_hash': block_hash,
+    }
+    raw = json.dumps(message).encode()
+    for port in NODE_PORTS:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(SOCKET_TIMEOUT)
+            sock.connect((RPC_HOST, port))
+            sock.send(raw)
+            sock.close()
+        except Exception:
+            pass
+
+
 def make_transaction(transaction_obj):
     """
     Accept a Transaction (or dict). Broadcast to all nodes to start mining race.
@@ -207,6 +226,10 @@ def main():
                 logger.info("Saved to ledger: block_index=%s", msg.get('block_index'))
                 _record_block_confirmation(msg)
                 notify_server(msg)
+                broadcast_stop_mining(
+                    block_index=msg.get('block_index'),
+                    block_hash=msg.get('block_hash'),
+                )
                 conn.close()
                 return
             action = msg.get('action')

@@ -34,7 +34,7 @@ class _ConnectionLoadingPageState extends State<ConnectionLoadingPage> {
           Provider.of<ClientProvider>(context, listen: false);
 
       // Try automatic discovery first
-      setState(() => _status = '📡 Discovering server via broadcast...');
+      setState(() => _status = ' Discovering server via broadcast...');
 
       final discovered = await clientProvider.client.discoverServer(
         timeout: const Duration(seconds: 5),
@@ -43,7 +43,7 @@ class _ConnectionLoadingPageState extends State<ConnectionLoadingPage> {
 
       if (discovered && mounted) {
         // Server discovered, connect to it
-        setState(() => _status = '🔗 Connecting to server...');
+        setState(() => _status = ' Connecting to server...');
         await clientProvider.connect();
 
         if (mounted) {
@@ -83,14 +83,14 @@ class _ConnectionLoadingPageState extends State<ConnectionLoadingPage> {
       final port = int.tryParse(_portController.text) ?? 23456;
       clientProvider.client.setServerAddress(_ipController.text, port);
 
-      setState(() => _status = '🔗 Connecting to ${_ipController.text}:$port...');
+      setState(() => _status = ' Connecting to ${_ipController.text}:$port...');
 
       await clientProvider.connect(discoverFirst: false);
 
-      if (mounted) {
-        context.go(widget.nextRoute ?? '/home');
-      }
+      if (!mounted) return;
+      context.go(widget.nextRoute ?? '/home');
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Connection failed: $e')),
       );
@@ -106,8 +106,8 @@ class _ConnectionLoadingPageState extends State<ConnectionLoadingPage> {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async => false, // Prevent back button during connection
+    return PopScope(
+      canPop: false, // Prevent back button during connection
       child: Scaffold(
         backgroundColor: const Color(0xFF1A1A2E),
         body: Center(

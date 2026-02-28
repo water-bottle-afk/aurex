@@ -1,6 +1,8 @@
 /// Aurex Client Configuration
 /// Update these settings to match your server configuration
 
+library;
+
 class ClientConfig {
   // Server Connection
   static const String defaultServerHost = '10.100.102.58';

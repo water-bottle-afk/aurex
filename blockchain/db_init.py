@@ -61,7 +61,7 @@ def init_node_database(port):
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_tx_block_hash ON transactions(block_hash)')
     conn.commit()
     conn.close()
-    print(f"✅ Node ledger initialized at {path}")
+    print(f" Node ledger initialized at {path}")
 
 
 def get_node_db_connection(port):
@@ -167,7 +167,7 @@ def init_database():
     
     conn.commit()
     conn.close()
-    print(f"✅ Database initialized at {DB_PATH}")
+    print(f" Database initialized at {DB_PATH}")
 
 def get_db_connection():
     """Get a connection to the SQLite database"""

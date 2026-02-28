@@ -101,7 +101,7 @@ class _UploadItemPageState extends State<UploadItemPage> {
       if (url != null) {
         setState(() => _googleDriveUrl = url);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('✅ Uploaded to Google Drive!'), backgroundColor: Colors.green),
+          const SnackBar(content: Text(' Uploaded to Google Drive!'), backgroundColor: Colors.green),
         );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(

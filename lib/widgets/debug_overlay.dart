@@ -68,7 +68,7 @@ class _DebugOverlayState extends State<DebugOverlay> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         const Text(
-                          '📡 Protocol Debug Console',
+                          ' Protocol Debug Console',
                           style: TextStyle(
                             color: Colors.cyan,
                             fontWeight: FontWeight.bold,
@@ -78,7 +78,7 @@ class _DebugOverlayState extends State<DebugOverlay> {
                         Consumer<ClientProvider>(
                           builder: (context, provider, _) {
                             return Text(
-                              provider.client.isConnected ? '🟢 CONNECTED' : '🔴 DISCONNECTED',
+                              provider.client.isConnected ? ' CONNECTED' : ' DISCONNECTED',
                               style: TextStyle(
                                 color: provider.client.isConnected ? Colors.green : Colors.red,
                                 fontSize: 11,
@@ -147,11 +147,11 @@ class _DebugOverlayState extends State<DebugOverlay> {
     switch (msg.status) {
       case 'success':
         statusColor = Colors.green;
-        statusIcon = '✓';
+        statusIcon = '';
         break;
       case 'error':
         statusColor = Colors.red;
-        statusIcon = '✗';
+        statusIcon = '';
         break;
       case 'pending':
         statusColor = Colors.yellow;
@@ -176,7 +176,7 @@ class _DebugOverlayState extends State<DebugOverlay> {
         break;
       case 'system':
         typeColor = Colors.orange;
-        typeLabel = '⚙ SYS';
+        typeLabel = ' SYS';
         break;
       default:
         typeColor = Colors.grey;

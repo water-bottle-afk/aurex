@@ -47,7 +47,7 @@ class NodeKeyManager:
                     backend=default_backend()
                 )
             
-            print(f"🔑 Loaded existing keys for {self.node_id}")
+            print(f" Loaded existing keys for {self.node_id}")
         else:
             # Generate new keys
             self.private_key = rsa.generate_private_key(
@@ -71,7 +71,7 @@ class NodeKeyManager:
                     format=serialization.PublicFormat.SubjectPublicKeyInfo
                 ))
             
-            print(f"🔐 Generated new keys for {self.node_id}")
+            print(f" Generated new keys for {self.node_id}")
     
     def sign_data(self, data):
         """Sign data with private key"""

@@ -63,21 +63,19 @@ class _SettingsPageState extends State<SettingsPage> {
         email: email,
       );
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Profile updated successfully!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-        setState(() => _isEditingProfile = false);
-      }
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Profile updated successfully!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      setState(() => _isEditingProfile = false);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error updating profile: $e')),
-        );
-      }
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error updating profile: $e')),
+      );
     } finally {
       if (mounted) {
         setState(() => _isSaving = false);
@@ -440,51 +438,6 @@ class _SettingsPageState extends State<SettingsPage> {
                             color: Colors.blue,
                             fontWeight: FontWeight.w500,
                           ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              // App Preferences
-              Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'App Preferences',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Dark Mode'),
-                        trailing: Switch(
-                          value: false,
-                          onChanged: (value) {
-                            // TODO: Implement dark mode
-                          },
-                        ),
-                      ),
-                      const Divider(),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Notifications'),
-                        trailing: Switch(
-                          value: true,
-                          onChanged: (value) {
-                            // TODO: Implement notifications
-                          },
                         ),
                       ),
                     ],

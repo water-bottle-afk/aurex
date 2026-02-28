@@ -52,40 +52,37 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!clientProvider.isConnected) {
         final connected = await clientProvider.initializeConnection();
         if (!connected) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Server connection failed')),
-            );
-          }
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Server connection failed')),
+          );
           return;
         }
       }
 
       final result = await clientProvider.client.login(username, password);
 
+      if (!mounted) return;
       if (result != null) {
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: result,
           email: '',
         );
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Welcome, $result!')),
-          );
-          context.go('/marketplace');
-        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Welcome, $result!')),
+        );
+        context.go('/marketplace');
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('user not found')),
         );
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -106,13 +103,13 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
+      if (!mounted) return;
       final googleEmail = googleUser.email;
       if (googleEmail.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not get email from Google')),
-          );
-        }
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not get email from Google')),
+        );
         setState(() => _isLoading = false);
         return;
       }
@@ -121,7 +118,8 @@ class _LoginScreenState extends State<LoginScreen> {
       await clientProvider.initializeConnection();
 
       final username = await clientProvider.client.getUserByEmail(googleEmail);
-      if (username != null && mounted) {
+      if (!mounted) return;
+      if (username != null) {
         final displayName = googleUser.displayName ?? googleEmail.split('@')[0];
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: username,
@@ -131,7 +129,7 @@ class _LoginScreenState extends State<LoginScreen> {
           SnackBar(content: Text('Welcome, $displayName!')),
         );
         context.go('/marketplace');
-      } else if (mounted) {
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('No account with this email. Sign up with email first.'),
@@ -139,11 +137,10 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error signing in: $e')),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error signing in: $e')),
+      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);

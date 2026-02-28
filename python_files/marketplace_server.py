@@ -372,7 +372,7 @@ if __name__ == "__main__":
             file_type=asset["file_type"],
             cost=asset["cost"]
         )
-        status = "✓" if success else "✗"
+        status = "" if success else ""
         print(f"   {status} {asset['asset_name'].capitalize():15} - ${asset['cost']} - {message}")
     
     print("\n" + "=" * 60)

@@ -27,7 +27,7 @@ class SimpleBlockchainManager:
         self.ports = NODE_PORTS[:self.num_nodes]
         
         print("\n" + "="*70)
-        print("⛓️  AUREX BLOCKCHAIN - PoW SYSTEM")
+        print("  AUREX BLOCKCHAIN - PoW SYSTEM")
         print("="*70)
         print(f"Nodes:        {self.num_nodes} (ports: {self.ports})")
         print(f"Difficulty:   {self.difficulty} leading zeros")
@@ -86,10 +86,10 @@ except Exception as e:
             try:
                 process = subprocess.Popen(cmd, shell=True)
                 self.processes.append((node_name, process))
-                print(f"✅ {node_name} launched (port {port})", flush=True)
+                print(f" {node_name} launched (port {port})", flush=True)
                 time.sleep(0.5)
             except Exception as e:
-                print(f"❌ Failed to launch {node_name}: {e}", flush=True)
+                print(f" Failed to launch {node_name}: {e}", flush=True)
         
         sys.stdout.flush()
         print(f"\n[NODES] All {len(self.processes)} nodes launched\n", flush=True)
@@ -125,7 +125,7 @@ except Exception as e:
             self.start_all_nodes()
             self.keep_running()
         except Exception as e:
-            print(f"❌ Error: {e}", flush=True)
+            print(f" Error: {e}", flush=True)
             import traceback
             traceback.print_exc()
             sys.stdout.flush()
