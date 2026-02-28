@@ -27,12 +27,12 @@ class BlockchainNode:
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=False)
         self.thread.start()
-        print(f"✅ {self.node_name} started (listening on {self.port})")
+        print(f" {self.node_name} started (listening on {self.port})")
     
     def _run(self):
         """Run the node"""
         try:
-            print(f"\n🚀 [{self.node_name}] Starting on port {self.port}...")
+            print(f"\n [{self.node_name}] Starting on port {self.port}...")
             
             # Initialize database
             init_database()
@@ -44,13 +44,13 @@ class BlockchainNode:
             self.node.discover_nodes()
             
             # Start listening
-            print(f"✅ [{self.node_name}] Ready - listening on port {self.port}\n")
+            print(f" [{self.node_name}] Ready - listening on port {self.port}\n")
             
             # This blocks until node is stopped
             self.node.start_listening()
         
         except Exception as e:
-            print(f"\n❌ [{self.node_name}] ERROR: {e}")
+            print(f"\n [{self.node_name}] ERROR: {e}")
             import traceback
             traceback.print_exc()
         
@@ -64,4 +64,4 @@ class BlockchainNode:
         self.running = False
         if self.thread:
             self.thread.join(timeout=2)
-        print(f"⛔ {self.node_name} stopped")
+        print(f" {self.node_name} stopped")

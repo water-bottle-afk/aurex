@@ -149,7 +149,7 @@ class _ItemDetailsPageState extends State<ItemDetailsPage> {
                                 ),
                               ),
                               Text(
-                                'Verified Creator ✓',
+                                'Verified Creator ',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.grey[600],
@@ -234,7 +234,7 @@ class _ItemDetailsPageState extends State<ItemDetailsPage> {
           color: Colors.white,
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.1),
+              color: Colors.black.withAlpha((0.1 * 255).round()),
               blurRadius: 10,
             ),
           ],

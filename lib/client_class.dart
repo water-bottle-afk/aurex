@@ -81,10 +81,19 @@
 /// 20. GET_WALLET - Get wallet balance for a user
 ///     Send: GET_WALLET|username
 ///     Recv: OK|balance|updated_at or ERR|error_message
+///
+/// 21. GET_NOTIFICATIONS - Get notifications for a user
+///     Send: GET_NOTIFICATIONS|username|limit
+///     Recv: OK|json_list|unread_count or ERR|error_message
+///
+/// 22. MARK_NOTIFICATIONS_READ - Mark all notifications as read
+///     Send: MARK_NOTIFICATIONS_READ|username
+///     Recv: OK|read or ERR|error_message
 library;
 
 import 'dart:io';
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'package:logging/logging.dart';
 import 'package:flutter/foundation.dart';
@@ -131,6 +140,26 @@ class TxStatusResult {
   });
 }
 
+class NotificationsResult {
+  final List<Map<String, dynamic>> items;
+  final int unreadCount;
+
+  const NotificationsResult({
+    required this.items,
+    required this.unreadCount,
+  });
+}
+
+class ServerEvent {
+  final String event;
+  final Map<String, dynamic> payload;
+
+  const ServerEvent({
+    required this.event,
+    required this.payload,
+  });
+}
+
 /// Protocol message handler for Blockchain Communication Protocol
 class Client extends ChangeNotifier {
   SecureSocket? _socket;
@@ -144,6 +173,10 @@ class Client extends ChangeNotifier {
   // Persistent socket stream and receive buffer
   StreamSubscription? _socketSubscription;
   final List<int> _receiveBuffer = [];
+  final Queue<String> _messageQueue = Queue<String>();
+  Completer<void>? _messageSignal;
+  final StreamController<ServerEvent> _serverEventController =
+      StreamController<ServerEvent>.broadcast();
 
   // Message tracking for debugging
   final List<MessageEvent> _messageHistory = [];
@@ -152,6 +185,7 @@ class Client extends ChangeNotifier {
   bool get isConnected => _isConnected;
   bool get isAuthenticated => _isAuthenticated;
   List<MessageEvent> get messageHistory => List.unmodifiable(_messageHistory);
+  Stream<ServerEvent> get serverEvents => _serverEventController.stream;
 
   Client({String? initialHost, int? initialPort}) {
     host = initialHost ?? ClientConfig.defaultServerHost;
@@ -200,7 +234,7 @@ class Client extends ChangeNotifier {
 
         pushMessageToScreen(
           type: 'system',
-          message: '🔍 Server discovered at $host:$port',
+          message: ' Server discovered at $host:$port',
           status: 'success',
         );
         return true;
@@ -310,7 +344,7 @@ class Client extends ChangeNotifier {
 
       pushMessageToScreen(
         type: 'system',
-        message: '🔒 TLS Connected to server',
+        message: ' TLS Connected to server',
         status: 'success',
       );
 
@@ -400,8 +434,6 @@ class Client extends ChangeNotifier {
     }
 
     try {
-      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
-      
       final messageBytes = utf8.encode(message);
       final lengthPrefix = ByteData(2);
       lengthPrefix.setUint16(0, messageBytes.length, Endian.big);
@@ -425,7 +457,6 @@ class Client extends ChangeNotifier {
         );
       }
     } catch (e) {
-      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
       _log.error('[SEND FAILED] $e');
       
       if (logToScreen) {
@@ -447,38 +478,8 @@ class Client extends ChangeNotifier {
     }
 
     try {
-      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
-      
-      // Read 2-byte length header
-      final lengthBytes = await _readExact(2);
-      if (lengthBytes.isEmpty) {
-        throw Exception("Connection closed by server");
-      }
-
-      final byteData = ByteData.view(lengthBytes.buffer);
-      final messageLength = byteData.getUint16(0, Endian.big);
-
-      // Read message
-      final messageBytes = await _readExact(messageLength);
-      if (messageBytes.isEmpty) {
-        throw Exception("Connection closed while receiving message");
-      }
-
-      final message = utf8.decode(messageBytes);
-      
-      // Extract protocol command and log
-      final preview = message.length > 50 ? '${message.substring(0, 50)}...' : message;
-      _log.info('[RECV] $preview');
-
-      pushMessageToScreen(
-        type: 'received',
-        message: message,
-        status: 'success',
-      );
-
-      return message;
+      return await _dequeueMessage();
     } catch (e) {
-      final timestamp = DateTime.now().toIso8601String().split('.')[0].split('T')[1];
       _log.error('[RECV FAILED] $e');
       
       pushMessageToScreen(
@@ -500,20 +501,90 @@ class Client extends ChangeNotifier {
     // Start listening to socket and buffer all data
     _socketSubscription = _socket!.listen(
       (data) {
-        // Add incoming data to buffer
         _receiveBuffer.addAll(data);
+        _processBuffer();
       },
       onError: (error) {
         _logger.severe("Socket error: $error");
         _isConnected = false;
+        _messageSignal?.complete();
         notifyListeners();
       },
       onDone: () {
         _logger.info("Socket closed by server");
         _isConnected = false;
+        _messageSignal?.complete();
         notifyListeners();
       },
     );
+  }
+
+  void _processBuffer() {
+    while (_receiveBuffer.length >= 2) {
+      final lengthBytes = _receiveBuffer.sublist(0, 2);
+      final length = (lengthBytes[0] << 8) + lengthBytes[1];
+      if (_receiveBuffer.length < 2 + length) {
+        return;
+      }
+      final messageBytes = _receiveBuffer.sublist(2, 2 + length);
+      _receiveBuffer.removeRange(0, 2 + length);
+      final message = utf8.decode(messageBytes);
+      _handleIncomingMessage(message);
+    }
+  }
+
+  void _handleIncomingMessage(String message) {
+    final preview =
+        message.length > 50 ? '${message.substring(0, 50)}...' : message;
+    _log.info('[RECV] $preview');
+    pushMessageToScreen(
+      type: 'received',
+      message: message,
+      status: 'success',
+    );
+
+    if (message.startsWith('EVENT|')) {
+      final jsonPayload = message.substring(6);
+      _handleServerEvent(jsonPayload);
+      return;
+    }
+
+    _enqueueMessage(message);
+  }
+
+  void _handleServerEvent(String jsonPayload) {
+    try {
+      final decoded = json.decode(jsonPayload);
+      if (decoded is Map<String, dynamic>) {
+        final eventName = decoded['event']?.toString() ?? '';
+        final payload = decoded['payload'];
+        if (eventName.isNotEmpty && payload is Map<String, dynamic>) {
+          _serverEventController.add(ServerEvent(
+            event: eventName,
+            payload: payload,
+          ));
+        }
+      }
+    } catch (e) {
+      _log.error('Failed to parse server event: $e');
+    }
+  }
+
+  void _enqueueMessage(String message) {
+    _messageQueue.add(message);
+    _messageSignal?.complete();
+    _messageSignal = null;
+  }
+
+  Future<String> _dequeueMessage() async {
+    while (_messageQueue.isEmpty) {
+      if (!_isConnected) {
+        throw Exception("Connection closed by server");
+      }
+      _messageSignal ??= Completer<void>();
+      await _messageSignal!.future;
+    }
+    return _messageQueue.removeFirst();
   }
 
   /// Validate signup fields - returns error message or null if valid
@@ -541,28 +612,6 @@ class Client extends ChangeNotifier {
     }
 
     return null; // All valid
-  }
-
-  /// Read exact number of bytes from buffered socket data
-  Future<Uint8List> _readExact(int numBytes) async {
-    if (_socket == null) {
-      throw Exception("Socket not connected");
-    }
-
-    // Wait until we have enough bytes in buffer
-    while (_receiveBuffer.length < numBytes) {
-      if (!_isConnected) {
-        throw Exception("Connection closed by server");
-      }
-      // Small delay to avoid busy waiting
-      await Future.delayed(const Duration(milliseconds: 10));
-    }
-
-    // Extract bytes from buffer
-    final bytes = Uint8List.fromList(_receiveBuffer.sublist(0, numBytes));
-    _receiveBuffer.removeRange(0, numBytes);
-
-    return bytes;
   }
 
   // ====== AUTHENTICATION METHODS ======
@@ -721,6 +770,11 @@ class Client extends ChangeNotifier {
   Future<void> close() async {
     try {
       await _socket?.close();
+      await _socketSubscription?.cancel();
+      _receiveBuffer.clear();
+      _messageQueue.clear();
+      _messageSignal?.complete();
+      _messageSignal = null;
       _isConnected = false;
       _isAuthenticated = false;
       notifyListeners();
@@ -978,7 +1032,8 @@ class Client extends ChangeNotifier {
           ? int.tryParse(initParts[2]) ?? 32768
           : 32768;
 
-      if (uploadId == null || uploadId!.isEmpty) {
+      final safeUploadId = uploadId;
+      if (safeUploadId == null || safeUploadId.isEmpty) {
         throw Exception("Missing upload_id");
       }
 
@@ -992,11 +1047,11 @@ class Client extends ChangeNotifier {
           }
 
           final chunkMessage =
-              "UPLOAD_CHUNK|$uploadId|$seq|$totalChunks|${base64Encode(bytes)}";
+              "UPLOAD_CHUNK|$safeUploadId|$seq|$totalChunks|${base64Encode(bytes)}";
 
           await sendMessage(
             chunkMessage,
-            logPreview: "UPLOAD_CHUNK|$uploadId|$seq/$totalChunks",
+            logPreview: "UPLOAD_CHUNK|$safeUploadId|$seq/$totalChunks",
             logToScreen: false,
           );
 
@@ -1315,6 +1370,68 @@ class Client extends ChangeNotifier {
         status: 'error',
       );
       return null;
+    }
+  }
+
+  /// Get notifications for a user
+  /// Send: GET_NOTIFICATIONS|username|limit
+  /// Receive: OK|json_list|unread_count or ERR|error_message
+  Future<NotificationsResult> getNotifications({
+    required String username,
+    int limit = 50,
+  }) async {
+    try {
+      if (username.isEmpty || username.contains('|')) {
+        throw Exception("Invalid username");
+      }
+      final message = "GET_NOTIFICATIONS|$username|$limit";
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+
+      if (parts[0] == "OK" && parts.length >= 2) {
+        final items = jsonDecode(parts[1]) as List;
+        final unread = parts.length >= 3 ? int.tryParse(parts[2]) ?? 0 : 0;
+        return NotificationsResult(
+          items: items.cast<Map<String, dynamic>>(),
+          unreadCount: unread,
+        );
+      }
+      final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
+      throw Exception(errorMsg);
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'getNotifications error: $e',
+        status: 'error',
+      );
+      return const NotificationsResult(items: [], unreadCount: 0);
+    }
+  }
+
+  /// Mark all notifications as read for a user
+  /// Send: MARK_NOTIFICATIONS_READ|username
+  /// Receive: OK|read or ERR|error_message
+  Future<bool> markNotificationsRead(String username) async {
+    try {
+      if (username.isEmpty || username.contains('|')) {
+        throw Exception("Invalid username");
+      }
+      final message = "MARK_NOTIFICATIONS_READ|$username";
+      await sendMessage(message);
+      final response = await receiveMessage();
+      final parts = response.split('|');
+      if (parts[0] == "OK") {
+        return true;
+      }
+      return false;
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'markNotificationsRead error: $e',
+        status: 'error',
+      );
+      return false;
     }
   }
 

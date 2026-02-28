@@ -15,9 +15,9 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
   @override
   void initState() {
     super.initState();
-    Future.microtask(() {
-      final provider = Provider.of<MyAssetsProvider>(context, listen: false);
-      provider.loadAssets(force: true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      context.read<MyAssetsProvider>().loadAssets(force: true);
     });
   }
 
@@ -87,69 +87,72 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
             );
           }
 
-          return GridView.builder(
-            padding: const EdgeInsets.all(12),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              crossAxisSpacing: 12,
-              mainAxisSpacing: 12,
-              childAspectRatio: 0.8,
-            ),
-            itemCount: assetsProvider.assets.length,
-            itemBuilder: (context, index) {
-              final item = assetsProvider.assets[index];
-              return GestureDetector(
-                onTap: () =>
-                    context.go('/marketplace/asset/${item.id}', extra: item),
-                child: Card(
-                  elevation: 2,
-                  clipBehavior: Clip.antiAlias,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Container(
-                          color: Colors.grey[200],
-                          child: GoogleDriveImageLoader.buildCachedImage(
-                            imageUrl: item.imageUrl,
-                            fit: BoxFit.cover,
-                            width: double.infinity,
+          return RefreshIndicator(
+            onRefresh: () => assetsProvider.refreshAssets(),
+            child: GridView.builder(
+              padding: const EdgeInsets.all(12),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 0.8,
+              ),
+              itemCount: assetsProvider.assets.length,
+              itemBuilder: (context, index) {
+                final item = assetsProvider.assets[index];
+                return GestureDetector(
+                  onTap: () =>
+                      context.go('/marketplace/asset/${item.id}', extra: item),
+                  child: Card(
+                    elevation: 2,
+                    clipBehavior: Clip.antiAlias,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Container(
+                            color: Colors.grey[200],
+                            child: GoogleDriveImageLoader.buildCachedImage(
+                              imageUrl: item.imageUrl,
+                              fit: BoxFit.cover,
+                              width: double.infinity,
+                            ),
                           ),
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(10),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              item.title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
+                        Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              '\$${item.price.toStringAsFixed(2)}',
-                              style: TextStyle(
-                                color: Colors.green[700],
-                                fontWeight: FontWeight.bold,
+                              const SizedBox(height: 6),
+                              Text(
+                                '\$${item.price.toStringAsFixed(2)}',
+                                style: TextStyle(
+                                  color: Colors.green[700],
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                      )
-                    ],
+                            ],
+                          ),
+                        )
+                      ],
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           );
         },
       ),

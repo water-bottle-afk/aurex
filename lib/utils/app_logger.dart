@@ -13,9 +13,9 @@ class AppLogger {
       final ts = _shortTimestamp(record.time);
       final levelName = record.level.name.padRight(7);
       final color = _levelColor(record.level);
-      final reset = _ansiReset;
+      const reset = _ansiReset;
 
-      final msg = '${color}[$ts] [$levelName] [${record.loggerName}] ${record.message}$reset';
+      final msg = '$color[$ts] [$levelName] [${record.loggerName}] ${record.message}$reset';
       debugPrint(msg);
     });
   }

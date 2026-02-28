@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/item_offering.dart';
+import '../client_class.dart';
 import 'client_provider.dart';
 import '../utils/app_logger.dart';
 
@@ -8,18 +10,23 @@ class AssetsProvider extends ChangeNotifier {
   final AppLogger _log = AppLogger.get('assets_provider.dart');
   
   final List<ItemOffering> _assets = [];
+  final Set<String> _pendingPurchases = {};
   bool _isLoading = false;
   bool _hasMoreAssets = true;
   String? _lastTimestamp; // Use timestamp-based pagination
   final int _itemsPerPage = 10;
   String? _error;
+  StreamSubscription<ServerEvent>? _eventSub;
 
   List<ItemOffering> get assets => List.unmodifiable(_assets);
   bool get isLoading => _isLoading;
   bool get hasMoreAssets => _hasMoreAssets;
   String? get error => _error;
+  bool isPurchasePending(String assetId) => _pendingPurchases.contains(assetId);
 
-  AssetsProvider({required this.clientProvider});
+  AssetsProvider({required this.clientProvider}) {
+    _eventSub = clientProvider.client.serverEvents.listen(_handleServerEvent);
+  }
 
   /// Request next page of assets from server using timestamp-based pagination
   Future<void> loadNextPage() async {
@@ -106,6 +113,26 @@ class AssetsProvider extends ChangeNotifier {
     await loadNextPage();
   }
 
+  void markPurchasePending(String assetId) {
+    if (assetId.isEmpty) return;
+    _pendingPurchases.add(assetId);
+    notifyListeners();
+  }
+
+  void clearPurchasePending(String assetId) {
+    if (_pendingPurchases.remove(assetId)) {
+      notifyListeners();
+    }
+  }
+
+  void removeAssetById(String assetId) {
+    final before = _assets.length;
+    _assets.removeWhere((asset) => asset.id == assetId);
+    if (_assets.length != before) {
+      notifyListeners();
+    }
+  }
+
   /// Get asset by ID
   ItemOffering? getAssetById(String id) {
     try {
@@ -130,5 +157,33 @@ class AssetsProvider extends ChangeNotifier {
       _log.error('Error downloading asset image: $e');
       rethrow;
     }
+  }
+
+  void _handleServerEvent(ServerEvent event) {
+    if (event.event == 'marketplace_remove') {
+      final assetId = event.payload['asset_id']?.toString();
+      if (assetId != null && assetId.isNotEmpty) {
+        removeAssetById(assetId);
+        clearPurchasePending(assetId);
+      }
+      return;
+    }
+
+    if (event.event == 'notification') {
+      final payload = event.payload;
+      final type = payload['type']?.toString();
+      final assetId = payload['asset_id']?.toString();
+      if (assetId != null &&
+          assetId.isNotEmpty &&
+          (type == 'purchase_failed' || type == 'purchase_confirmed')) {
+        clearPurchasePending(assetId);
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    super.dispose();
   }
 }

@@ -58,29 +58,27 @@ class _SignupScreenState extends State<SignupScreen> {
         password: password,
       );
 
+      if (!mounted) return;
       if (result == "success") {
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           email: email,
           username: username,
         );
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Account created successfully!')),
-          );
-          context.go('/login');
-        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Account created successfully!')),
+        );
+        context.go('/login');
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Signup failed. Please try again.')),
         );
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -101,6 +99,7 @@ class _SignupScreenState extends State<SignupScreen> {
         return;
       }
 
+      if (!mounted) return;
       final googleEmail = googleUser.email;
       final displayName = googleUser.displayName ?? googleEmail.split('@')[0];
 
@@ -113,7 +112,8 @@ class _SignupScreenState extends State<SignupScreen> {
       await clientProvider.initializeConnection();
 
       final username = await clientProvider.client.getUserByEmail(googleEmail);
-      if (username != null && mounted) {
+      if (!mounted) return;
+      if (username != null) {
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: username,
           email: googleEmail,
@@ -122,7 +122,7 @@ class _SignupScreenState extends State<SignupScreen> {
           SnackBar(content: Text('Welcome, $displayName!')),
         );
         context.go('/marketplace');
-      } else if (mounted) {
+      } else {
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: displayName,
           email: googleEmail,
@@ -133,11 +133,10 @@ class _SignupScreenState extends State<SignupScreen> {
         context.go('/marketplace');
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);

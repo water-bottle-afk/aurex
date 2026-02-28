@@ -10,20 +10,25 @@ import 'pages/forgot_password.dart';
 import 'pages/login_screen.dart';
 import 'pages/marketplace_page.dart';
 import 'pages/my_assets_page.dart';
+import 'pages/notifications_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/signup_screen.dart';
 import 'pages/upload_asset.dart';
 import 'pages/welcome_screen.dart';
 import 'providers/user_provider.dart';
 import 'providers/client_provider.dart';
+import 'providers/notifications_provider.dart';
 import 'providers/settings_provider.dart';
 import 'providers/assets_provider.dart';
 import 'providers/my_assets_provider.dart';
+import 'services/notification_service.dart';
 import 'utils/app_logger.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLogger.init();
+  await NotificationService.init();
+  await NotificationService.requestPermissions();
 
   final clientProvider = ClientProvider();
   runApp(MyApp(initialClientProvider: clientProvider));
@@ -78,6 +83,10 @@ final _router = GoRouter(
     GoRoute(
       path: '/marketplace',
       builder: (context, state) => const MarketplacePage(),
+    ),
+    GoRoute(
+      path: '/notifications',
+      builder: (context, state) => const NotificationsPage(),
     ),
     GoRoute(
       path: '/marketplace/asset/:id',
@@ -139,6 +148,12 @@ class _MyAppState extends State<MyApp> {
             userProvider.initialize();
             return userProvider;
           },
+        ),
+        ChangeNotifierProvider(
+          create: (context) => NotificationsProvider(
+            clientProvider: _clientProvider,
+            userProvider: Provider.of<UserProvider>(context, listen: false),
+          ),
         ),
         ChangeNotifierProvider(create: (context) => SettingsProvider()),
         ChangeNotifierProvider(
@@ -250,7 +265,7 @@ class _ServerConnectionScreenState extends State<ServerConnectionScreen> {
       builder: (context) => AlertDialog(
         backgroundColor: Colors.grey[900],
         title: const Text(
-          '✅ Connected',
+          ' Connected',
           style: TextStyle(color: Colors.green),
         ),
         content: Column(

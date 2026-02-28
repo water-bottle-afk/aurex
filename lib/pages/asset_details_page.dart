@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../models/item_offering.dart';
+import '../providers/assets_provider.dart';
 import '../providers/client_provider.dart';
 import '../providers/my_assets_provider.dart';
 import '../providers/user_provider.dart';
@@ -24,6 +25,7 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
     setState(() => _isProcessing = true);
 
     final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+    final assetsProvider = Provider.of<AssetsProvider>(context, listen: false);
     final userProvider = Provider.of<UserProvider>(context, listen: false);
     final username = userProvider.localUser?.username;
 
@@ -48,40 +50,9 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
       }
     }
 
-    final statusNotifier = ValueNotifier<String>('Submitting purchase...');
-    var dialogOpen = false;
-
-    if (mounted) {
-      dialogOpen = true;
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) {
-          return AlertDialog(
-            title: const Text('Blockchain Purchase'),
-            content: ValueListenableBuilder<String>(
-              valueListenable: statusNotifier,
-              builder: (context, value, child) {
-                return Row(
-                  children: [
-                    const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(child: Text(value)),
-                  ],
-                );
-              },
-            ),
-          );
-        },
-      );
-    }
-
     var success = false;
     var finalMessage = '';
+    var snackColor = Colors.blueGrey.shade700;
 
     try {
       final buyResult = await clientProvider.client.buyAsset(
@@ -90,62 +61,22 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
         amount: widget.asset.price,
       );
 
-      if (buyResult.status == 'PENDING' && buyResult.txId != null) {
-        statusNotifier.value = 'Mining started. Waiting for confirmation...';
-        final txId = buyResult.txId!;
-        final deadline = DateTime.now().add(const Duration(minutes: 10));
-
-        while (DateTime.now().isBefore(deadline)) {
-          await Future.delayed(const Duration(seconds: 3));
-          final status = await clientProvider.client.getTransactionStatus(txId);
-
-          if (status.status == 'CONFIRMED') {
-            success = true;
-            finalMessage = 'Purchase confirmed!';
-            break;
-          }
-          if (status.status == 'QUEUED') {
-            statusNotifier.value = 'Queued for mining...';
-          }
-          if (status.status == 'SUBMITTED') {
-            statusNotifier.value = 'Mining in progress...';
-          }
-          if (status.status == 'FAILED') {
-            finalMessage = status.message.isNotEmpty
-                ? status.message
-                : 'Transaction failed.';
-            break;
-          }
-          if (status.status == 'TIMEOUT') {
-            finalMessage = status.message.isNotEmpty
-                ? status.message
-                : 'PoW Timeout after 10 mins';
-            break;
-          }
-          if (status.status == 'ERROR') {
-            finalMessage = status.message;
-            break;
-          }
-        }
-
-        if (!success && finalMessage.isEmpty) {
-          finalMessage = 'PoW Timeout after 10 mins';
-        }
-      } else if (buyResult.status == 'PENDING' && buyResult.txId == null) {
-        finalMessage = 'Purchase queued, but no transaction ID was returned.';
+      if (buyResult.status == 'PENDING') {
+        assetsProvider.markPurchasePending(widget.asset.id);
+        finalMessage =
+            'Purchase submitted. You can keep using the app while it processes.';
       } else if (buyResult.status == 'ERROR') {
         finalMessage = buyResult.message ?? 'Purchase failed.';
+        snackColor = Colors.red.shade600;
       } else {
         success = true;
         finalMessage = 'Purchase confirmed!';
+        snackColor = Colors.green.shade600;
       }
     } catch (e) {
       finalMessage = 'Purchase failed: $e';
+      snackColor = Colors.red.shade600;
     } finally {
-      if (dialogOpen && mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
-      statusNotifier.dispose();
       if (mounted) {
         setState(() => _isProcessing = false);
         if (success) {
@@ -154,7 +85,7 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(finalMessage),
-            backgroundColor: success ? Colors.green[600] : Colors.red[600],
+            backgroundColor: snackColor,
           ),
         );
       }
@@ -186,6 +117,10 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
           final maxWidth = constraints.maxWidth < 700
               ? constraints.maxWidth
               : 700.0;
+          final assetsProvider = Provider.of<AssetsProvider>(context);
+          final isPending =
+              assetsProvider.isPurchasePending(widget.asset.id) ||
+                  _isProcessing;
           return Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
@@ -194,8 +129,9 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
                 child: AssetFocusCard(
                   asset: widget.asset,
                   primaryActionLabel:
-                      _isProcessing ? 'Processing...' : 'Buy Now',
-                  onPrimaryAction: _isProcessing ? null : _startPurchase,
+                      isPending ? 'In Process' : 'Buy Now',
+                  isPrimaryDisabled: isPending,
+                  onPrimaryAction: isPending ? null : _startPurchase,
                 ),
               ),
             ),

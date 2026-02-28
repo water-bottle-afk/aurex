@@ -79,6 +79,8 @@ class PoWNode:
         self.result_queue = multiprocessing.Queue()  # single queue for all miner runs
         self.miner_process = None
         self.mining_lock = threading.Lock()
+        self._spinner_stop = threading.Event()
+        self._spinner_thread = None
 
         self._register_node()
         # Seed peers from config so block broadcast reaches all nodes regardless of startup order
@@ -195,6 +197,9 @@ class PoWNode:
             elif msg_type == 'new_block':
                 self._handle_new_block(message)
                 client_socket.close()
+            elif msg_type == 'STOP_MINING':
+                self._stop_mining("stop_mining")
+                client_socket.close()
             elif msg_type == 'NEW_TRANSACTION':
                 self._handle_new_transaction(message, client_socket)
             else:
@@ -280,7 +285,7 @@ class PoWNode:
         logger.info("gossip: block accepted index=%s hash=%s...", block_index, current_hash[:16])
 
         # Stop our miner so we don't keep hashing
-        self.stop_mining_event.set()
+        self._stop_mining("new_block")
 
     def _handle_new_transaction(self, message, client_socket):
         try:
@@ -336,10 +341,22 @@ class PoWNode:
             args=(data_to_hash, self.difficulty, self.stop_mining_event, self.result_queue)
         )
         self.miner_process.start()
+        self._start_spinner()
         logger.info("hashing: mining started difficulty=%s", self.difficulty)
+
+    def _stop_mining(self, reason):
+        """Stop miner process and clear stop event."""
+        self.stop_mining_event.set()
+        self._stop_spinner()
+        if self.miner_process and self.miner_process.is_alive():
+            self.miner_process.join(timeout=2)
+            if self.miner_process.is_alive():
+                self.miner_process.terminate()
+        logger.info("mining stopped reason=%s", reason)
 
     def _on_block_mined(self, block_hash, nonce):
         """We found a block: sign, write to DB, broadcast, clear mempool for that tx."""
+        self._stop_spinner()
         with self.mempool_lock:
             if not self.mempool:
                 return
@@ -435,9 +452,32 @@ class PoWNode:
 
     def stop(self):
         self.is_running = False
-        self.stop_mining_event.set()
-        if self.miner_process and self.miner_process.is_alive():
-            self.miner_process.join(timeout=2)
-            if self.miner_process.is_alive():
-                self.miner_process.terminate()
+        self._stop_mining("shutdown")
         logger.info("node stopping")
+
+    def _spinner_loop(self):
+        symbols = ['\\', '|', '/', '-']
+        idx = 0
+        try:
+            sys.stdout.write("Processing... ")
+            sys.stdout.flush()
+            while not self._spinner_stop.is_set():
+                sys.stdout.write(f"\rProcessing... {symbols[idx % len(symbols)]}")
+                sys.stdout.flush()
+                time.sleep(0.1)
+                idx += 1
+        except Exception:
+            return
+        finally:
+            sys.stdout.write("\rProcessing... done\n")
+            sys.stdout.flush()
+
+    def _start_spinner(self):
+        if self._spinner_thread and self._spinner_thread.is_alive():
+            return
+        self._spinner_stop.clear()
+        self._spinner_thread = threading.Thread(target=self._spinner_loop, daemon=True)
+        self._spinner_thread.start()
+
+    def _stop_spinner(self):
+        self._spinner_stop.set()

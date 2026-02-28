@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../providers/client_provider.dart';
 import '../providers/assets_provider.dart';
+import '../providers/notifications_provider.dart';
 import '../providers/user_provider.dart';
 import '../services/google_drive_image_loader.dart';
 import '../utils/app_logger.dart';
@@ -28,15 +29,15 @@ class _MarketplacePageState extends State<MarketplacePage> {
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
 
-    // Load initial assets on page load
-    Future.microtask(() {
-      final assetsProvider = Provider.of<AssetsProvider>(context, listen: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final assetsProvider = context.read<AssetsProvider>();
       if (assetsProvider.assets.isEmpty) {
         assetsProvider.loadNextPage();
       }
+      _loadWalletBalance();
+      context.read<NotificationsProvider>().refresh();
     });
-
-    Future.microtask(_loadWalletBalance);
   }
 
   @override
@@ -89,7 +90,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
     });
 
     try {
-      final userProvider = Provider.of<UserProvider>(context, listen: false);
+      final userProvider = context.read<UserProvider>();
       final username = userProvider.localUser?.username;
       if (username == null || username.isEmpty) {
         setState(() {
@@ -99,7 +100,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
         return;
       }
 
-      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+      final clientProvider = context.read<ClientProvider>();
       if (!clientProvider.isConnected) {
         await clientProvider.initializeConnection();
       }
@@ -181,6 +182,44 @@ class _MarketplacePageState extends State<MarketplacePage> {
         backgroundColor: Colors.blue[600],
         foregroundColor: Colors.white,
         actions: [
+          Consumer<NotificationsProvider>(
+            builder: (context, notifications, child) {
+              final count = notifications.unreadCount;
+              return Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  IconButton(
+                    tooltip: 'Notifications',
+                    onPressed: () => context.go('/notifications'),
+                    icon: const Icon(Icons.notifications),
+                  ),
+                  if (count > 0)
+                    Positioned(
+                      right: 6,
+                      top: 6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.redAccent,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          count > 99 ? '99+' : count.toString(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Refresh balance',
             onPressed: _loadWalletBalance,
@@ -344,122 +383,129 @@ class _MarketplacePageState extends State<MarketplacePage> {
             );
           }
 
-          return GridView.builder(
-            controller: _scrollController,
-            padding: const EdgeInsets.all(10.0),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              crossAxisSpacing: 10.0,
-              mainAxisSpacing: 10.0,
-              childAspectRatio: 0.8,
-            ),
-            itemCount: assetsProvider.assets.length +
-                (assetsProvider.isLoading ? 1 : 0),
-            itemBuilder: (context, index) {
-              // Loading indicator at the end
-              if (index >= assetsProvider.assets.length) {
-                return const Center(
-                  child: CircularProgressIndicator(),
-                );
-              }
+          return RefreshIndicator(
+            onRefresh: () async {
+              await assetsProvider.refreshAssets();
+              await _loadWalletBalance(force: true);
+            },
+            child: GridView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.all(10.0),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 10.0,
+                mainAxisSpacing: 10.0,
+                childAspectRatio: 0.8,
+              ),
+              itemCount: assetsProvider.assets.length +
+                  (assetsProvider.isLoading ? 1 : 0),
+              itemBuilder: (context, index) {
+                // Loading indicator at the end
+                if (index >= assetsProvider.assets.length) {
+                  return const Center(
+                    child: CircularProgressIndicator(),
+                  );
+                }
 
-              final item = assetsProvider.assets[index];
-              return GestureDetector(
-                onTap: () =>
-                    context.go('/marketplace/asset/${item.id}', extra: item),
-                child: Card(
-                  elevation: 2,
-                  clipBehavior: Clip.antiAlias,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Container(
-                          color: Colors.grey[200],
-                          child: GoogleDriveImageLoader.buildCachedImage(
-                            imageUrl: item.imageUrl,
-                            fit: BoxFit.cover,
-                            width: double.infinity,
+                final item = assetsProvider.assets[index];
+                return GestureDetector(
+                  onTap: () =>
+                      context.go('/marketplace/asset/${item.id}', extra: item),
+                  child: Card(
+                    elevation: 2,
+                    clipBehavior: Clip.antiAlias,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Container(
+                            color: Colors.grey[200],
+                            child: GoogleDriveImageLoader.buildCachedImage(
+                              imageUrl: item.imageUrl,
+                              fit: BoxFit.cover,
+                              width: double.infinity,
+                            ),
                           ),
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(12.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              item.title,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
+                        Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.title,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 6),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  children: [
-                                    Image.asset(
-                                      'assets/images/bitcoin.png',
-                                      width: 14,
-                                      height: 14,
+                              const SizedBox(height: 6),
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Image.asset(
+                                        'assets/images/bitcoin.png',
+                                        width: 14,
+                                        height: 14,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        '\$${item.price.toStringAsFixed(2)}',
+                                        style: TextStyle(
+                                          color: Colors.green[600],
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 2,
                                     ),
-                                    const SizedBox(width: 6),
-                                    Text(
-                                      '\$${item.price.toStringAsFixed(2)}',
+                                    decoration: BoxDecoration(
+                                      color: Colors.blue[50],
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      'View',
                                       style: TextStyle(
-                                        color: Colors.green[600],
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 14,
+                                        fontSize: 10,
+                                        color: Colors.blue[600],
+                                        fontWeight: FontWeight.w600,
                                       ),
                                     ),
-                                  ],
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                    vertical: 2,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.blue[50],
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(
-                                    'View',
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      color: Colors.blue[600],
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'by ${item.author}',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: Colors.grey[600],
+                                ],
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
+                              const SizedBox(height: 4),
+                              Text(
+                                'by ${item.author}',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.grey[600],
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           );
         },
       ),

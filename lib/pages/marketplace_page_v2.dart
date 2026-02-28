@@ -110,7 +110,7 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('🛍️ Marketplace'),
+        title: const Text(' Marketplace'),
         elevation: 0,
       ),
       body: isLoading
@@ -219,7 +219,7 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
                             shape: BoxShape.circle,
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withOpacity(0.3),
+                                color: Colors.black.withAlpha((0.3 * 255).round()),
                                 blurRadius: 8,
                               ),
                             ],
@@ -264,7 +264,7 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
                             shape: BoxShape.circle,
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withOpacity(0.3),
+                                color: Colors.black.withAlpha((0.3 * 255).round()),
                                 blurRadius: 8,
                               ),
                             ],

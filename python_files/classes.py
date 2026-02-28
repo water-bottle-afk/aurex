@@ -366,7 +366,8 @@ class PROTO:
     def send_one_message(self, data: bytes, encryption=False):
         """Send message with 2-byte length prefix (TLS handles encryption)"""
         message = data
-        self.sock.send(struct.pack('!H', len(message)) + message)
+        with self.lock:
+            self.sock.send(struct.pack('!H', len(message)) + message)
         self.log("2", data)
 
     def recv_one_message(self, encryption=False):

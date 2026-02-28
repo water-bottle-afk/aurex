@@ -28,12 +28,13 @@ def upload_file_to_drive(
     service_account_file: str | None = None,
     username: str | None = None,
     asset_name: str | None = None,
+    uploads_folder_name: str | None = "uploads",
 ) -> str:
     """
     Upload a local file to Google Drive.
 
     If service_account_file + parent_folder_id are provided, uses the Drive API
-    and creates the path: parent/{username}/{asset_name}.
+    and creates the path: parent/uploads/{username}/{asset_name}.
     Otherwise falls back to the legacy Apps Script endpoint.
 
     Args:
@@ -61,6 +62,7 @@ def upload_file_to_drive(
             service_account_file=service_account_file,
             username=username,
             asset_name=asset_name,
+            uploads_folder_name=uploads_folder_name,
         )
     if apps_script_url:
         return _upload_via_apps_script(
@@ -80,8 +82,9 @@ def _upload_via_service_account(
     service_account_file: str,
     username: str | None,
     asset_name: str | None,
+    uploads_folder_name: str | None,
 ) -> str:
-    """Upload using a service account and create username/asset folders."""
+    """Upload using a service account and create uploads/username/asset folders."""
     if not os.path.exists(file_path):
         raise RuntimeError(f"File not found: {file_path}")
     if not parent_folder_id:
@@ -113,9 +116,19 @@ def _upload_via_service_account(
     )
     service = build("drive", "v3", credentials=creds)
 
+    uploads_folder_id = parent_folder_id
+    if uploads_folder_name:
+        parent_name = _get_drive_folder_name(service, parent_folder_id)
+        if parent_name != uploads_folder_name:
+            uploads_folder_id = _ensure_drive_folder(
+                service,
+                parent_folder_id,
+                uploads_folder_name,
+            )
+
     username_folder_id = _ensure_drive_folder(
         service,
-        parent_folder_id,
+        uploads_folder_id,
         safe_username,
     )
     asset_folder_id = _ensure_drive_folder(
@@ -231,6 +244,15 @@ def _safe_drive_name(name: str) -> str:
 def _escape_drive_query(value: str) -> str:
     """Escape single quotes in Drive query strings."""
     return value.replace("'", "\\'")
+
+
+def _get_drive_folder_name(service, folder_id: str) -> str:
+    """Return the Drive folder name for a given id (empty string on failure)."""
+    try:
+        meta = service.files().get(fileId=folder_id, fields="name").execute()
+        return str(meta.get("name", "")).strip()
+    except Exception:
+        return ""
 
 
 def _ensure_drive_folder(service, parent_id: str, folder_name: str) -> str:

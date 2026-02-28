@@ -39,6 +39,7 @@ GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzwVFRyAb1d0dX
 GOOGLE_DRIVE_PARENT_FOLDER_ID = '17oD5gbtCfoMbnI15gV-TDwXREWUGHtqp'
 GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE = 'credentials.json'  # Path to service account JSON
 GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL = 'aurex.main.service@gmail.com'
+GOOGLE_DRIVE_UPLOADS_FOLDER_NAME = 'uploads'
 
 # Upload Settings
 UPLOAD_TMP_DIR = '../DB/upload_tmp'
@@ -47,7 +48,7 @@ UPLOAD_CHUNK_SIZE = 32768  # 32 KB raw bytes per chunk (safe for 2-byte length +
 # Logging
 LOGGING_LEVEL = 10  # 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL
 
-print("✅ Config loaded: Server running on {server_ip}:{server_port}".format(
+print(" Config loaded: Server running on {server_ip}:{server_port}".format(
     server_ip=SERVER_IP,
     server_port=SERVER_PORT
 ))

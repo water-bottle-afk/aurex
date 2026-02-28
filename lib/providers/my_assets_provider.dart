@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/item_offering.dart';
+import '../client_class.dart';
 import 'client_provider.dart';
 import 'user_provider.dart';
 
@@ -11,6 +13,7 @@ class MyAssetsProvider extends ChangeNotifier {
   bool _isLoading = false;
   String? _error;
   String? _lastUsername;
+  StreamSubscription<ServerEvent>? _eventSub;
 
   List<ItemOffering> get assets => List.unmodifiable(_assets);
   bool get isLoading => _isLoading;
@@ -19,7 +22,9 @@ class MyAssetsProvider extends ChangeNotifier {
   MyAssetsProvider({
     required this.clientProvider,
     required this.userProvider,
-  });
+  }) {
+    _eventSub = clientProvider.client.serverEvents.listen(_handleServerEvent);
+  }
 
   Future<void> loadAssets({bool force = false}) async {
     final username = userProvider.username;
@@ -79,5 +84,22 @@ class MyAssetsProvider extends ChangeNotifier {
     _assets.clear();
     _lastUsername = null;
     await loadAssets(force: true);
+  }
+
+  void _handleServerEvent(ServerEvent event) {
+    if (event.event != 'notification') return;
+    final payload = event.payload;
+    final type = payload['type']?.toString();
+    final username = payload['username']?.toString();
+    final current = userProvider.localUser?.username;
+    if (type == 'purchase_confirmed' && username != null && username == current) {
+      refreshAssets();
+    }
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    super.dispose();
   }
 }

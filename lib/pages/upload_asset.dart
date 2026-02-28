@@ -98,7 +98,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
       if (result == "success") {
         setState(() {
           _isUploading = false;
-          _statusMessage = '✅ Asset successfully registered on marketplace!';
+          _statusMessage = ' Asset successfully registered on marketplace!';
           _uploadedAssetId = _assetName; // Use asset name as ID display
         });
 
