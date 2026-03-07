@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/google_drive_image_loader.dart';
 import 'item_details_elegant.dart';
 import 'upload_asset.dart';
 import '../utils/app_logger.dart';
+import '../providers/client_provider.dart';
 
 /// Model for marketplace item
 class MarketplaceItem {
@@ -55,6 +57,10 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
   bool isLoading = true;
   bool hasError = false;
   String errorMessage = '';
+  String? _lastTimestamp;
+  bool _isLoadingMore = false;
+  bool _hasMore = true;
+  final int _pageSize = 10;
 
   @override
   void initState() {
@@ -71,38 +77,76 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
   }
 
   /// Load items from server
-  void _loadMarketplaceItems() async {
-    try {
+  Future<void> _loadMarketplaceItems({bool refresh = false}) async {
+    if (_isLoadingMore) return;
+    if (!_hasMore && !refresh) return;
+
+    if (refresh) {
       setState(() {
         isLoading = true;
         hasError = false;
+        errorMessage = '';
+        items = [];
+        _lastTimestamp = null;
+        _hasMore = true;
       });
+    } else {
+      setState(() {
+        _isLoadingMore = true;
+        hasError = false;
+      });
+    }
 
-      // TODO: Replace with actual server call
-      // final response = await clientProvider.client.getMarketplaceItems();
-      
-      // For now, mock data
-      await Future.delayed(const Duration(seconds: 1));
-      
-      // In real implementation, parse response and update items
+    try {
+      final clientProvider = context.read<ClientProvider>();
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          throw Exception('Server connection failed');
+        }
+      }
+
+      final response = await clientProvider.client.getMarketplaceItemsPaginated(
+        limit: _pageSize,
+        lastTimestamp: _lastTimestamp,
+      );
+
+      final newItems = response
+          .map((item) => MarketplaceItem.fromJson(
+                Map<String, dynamic>.from(item as Map),
+              ))
+          .toList();
+
+      if (newItems.isEmpty) {
+        _hasMore = false;
+      } else {
+        items.addAll(newItems);
+        final last = newItems.last;
+        _lastTimestamp = last.createdAt.isNotEmpty
+            ? last.createdAt
+            : (last.timestamp.isNotEmpty ? last.timestamp : _lastTimestamp);
+      }
+
       setState(() {
         isLoading = false;
+        _isLoadingMore = false;
       });
     } catch (e) {
       setState(() {
         isLoading = false;
         hasError = true;
         errorMessage = e.toString();
+        _isLoadingMore = false;
       });
     }
   }
 
   /// Called when scrolling near bottom - load more items
   void _onScroll() {
-    if (_scrollController.position.pixels ==
-        _scrollController.position.maxScrollExtent) {
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
       _log.info('Reached bottom - loading older items...');
-      // TODO: Load more items from server
+      _loadMarketplaceItems();
     }
   }
 
@@ -144,8 +188,7 @@ class _MarketplacePageV2State extends State<MarketplacePageV2> {
                     )
                   : RefreshIndicator(
                       onRefresh: () async {
-                        _loadMarketplaceItems();
-                        await Future.delayed(const Duration(seconds: 1));
+                        await _loadMarketplaceItems(refresh: true);
                       },
                       child: GridView.builder(
                         controller: _scrollController,

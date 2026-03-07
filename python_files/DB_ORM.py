@@ -682,6 +682,42 @@ class MarketplaceDB:
             print(f"Error updating listing status: {e}")
             return False
 
+    def update_item_listing(self, asset_id, is_listed, new_cost=None):
+        """Update listing status and optionally price. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            if new_cost is None:
+                if is_listed:
+                    cursor.execute(
+                        'UPDATE marketplace_items SET is_listed = ?, timestamp = ?, created_at = ? WHERE id = ?',
+                        (1, now, now, asset_id)
+                    )
+                else:
+                    cursor.execute(
+                        'UPDATE marketplace_items SET is_listed = ? WHERE id = ?',
+                        (0, asset_id)
+                    )
+            else:
+                if is_listed:
+                    cursor.execute(
+                        'UPDATE marketplace_items SET is_listed = ?, cost = ?, timestamp = ?, created_at = ? WHERE id = ?',
+                        (1, float(new_cost), now, now, asset_id)
+                    )
+                else:
+                    cursor.execute(
+                        'UPDATE marketplace_items SET is_listed = ?, cost = ? WHERE id = ?',
+                        (0, float(new_cost), asset_id)
+                    )
+            conn.commit()
+            updated = cursor.rowcount > 0
+            conn.close()
+            return updated
+        except Exception as e:
+            print(f"Error updating item listing: {e}")
+            return False
+
     def update_asset_owner(self, asset_id, new_owner):
         """Update marketplace item owner by asset id. Returns True on success."""
         try:

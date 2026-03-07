@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import '../models/item_offering.dart';
+import '../providers/client_provider.dart';
 import '../providers/my_assets_provider.dart';
+import '../providers/user_provider.dart';
 import '../services/google_drive_image_loader.dart';
 
 class MyAssetsPage extends StatefulWidget {
@@ -12,6 +15,8 @@ class MyAssetsPage extends StatefulWidget {
 }
 
 class _MyAssetsPageState extends State<MyAssetsPage> {
+  final Set<String> _actionInProgress = {};
+
   @override
   void initState() {
     super.initState();
@@ -19,6 +24,155 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
       if (!mounted) return;
       context.read<MyAssetsProvider>().loadAssets(force: true);
     });
+  }
+
+  Future<bool> _ensureConnection() async {
+    final clientProvider = context.read<ClientProvider>();
+    if (clientProvider.isConnected) return true;
+    final connected = await clientProvider.initializeConnection();
+    if (!connected && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Server connection failed')),
+      );
+    }
+    return connected;
+  }
+
+  Future<void> _listAssetForSale(ItemOffering item, double price) async {
+    if (_actionInProgress.contains(item.id)) return;
+    setState(() => _actionInProgress.add(item.id));
+
+    try {
+      if (!await _ensureConnection()) return;
+
+      final username = context.read<UserProvider>().username;
+      if (username.isEmpty || username == 'Guest') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please sign in first')),
+        );
+        return;
+      }
+
+      final clientProvider = context.read<ClientProvider>();
+      final result = await clientProvider.client.listAssetForSale(
+        assetId: item.id,
+        username: username,
+        price: price,
+      );
+
+      if (mounted) {
+        final isSuccess = result == 'success';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(isSuccess ? 'Asset listed for sale' : 'Failed to list asset'),
+            backgroundColor: isSuccess ? Colors.green[700] : Colors.red[700],
+          ),
+        );
+      }
+
+      await context.read<MyAssetsProvider>().refreshAssets();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error listing asset: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _actionInProgress.remove(item.id));
+      }
+    }
+  }
+
+  Future<void> _unlistAsset(ItemOffering item) async {
+    if (_actionInProgress.contains(item.id)) return;
+    setState(() => _actionInProgress.add(item.id));
+
+    try {
+      if (!await _ensureConnection()) return;
+
+      final username = context.read<UserProvider>().username;
+      if (username.isEmpty || username == 'Guest') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please sign in first')),
+        );
+        return;
+      }
+
+      final clientProvider = context.read<ClientProvider>();
+      final result = await clientProvider.client.unlistAsset(
+        assetId: item.id,
+        username: username,
+      );
+
+      if (mounted) {
+        final isSuccess = result == 'success';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(isSuccess ? 'Asset unlisted' : 'Failed to unlist asset'),
+            backgroundColor: isSuccess ? Colors.green[700] : Colors.red[700],
+          ),
+        );
+      }
+
+      await context.read<MyAssetsProvider>().refreshAssets();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error unlisting asset: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _actionInProgress.remove(item.id));
+      }
+    }
+  }
+
+  Future<void> _promptSell(ItemOffering item) async {
+    final controller =
+        TextEditingController(text: item.price.toStringAsFixed(2));
+    final result = await showDialog<double>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Set Sale Price'),
+          content: TextField(
+            controller: controller,
+            keyboardType:
+                const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              labelText: 'Price',
+              prefixText: '\$',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final text = controller.text.trim();
+                final price = double.tryParse(text);
+                if (price == null || price <= 0) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Enter a valid price')),
+                  );
+                  return;
+                }
+                Navigator.pop(context, price);
+              },
+              child: const Text('List'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result != null) {
+      await _listAssetForSale(item, result);
+    }
   }
 
   @override
@@ -143,6 +297,48 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
                                   color: Colors.green[700],
                                   fontWeight: FontWeight.bold,
                                 ),
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    item.isListed ? 'Listed' : 'Not listed',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: item.isListed
+                                          ? Colors.green[700]
+                                          : Colors.grey[600],
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  _actionInProgress.contains(item.id)
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        )
+                                      : TextButton(
+                                          onPressed: item.isListed
+                                              ? () => _unlistAsset(item)
+                                              : () => _promptSell(item),
+                                          style: TextButton.styleFrom(
+                                            padding: EdgeInsets.zero,
+                                            minimumSize: const Size(40, 24),
+                                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                          ),
+                                          child: Text(
+                                            item.isListed ? 'Unlist' : 'Sell',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              color: item.isListed
+                                                  ? Colors.red[600]
+                                                  : Colors.blue[700],
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                ],
                               ),
                             ],
                           ),

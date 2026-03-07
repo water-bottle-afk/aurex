@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io';
 import '../services/google_drive_service.dart';
+import '../widgets/app_label.dart';
 
 /// Upload/Sell Page - Direct upload to Google Drive from phone
 class UploadItemPage extends StatefulWidget {
@@ -198,7 +199,10 @@ class _UploadItemPageState extends State<UploadItemPage> {
               ],
 
               // File Selection
-              Text('Upload Image', style: Theme.of(context).textTheme.titleLarge),
+              AppLabel(
+                'Upload Image',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
               const SizedBox(height: 12),
               InkWell(
                 onTap: _isUploading || !_googleDriveService.isSignedIn() ? null : _selectFile,
@@ -234,7 +238,7 @@ class _UploadItemPageState extends State<UploadItemPage> {
               const SizedBox(height: 24),
 
               // Asset Name
-              Text('Asset Name', style: Theme.of(context).textTheme.titleMedium),
+              const AppLabel('Asset Name'),
               const SizedBox(height: 8),
               TextFormField(
                 controller: _nameController,
@@ -248,7 +252,7 @@ class _UploadItemPageState extends State<UploadItemPage> {
               const SizedBox(height: 16),
 
               // Price
-              Text('Price (USD)', style: Theme.of(context).textTheme.titleMedium),
+              const AppLabel('Price (USD)'),
               const SizedBox(height: 8),
               TextFormField(
                 controller: _priceController,

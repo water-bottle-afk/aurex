@@ -1,6 +1,5 @@
 /// Aurex Client Configuration
 /// Update these settings to match your server configuration
-
 library;
 
 class ClientConfig {
@@ -9,7 +8,7 @@ class ClientConfig {
   static const int defaultServerPort = 23456;
   
   // Broadcast Discovery
-  static const int broadcastPort = 12345;
+  static const int broadcastPort = 23456;
   static const Duration broadcastTimeout = Duration(seconds: 5);
   
   // Connection Timeouts

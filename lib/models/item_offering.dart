@@ -5,6 +5,7 @@ class ItemOffering {
   final String imageUrl;
   final String author;
   final double price;
+  final bool isListed;
   final String? token; // Blockchain asset token
 
   ItemOffering({
@@ -14,6 +15,7 @@ class ItemOffering {
     required this.imageUrl,
     required this.author,
     required this.price,
+    this.isListed = true,
     this.token,
   });
 }
