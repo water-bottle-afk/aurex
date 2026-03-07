@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/item_offering.dart';
-import '../client_class.dart';
 import 'client_provider.dart';
 import 'user_provider.dart';
+import '../models/server_event.dart';
 
 class MyAssetsProvider extends ChangeNotifier {
   final ClientProvider clientProvider;
@@ -67,6 +67,7 @@ class MyAssetsProvider extends ChangeNotifier {
             imageUrl: item['url'] ?? '',
             author: item['username'] ?? 'Unknown',
             price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
+            isListed: (item['is_listed']?.toString() ?? '1') == '1',
             token: item['id']?.toString(),
           );
         }).toList());
@@ -92,8 +93,13 @@ class MyAssetsProvider extends ChangeNotifier {
     final type = payload['type']?.toString();
     final username = payload['username']?.toString();
     final current = userProvider.localUser?.username;
-    if (type == 'purchase_confirmed' && username != null && username == current) {
-      refreshAssets();
+    if (type == 'purchase_confirmed' ||
+        type == 'asset_received' ||
+        type == 'asset_sent') {
+      if (username != null && username == current) {
+        refreshAssets();
+      }
+      return;
     }
   }
 

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
-import '../client_class.dart';
+import '../models/server_event.dart';
 import '../models/notification_item.dart';
 import '../services/notification_service.dart';
 import '../utils/app_logger.dart';

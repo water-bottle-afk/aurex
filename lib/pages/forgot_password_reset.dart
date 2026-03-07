@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../client_class.dart';
+import '../providers/client_provider.dart';
 
 class ForgotPasswordFlow extends StatefulWidget {
   const ForgotPasswordFlow({super.key});
@@ -45,8 +45,14 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
     setState(() => _isLoading = true);
 
     try {
-      final client = context.read<Client>();
-      final result = await client.requestPasswordReset(_emailController.text);
+      final clientProvider = context.read<ClientProvider>();
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          throw Exception('Server connection failed');
+        }
+      }
+      final result = await clientProvider.client.requestPasswordReset(_emailController.text);
 
       if (mounted) {
         setState(() => _isLoading = false);
@@ -75,8 +81,14 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
     setState(() => _isLoading = true);
 
     try {
-      final client = context.read<Client>();
-      final result = await client.verifyPasswordResetCode(
+      final clientProvider = context.read<ClientProvider>();
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          throw Exception('Server connection failed');
+        }
+      }
+      final result = await clientProvider.client.verifyPasswordResetCode(
         _emailController.text,
         _codeController.text,
       );
@@ -122,24 +134,41 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
     setState(() => _isLoading = true);
 
     try {
-      // TODO: Implement UPDATE_PASSWORD handler in server
-      // For now, show success
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Success!'),
-          content: const Text('Your password has been reset. Please log in with your new password.'),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.pop(context); // Go back to login
-              },
-              child: const Text('OK'),
-            ),
-          ],
-        ),
+      final clientProvider = context.read<ClientProvider>();
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          throw Exception('Server connection failed');
+        }
+      }
+      final result = await clientProvider.client.updatePassword(
+        _emailController.text.trim(),
+        _passwordController.text,
       );
+
+      if (!mounted) return;
+      if (result == "success") {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Success!'),
+            content: const Text('Your password has been reset. Please log in with your new password.'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.pop(context); // Go back to login
+                },
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Password reset failed. Please try again.')),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

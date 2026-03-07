@@ -100,6 +100,14 @@ Supported Commands:
   23. MARK_NOTIFICATIONS_READ - Mark all notifications as read
       Send: MARK_NOTIFICATIONS_READ|username
       Recv: OK|read or ERR|error_message
+
+  24. LIST_ITEM - List an owned asset for sale
+      Send: LIST_ITEM|asset_id|username|price
+      Recv: OK|LISTED or ERR|error_message
+
+  25. UNLIST_ITEM - Remove an asset from the marketplace
+      Send: UNLIST_ITEM|asset_id|username
+      Recv: OK|UNLISTED or ERR|error_message
 """
 
 import base64
@@ -167,7 +175,7 @@ class ClientSession:
         self.Print = self.logger.Print
         
         self.username = None
-        self.server.unregister_session(self, username=username)
+        self.server.unregister_session(self)
         self.is_authenticated = False
         self.is_connected = True
         self.db = MarketplaceDB()  # ORM: DB/marketplace.db (users + marketplace_items)
@@ -203,6 +211,8 @@ class ClientSession:
             "GET_WALLET": self.handle_get_wallet,
             "GET_NOTIFICATIONS": self.handle_get_notifications,
             "MARK_NOTIFICATIONS_READ": self.handle_mark_notifications_read,
+            "LIST_ITEM": self.handle_list_item,
+            "UNLIST_ITEM": self.handle_unlist_item,
         }
     
     def process_message(self, message):
@@ -802,6 +812,7 @@ class ClientSession:
                     'buyer': username,
                     'seller': seller,
                     'amount': price,
+                    'tx_type': 'purchase',
                 }
             self.server.tx_queue.put(purchase)
 
@@ -820,6 +831,8 @@ class ClientSession:
         SEND - Send purchased asset to another user
         Format: SEND|asset_id|sender_username|receiver_username
         """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
         if len(params) < 3:
             self.Print(f"[RECV] SEND - Invalid format", 40)
             return "ERR01|Invalid format: SEND|asset_id|sender|receiver"
@@ -828,18 +841,55 @@ class ClientSession:
             asset_id = params[0].strip()
             sender_username = params[1].strip()
             receiver_username = params[2].strip()
+
+            if not asset_id or not sender_username or not receiver_username:
+                return "ERR01|Invalid parameters"
+            if sender_username != self.username:
+                return "ERR02|Unauthorized"
+            if sender_username == receiver_username:
+                return "ERR02|Cannot send to yourself"
+
+            item = self.db.get_item_by_id(asset_id)
+            if not item:
+                return "ERR02|Asset not found"
+            if item.get('username') != sender_username:
+                return "ERR02|Sender does not own asset"
+            if item.get('is_listed') is not None and int(item.get('is_listed')) == 1:
+                return "ERR02|Asset is listed for sale. Unlist before sending"
+
+            receiver = self.db.get_user(receiver_username)
+            if not receiver:
+                return "ERR02|Receiver not found"
             
             self.Print(f" Processing asset send: {sender_username} → {receiver_username} (asset: {asset_id})", 20)
-            
-            # TODO: Implement asset transfer logic
-            # - Validate sender owns asset
-            # - Validate receiver exists
-            # - Record transfer in blockchain
-            # - Update asset ownership
-            transaction_id = f"SEND_{asset_id}_{sender_username}_{receiver_username}_{int(time.time())}"
-            
-            self.Print(f" Asset sent successfully: {transaction_id}", 20)
-            return f"OK|{transaction_id}"
+
+            tx_id = f"SEND_{asset_id}_{sender_username}_{uuid.uuid4().hex[:8]}"
+            transfer = {
+                'tx_id': tx_id,
+                'tx_type': 'transfer',
+                'from': sender_username,
+                'to': receiver_username,
+                'asset_id': asset_id,
+                'asset_name': item.get('asset_name'),
+                'amount': 0,
+                'timestamp': datetime.datetime.utcnow().isoformat(),
+            }
+
+            with self.server.tx_status_lock:
+                self.server.tx_status[tx_id] = {
+                    'status': 'queued',
+                    'message': 'Queued for PoW transfer',
+                    'created_at': time.time(),
+                    'asset_id': asset_id,
+                    'asset_name': item.get('asset_name'),
+                    'tx_type': 'transfer',
+                    'sender': sender_username,
+                    'receiver': receiver_username,
+                }
+            self.server.tx_queue.put(transfer)
+
+            self.Print(f" Asset transfer queued for PoW: {tx_id}", 20)
+            return f"OK|PENDING|{tx_id}"
             
         except Exception as e:
             self.Print(f" Error processing SEND: {e}", 40)
@@ -995,6 +1045,75 @@ class ClientSession:
         except Exception as e:
             return f"ERR03|Error marking notifications: {str(e)}"
 
+    def handle_list_item(self, params):
+        """
+        LIST_ITEM - List an owned asset for sale
+        Format: LIST_ITEM|asset_id|username|price
+        Returns: OK|LISTED or ERR|error_message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 3:
+            return "ERR01|Invalid format: LIST_ITEM|asset_id|username|price"
+
+        asset_id = params[0].strip()
+        username = params[1].strip()
+        price_str = params[2].strip()
+
+        if not asset_id or not username or '|' in username:
+            return "ERR01|Invalid parameters"
+        if username != self.username:
+            return "ERR02|Unauthorized"
+
+        try:
+            price = float(price_str)
+        except Exception:
+            return "ERR01|Invalid price format"
+        if price <= 0:
+            return "ERR01|Price must be positive"
+
+        item = self.db.get_item_by_id(asset_id)
+        if not item:
+            return "ERR02|Asset not found"
+        if item.get('username') != username:
+            return "ERR02|Unauthorized"
+
+        updated = self.db.update_item_listing(asset_id, True, new_cost=price)
+        if updated:
+            return "OK|LISTED"
+        return "ERR03|Failed to list item"
+
+    def handle_unlist_item(self, params):
+        """
+        UNLIST_ITEM - Remove an asset from marketplace listing
+        Format: UNLIST_ITEM|asset_id|username
+        Returns: OK|UNLISTED or ERR|error_message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 2:
+            return "ERR01|Invalid format: UNLIST_ITEM|asset_id|username"
+
+        asset_id = params[0].strip()
+        username = params[1].strip()
+
+        if not asset_id or not username or '|' in username:
+            return "ERR01|Invalid parameters"
+        if username != self.username:
+            return "ERR02|Unauthorized"
+
+        item = self.db.get_item_by_id(asset_id)
+        if not item:
+            return "ERR02|Asset not found"
+        if item.get('username') != username:
+            return "ERR02|Unauthorized"
+
+        updated = self.db.update_item_listing(asset_id, False)
+        if updated:
+            self.server.broadcast_marketplace_remove(asset_id)
+            return "OK|UNLISTED"
+        return "ERR03|Failed to unlist item"
+
 
 class Server:
     """Main server that handles all client connections"""
@@ -1099,13 +1218,49 @@ class Server:
         return notif
 
     def _emit_tx_notifications(self, tx_id, info):
+        tx_type = info.get('tx_type', 'purchase')
         status = info.get('status')
         asset_id = info.get('asset_id')
         asset_name = info.get('asset_name') or (f"asset {asset_id}" if asset_id else "asset")
-        buyer = info.get('buyer')
-        seller = info.get('seller')
         message = info.get('message') or ''
 
+        if tx_type == 'transfer':
+            sender = info.get('sender')
+            receiver = info.get('receiver')
+            if status == 'confirmed':
+                if receiver:
+                    self.create_and_push_notification(
+                        username=receiver,
+                        title="Asset received",
+                        body=f"You received {asset_name} from {sender or 'another user'}.",
+                        notif_type="asset_received",
+                        asset_id=asset_id,
+                        tx_id=tx_id,
+                    )
+                if sender:
+                    self.create_and_push_notification(
+                        username=sender,
+                        title="Asset sent",
+                        body=f"Your asset {asset_name} was sent to {receiver or 'another user'}.",
+                        notif_type="asset_sent",
+                        asset_id=asset_id,
+                        tx_id=tx_id,
+                    )
+            elif status in ('failed', 'timeout'):
+                if sender:
+                    detail = message if message else f"Your transfer of {asset_name} failed."
+                    self.create_and_push_notification(
+                        username=sender,
+                        title="Transfer failed",
+                        body=detail,
+                        notif_type="asset_transfer_failed",
+                        asset_id=asset_id,
+                        tx_id=tx_id,
+                    )
+            return
+
+        buyer = info.get('buyer')
+        seller = info.get('seller')
         if status == 'confirmed':
             if asset_id:
                 self.db.set_item_listed(asset_id, False)
@@ -1218,11 +1373,31 @@ class Server:
                                     # Apply wallet transfers from confirmed transactions
                                     for tx in msg.get('transactions', []):
                                         data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
+                                        action = data.get('action')
                                         from_user = data.get('from') or tx.get('sender')
                                         to_user = data.get('to')
                                         amount = data.get('amount') if data.get('amount') is not None else data.get('price')
                                         asset_id = data.get('asset_id')
                                         tx_id = data.get('tx_id')
+                                        if action == 'asset_transfer':
+                                            if from_user and to_user and asset_id:
+                                                updated = self.db.update_asset_owner(asset_id, to_user)
+                                                if updated:
+                                                    self.db.set_item_listed(asset_id, False)
+                                                    self.broadcast_marketplace_remove(asset_id)
+                                                    server_logger.info(
+                                                        "asset transfer updated: asset_id=%s owner=%s", asset_id, to_user
+                                                    )
+                                                else:
+                                                    server_logger.warning(
+                                                        "asset transfer update failed: asset_id=%s", asset_id
+                                                    )
+                                                if tx_id:
+                                                    self._set_tx_status(tx_id, "confirmed", "Transfer confirmed")
+                                            else:
+                                                if tx_id:
+                                                    self._set_tx_status(tx_id, "failed", "Invalid transfer payload")
+                                            continue
                                         if from_user and to_user is not None and amount is not None:
                                             try:
                                                 amount = float(amount)
@@ -1302,13 +1477,17 @@ class Server:
 
     def _tx_worker(self):
         while True:
-            purchase = self.tx_queue.get()
-            if not purchase:
+            tx_job = self.tx_queue.get()
+            if not tx_job:
                 self.tx_queue.task_done()
                 continue
-            tx_id = purchase.get('tx_id')
+            tx_id = tx_job.get('tx_id')
+            tx_type = tx_job.get('tx_type', 'purchase')
             try:
-                response = self._submit_purchase_to_gateway(purchase)
+                if tx_type == 'transfer':
+                    response = self._submit_transfer_to_gateway(tx_job)
+                else:
+                    response = self._submit_purchase_to_gateway(tx_job)
                 if response and response.get('status') == 'submitted':
                     self._set_tx_status(tx_id, "submitted", response.get('message', 'Submitted to gateway'))
                 else:
@@ -1330,6 +1509,34 @@ class Server:
                 'asset_name': purchase.get('asset_name'),
                 'price': purchase.get('amount'),
                 'timestamp': purchase.get('timestamp'),
+            }
+        }
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect((GATEWAY_HOST, GATEWAY_PORT))
+        raw = json.dumps(payload).encode()
+        sock.send(struct.pack('>H', len(raw)) + raw)
+        response = self._recv_gateway_json(sock)
+        sock.close()
+        return response
+
+    def _submit_transfer_to_gateway(self, transfer):
+        tx_payload = {
+            'action': 'asset_transfer',
+            'tx_id': transfer.get('tx_id'),
+            'asset_id': transfer.get('asset_id'),
+            'asset_name': transfer.get('asset_name'),
+            'from': transfer.get('from'),
+            'to': transfer.get('to'),
+            'amount': transfer.get('amount', 0),
+            'timestamp': transfer.get('timestamp'),
+        }
+        payload = {
+            'action': 'submit_transaction',
+            'body': {
+                'sender': transfer.get('from'),
+                'data': tx_payload,
+                'signature': f"SIG_{transfer.get('from')}_{transfer.get('tx_id')}",
             }
         }
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

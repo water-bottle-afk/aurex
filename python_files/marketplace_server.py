@@ -6,11 +6,41 @@ Message format: KEYWORD|arg1|arg2|arg3...
 
 import json
 import random
+import smtplib
+import ssl
 from datetime import datetime, timedelta
-from DB_ORM import MarketplaceDB
+from email.message import EmailMessage
+from DB_ORM import MarketplaceDB, EMAIL_SENDER, EMAIL_APP_PASSWORD
 
 # Initialize database
 db = MarketplaceDB()
+
+
+def _send_verification_email(to_email, code):
+    """Send verification code via SMTP if configured. Returns True on success."""
+    sender = (EMAIL_SENDER or "").strip()
+    password = (EMAIL_APP_PASSWORD or "").strip()
+
+    if not sender or not password:
+        return False
+    if sender.startswith("your-") or password.startswith("your-"):
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = "Aurex verification code"
+    msg["From"] = sender
+    msg["To"] = to_email
+    msg.set_content(
+        "Your Aurex verification code is:\n\n"
+        f"{code}\n\n"
+        "This code expires in 5 minutes."
+    )
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(sender, password)
+        server.send_message(msg)
+    return True
 
 
 def handle_login(args):
@@ -188,9 +218,10 @@ def handle_send_verification_code(args):
         # Update user in database
         db.update_user(user.username, user)
         
-        # TODO: Send email in production
-        # For now, return the code (in production, email it)
-        print(f"[EMAIL] Verification code for {email}: {verification_code}")
+        emailed = _send_verification_email(email, verification_code)
+        if not emailed:
+            # Fallback for development/testing
+            print(f"[EMAIL] Verification code for {email}: {verification_code}")
         
         return "OK|Verification code sent"
     except Exception as e:

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/item_offering.dart';
-import '../client_class.dart';
+import '../models/server_event.dart';
 import 'client_provider.dart';
 import '../utils/app_logger.dart';
 
@@ -16,7 +16,7 @@ class AssetsProvider extends ChangeNotifier {
   String? _lastTimestamp; // Use timestamp-based pagination
   final int _itemsPerPage = 10;
   String? _error;
-  StreamSubscription<ServerEvent>? _eventSub;
+  StreamSubscription? _eventSub;
 
   List<ItemOffering> get assets => List.unmodifiable(_assets);
   bool get isLoading => _isLoading;
@@ -25,6 +25,8 @@ class AssetsProvider extends ChangeNotifier {
   bool isPurchasePending(String assetId) => _pendingPurchases.contains(assetId);
 
   AssetsProvider({required this.clientProvider}) {
+    // subscribe to asynchronous server events; the stream is broadcast so
+    // multiple listeners can listen simultaneously.
     _eventSub = clientProvider.client.serverEvents.listen(_handleServerEvent);
   }
 
@@ -71,14 +73,16 @@ class AssetsProvider extends ChangeNotifier {
             imageUrl: item['url'] ?? 'assets/images/leather_jacket.png',
             author: item['username'] ?? 'Unknown',
             price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
+            isListed: (item['is_listed']?.toString() ?? '1') == '1',
             token: item['id']?.toString() ?? '',
           );
 
           _assets.add(asset);
           
-          // Update last timestamp for next page - convert to string if needed
-          if (item['timestamp'] != null) {
-            _lastTimestamp = item['timestamp'].toString();
+          // Update last timestamp for next page - created_at is the server cursor
+          final ts = item['created_at'] ?? item['timestamp'];
+          if (ts != null) {
+            _lastTimestamp = ts.toString();
           }
         }
 
