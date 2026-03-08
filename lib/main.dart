@@ -6,7 +6,7 @@ import 'models/item_offering.dart';
 import 'pages/about_page.dart';
 import 'pages/asset_details_page.dart';
 import 'pages/connection_loading_page.dart';
-import 'pages/forgot_password.dart';
+import 'pages/forgot_password_reset.dart';
 import 'pages/login_screen.dart';
 import 'pages/marketplace_page.dart';
 import 'pages/my_assets_page.dart';
@@ -74,7 +74,7 @@ final _router = GoRouter(
     ),
     GoRoute(
       path: '/forgot-password',
-      builder: (context, state) => const ForgotPasswordPage(),
+      builder: (context, state) => const ForgotPasswordFlow(),
     ),
     GoRoute(
       path: '/about',
