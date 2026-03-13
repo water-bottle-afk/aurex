@@ -135,17 +135,8 @@ class MarketplaceDB:
         cursor.execute("PRAGMA table_info(users)")
         existing_cols = {row[1] for row in cursor.fetchall()}
 
-        # Wallets table (separate from users)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wallets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                balance REAL NOT NULL DEFAULT 100,
-                updated_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (username) REFERENCES users (username)
-            )
-        ''')
+        # Wallets are now stored in users table (wallet_balance, wallet_updated_at)
+        # No separate wallets table needed
         
         # Marketplace items table
         cursor.execute('''
@@ -191,52 +182,8 @@ class MarketplaceDB:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at)')
 
-        # Migrate wallet balances from users -> wallets (idempotent)
-        if "wallet_balance" in existing_cols or "wallet_updated_at" in existing_cols:
-            cursor.execute("SELECT username, wallet_balance, wallet_updated_at, created_at FROM users")
-            for username, balance, updated_at, created_at in cursor.fetchall():
-                if not username:
-                    continue
-                cursor.execute("SELECT 1 FROM wallets WHERE username = ?", (username,))
-                if cursor.fetchone():
-                    continue
-                if balance in (None, ""):
-                    initial_balance = 100.0
-                else:
-                    try:
-                        initial_balance = float(balance)
-                    except Exception:
-                        initial_balance = 100.0
-                ts = updated_at or created_at or datetime.now().isoformat()
-                cursor.execute(
-                    "INSERT INTO wallets (username, balance, updated_at, created_at) VALUES (?, ?, ?, ?)",
-                    (username, float(initial_balance), ts, ts),
-                )
-
-        # Remove wallet columns from users table (SQLite requires table rebuild)
-        if "wallet_balance" in existing_cols or "wallet_updated_at" in existing_cols:
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT UNIQUE NOT NULL,
-                    email TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    salt TEXT NOT NULL,
-                    is_verified INTEGER DEFAULT 0,
-                    verification_code TEXT,
-                    reset_time TEXT,
-                    created_at TEXT NOT NULL
-                )
-            ''')
-            cursor.execute('''
-                INSERT INTO users_new (id, username, email, password_hash, salt, is_verified,
-                                       verification_code, reset_time, created_at)
-                SELECT id, username, email, password_hash, salt, is_verified,
-                       verification_code, reset_time, created_at
-                FROM users
-            ''')
-            cursor.execute("DROP TABLE users")
-            cursor.execute("ALTER TABLE users_new RENAME TO users")
+        # Wallet data is now stored in users table columns: wallet_balance, wallet_updated_at
+        # No migration needed from separate wallets table
         
         conn.commit()
         conn.close()
@@ -249,22 +196,19 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO users (username, email, password_hash, salt, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO users (username, email, password_hash, salt, created_at, wallet_balance, wallet_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
                 user.username,
                 user.email,
                 user.password_hash,
                 user.salt,
                 user.created_at,
+                100.0,  # Default starting balance
+                user.created_at,  # Initial wallet update time
             ))
 
-            # Create wallet with default starting balance (100) in wallets table
-            now = datetime.now().isoformat()
-            cursor.execute(
-                "INSERT OR IGNORE INTO wallets (username, balance, updated_at, created_at) VALUES (?, ?, ?, ?)",
-                (user.username, 100.0, now, now),
-            )
+            # Wallet is now part of users table - no separate wallets table
             
             conn.commit()
             conn.close()
@@ -343,38 +287,38 @@ class MarketplaceDB:
         return False
 
     def get_wallet(self, username):
-        """Get wallet balance for user from wallets table."""
+        """Get wallet balance for user from users table."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute('SELECT balance, updated_at FROM wallets WHERE username = ?', (username,))
+            cursor.execute('SELECT wallet_balance, wallet_updated_at FROM users WHERE username = ?', (username,))
             row = cursor.fetchone()
             conn.close()
-            return {'balance': row[0], 'updated_at': row[1]} if row else None
+            if row:
+                return {'balance': row[0], 'updated_at': row[1] or datetime.now().isoformat()}
+            return None
         except Exception as e:
             print(f"Error getting wallet: {e}")
             return None
 
     def ensure_wallet(self, username, initial_balance=100):
-        """Ensure a wallet row exists for user. Returns True on success."""
+        """Ensure a user exists and has wallet balance set. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+            cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (username,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (username,))
-            if cursor.fetchone():
-                conn.close()
-                return True
-            now = datetime.now().isoformat()
-            cursor.execute(
-                'INSERT INTO wallets (username, balance, updated_at, created_at) VALUES (?, ?, ?, ?)',
-                (username, float(initial_balance), now, now)
-            )
-            conn.commit()
+            # If wallet_balance is NULL, set it to initial_balance
+            if row[0] is None:
+                now = datetime.now().isoformat()
+                cursor.execute(
+                    'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+                    (float(initial_balance), now, username)
+                )
+                conn.commit()
             conn.close()
             return True
         except Exception as e:
@@ -382,12 +326,12 @@ class MarketplaceDB:
             return False
 
     def update_balance(self, username, new_balance):
-        """Set wallet balance in wallets table. Returns True on success."""
+        """Set wallet balance in users table. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                'UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
                 (float(new_balance), datetime.now().isoformat(), username)
             )
             conn.commit()
@@ -398,7 +342,7 @@ class MarketplaceDB:
             return False
 
     def transfer(self, from_user, to_user, amount):
-        """Transfer amount between wallets. Returns (success, message)."""
+        """Transfer amount between user wallets. Returns (success, message)."""
         if amount <= 0:
             return False, "Amount must be positive"
         try:
@@ -406,18 +350,18 @@ class MarketplaceDB:
             conn.isolation_level = None
             cursor = conn.cursor()
             cursor.execute("BEGIN IMMEDIATE")
-            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (from_user,))
+            cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (from_user,))
             row_from = cursor.fetchone()
-            cursor.execute('SELECT balance FROM wallets WHERE username = ?', (to_user,))
+            cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (to_user,))
             row_to = cursor.fetchone()
             if not row_from:
                 cursor.execute("ROLLBACK")
                 conn.close()
-                return False, f"Wallet not found: {from_user}"
+                return False, f"User not found: {from_user}"
             if not row_to:
                 cursor.execute("ROLLBACK")
                 conn.close()
-                return False, f"Wallet not found: {to_user}"
+                return False, f"User not found: {to_user}"
             bal_from = row_from[0]
             bal_to = row_to[0]
             if bal_from < amount:
@@ -426,11 +370,11 @@ class MarketplaceDB:
                 return False, f"Insufficient balance: {from_user} has {bal_from}"
             now = datetime.now().isoformat()
             cursor.execute(
-                'UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
                 (bal_from - amount, now, from_user)
             )
             cursor.execute(
-                'UPDATE wallets SET balance = ?, updated_at = ? WHERE username = ?',
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
                 (bal_to + amount, now, to_user)
             )
             cursor.execute("COMMIT")

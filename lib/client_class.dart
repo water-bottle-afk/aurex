@@ -163,6 +163,9 @@ class Client extends ChangeNotifier {
   bool _isConnected = false;
   bool _isAuthenticated = false;
 
+  // Send synchronization to prevent concurrent socket operations
+  bool _isSending = false;
+
   // Persistent socket stream and receive buffer
   StreamSubscription? _socketSubscription;
   final List<int> _receiveBuffer = [];
@@ -439,6 +442,12 @@ class Client extends ChangeNotifier {
       throw Exception("Not connected to server");
     }
 
+    // Wait for any ongoing send to complete
+    while (_isSending) {
+      await Future.delayed(Duration(milliseconds: 10));
+    }
+
+    _isSending = true;
     try {
       final messageBytes = utf8.encode(message);
       final lengthPrefix = ByteData(2);
@@ -473,6 +482,8 @@ class Client extends ChangeNotifier {
         );
       }
       rethrow;
+    } finally {
+      _isSending = false;
     }
   }
 
@@ -1597,6 +1608,7 @@ class Client extends ChangeNotifier {
     _socket = null;
     _isConnected = false;
     _isAuthenticated = false;
+    _isSending = false;  // Reset send mutex
     notifyListeners();
 
     pushMessageToScreen(
