@@ -646,11 +646,7 @@ class ClientSession:
                 session.temp_path,
                 file_name,
                 session.description,
-                parent_folder_id=GOOGLE_DRIVE_PARENT_FOLDER_ID,
-                service_account_file=GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
-                username=session.username,
-                asset_name=session.asset_name,
-                uploads_folder_name=GOOGLE_DRIVE_UPLOADS_FOLDER_NAME,
+                apps_script_url=GOOGLE_APPS_SCRIPT_URL,
             )
         except Exception as e:
             self._cleanup_upload(upload_id)

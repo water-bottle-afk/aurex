@@ -1,7 +1,7 @@
 import sys
 import os
 import traceback
-sys.path.insert(0, r"C:\dev\aurex\blockchain")
+sys.path.insert(0, r"c:\dev\aurex\blockchain")
 
 try:
     from blockchain_node import BlockchainNode
@@ -10,7 +10,7 @@ try:
         node_name="PoW_Node_3",
         host='127.0.0.1',
         port=13247,
-        difficulty=2
+        difficulty=3
     )
     node.start()
     while node.running:

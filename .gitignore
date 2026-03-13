@@ -47,3 +47,17 @@ app.*.map.json
 #add
 .vscode/
 devtools_options.yaml
+
+# Google Drive credentials
+python_files/credentials.json
+
+# Database files
+DB/*.sqlite3
+DB/*.db
+DB/upload_tmp/
+
+# Blockchain node databases
+blockchain/node_*.sqlite3
+
+# Generated keys
+blockchain/keys/

@@ -1,11 +1,11 @@
 import sys
 import os
 import traceback
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, r"c:\dev\aurex\blockchain")
 
 try:
     from blockchain_node import BlockchainNode
-
+    
     node = BlockchainNode(
         node_name="PoW_Node_4",
         host='127.0.0.1',

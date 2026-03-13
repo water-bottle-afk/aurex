@@ -17,13 +17,14 @@ android {
         keystoreProperties.load(keystorePropertiesFile.inputStream())
     }
     val appId = (project.findProperty("applicationId") as String?)
-        ?: "com.aurex.app"
+        ?: "com.example.aurex"
 
     namespace = appId
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -70,4 +71,5 @@ flutter {
 dependencies {
     // Google Sign-In
     implementation("com.google.android.gms:play-services-auth:21.0.0")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }
