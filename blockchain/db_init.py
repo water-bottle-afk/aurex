@@ -15,12 +15,14 @@ DB_PATH = str(DB_FOLDER / "database.sqlite3")
 
 # Per-node ledger directory (blockchain folder)
 BLOCKCHAIN_DIR = Path(__file__).parent
-BLOCKCHAIN_DIR.mkdir(exist_ok=True)
+BLOCKCHAIN_DB_DIR = BLOCKCHAIN_DIR / "BLOCKCHAIN_DB"
+BLOCKCHAIN_DB_DIR.mkdir(exist_ok=True)
+BLOCKCHAIN_DB_PATH = str(BLOCKCHAIN_DB_DIR / "database.sqlite3")
 
 
 def get_node_db_path(port):
-    """Path to this node's ledger DB (node_{port}.sqlite3)."""
-    return str(BLOCKCHAIN_DIR / f"node_{port}.sqlite3")
+    """Path to the shared ledger DB."""
+    return BLOCKCHAIN_DB_PATH
 
 
 def init_node_database(port):

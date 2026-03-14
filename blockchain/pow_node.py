@@ -20,12 +20,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from key_manager import NodeKeyManager
-from db_init import (
-    get_db_connection,
-    get_node_db_path,
-    init_node_database,
-    get_node_db_connection,
-)
+from classes import Ledger, Block, Transaction
 from config import NODE_PORTS, RPC_HOST, RPC_PORT
 
 logging.basicConfig(
@@ -70,9 +65,12 @@ class PoWNode:
         self.mempool = []
         self.mempool_lock = threading.Lock()
 
-        # Last block on our chain (from our DB)
-        self.last_block_index = -1
-        self.last_block_hash = '0' * 64
+        # Ledger
+        self.ledger = Ledger()
+
+        # Last block on our chain
+        self.last_block_index = self.ledger.get_last_block().index if self.ledger.blocks else -1
+        self.last_block_hash = self.ledger.get_last_hash()
 
         # Mining control: event shared with miner process; when set, miner stops
         self.stop_mining_event = multiprocessing.Event()
@@ -87,59 +85,17 @@ class PoWNode:
         for p in NODE_PORTS:
             if p != self.port:
                 self.known_nodes[f"node_{p}"] = (RPC_HOST, p)
-        init_node_database(port)
-        self._load_last_block()
         logger.info("node started port=%s node_id=%s difficulty=%s", port, self.node_id[:8], difficulty)
 
-    def _load_last_block(self):
-        """Load last block from this node's DB to set last_block_index/hash."""
-        try:
-            conn = get_node_db_connection(self.port)
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT "index", current_hash FROM blocks ORDER BY "index" DESC LIMIT 1'
-            )
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                self.last_block_index = row[0]
-                self.last_block_hash = row[1]
-                logger.info("last block loaded index=%s hash=%s...", self.last_block_index, self.last_block_hash[:16])
-        except Exception as e:
-            logger.warning("could not load last block: %s", e)
-
     def _register_node(self):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT OR REPLACE INTO nodes (node_id, host, port, node_type, status) VALUES (?, ?, ?, ?, ?)',
-                (self.node_id, self.host, self.port, 'full-node', 'active')
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.warning("could not register node: %s", e)
+        pass  # No DB
 
     def discover_nodes(self):
-        """Discover peers from DB; only add nodes whose port is in NODE_PORTS (ignore stale rows)."""
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                'SELECT node_id, host, port FROM nodes WHERE status = ? AND node_id != ?',
-                ('active', self.node_id)
-            )
-            added = 0
-            for row in cursor.fetchall():
-                nid, h, p = row[0], row[1], row[2]
-                if p in NODE_PORTS and p != self.port:
-                    self.known_nodes[nid] = (h, p)
-                    added += 1
-            conn.close()
-            logger.info("discovered %s peers (ports in NODE_PORTS)", len(self.known_nodes))
-        except Exception as e:
-            logger.warning("discover nodes: %s", e)
+        """Discover peers from config; only add nodes whose port is in NODE_PORTS."""
+        for p in NODE_PORTS:
+            if p != self.port:
+                self.known_nodes[f"node_{p}"] = (RPC_HOST, p)
+        logger.info("discovered %s peers (ports in NODE_PORTS)", len(self.known_nodes))
 
     def start_listening(self):
         self.is_running = True
@@ -255,29 +211,23 @@ class PoWNode:
             return
         logger.info("validation: chain ok prev_hash link")
 
-        # Write to our ledger (same thread as listener = safe for SQLite)
+        # Write to our ledger
         try:
-            conn = get_node_db_connection(self.port)
-            cursor = conn.cursor()
-            cursor.execute(
-                '''INSERT INTO blocks ("index", timestamp, prev_hash, current_hash, nonce, miner_id, signature)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (block_index, timestamp, prev_hash, current_hash, nonce, miner_id, signature)
+            transactions = [Transaction.from_dict(tx) for tx in tx_list]
+            block = Block(
+                index=block_index,
+                timestamp=timestamp,
+                prev_hash=prev_hash,
+                current_hash=current_hash,
+                nonce=nonce,
+                miner_id=miner_id,
+                signature=signature,
+                public_key_pem=public_key_pem,
+                transactions=transactions
             )
-            end_ts = timestamp
-            for tx in tx_list:
-                sender = tx.get('sender', '')
-                data_str = json.dumps(tx.get('data', tx)) if isinstance(tx.get('data'), dict) else str(tx.get('data', ''))
-                sig = tx.get('signature', '')
-                start_ts = tx.get('start_timestamp') or end_ts
-                cursor.execute(
-                    'INSERT INTO transactions (block_hash, sender, data, signature, start_timestamp, end_timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-                    (current_hash, sender, data_str, sig, start_ts, end_ts)
-                )
-            conn.commit()
-            conn.close()
+            self.ledger.add_block(block)
         except Exception as e:
-            logger.error("DB write failed: %s", e)
+            logger.error("Ledger write failed: %s", e)
             return
 
         self.last_block_index = block_index
@@ -355,7 +305,7 @@ class PoWNode:
         logger.info("mining stopped reason=%s", reason)
 
     def _on_block_mined(self, block_hash, nonce):
-        """We found a block: sign, write to DB, broadcast, clear mempool for that tx."""
+        """We found a block: sign, write to ledger, broadcast, clear mempool for that tx."""
         self._stop_spinner()
         with self.mempool_lock:
             if not self.mempool:
@@ -368,25 +318,28 @@ class PoWNode:
         signature = self.key_manager.sign_data(block_hash)
         public_key_pem = self.key_manager.get_public_key_pem()
 
-        end_timestamp = timestamp
-        start_timestamp = tx.get('start_timestamp') or end_timestamp
         try:
-            conn = get_node_db_connection(self.port)
-            cursor = conn.cursor()
-            cursor.execute(
-                '''INSERT INTO blocks ("index", timestamp, prev_hash, current_hash, nonce, miner_id, signature)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (block_index, timestamp, prev_hash, block_hash, nonce, self.node_id, signature)
+            transaction = Transaction(
+                sender=tx.get('sender', ''),
+                data=tx.get('data', {}),
+                signature=tx.get('signature', ''),
+                start_timestamp=tx.get('start_timestamp'),
+                end_timestamp=timestamp
             )
-            data_str = json.dumps(tx['data']) if isinstance(tx['data'], dict) else str(tx['data'])
-            cursor.execute(
-                'INSERT INTO transactions (block_hash, sender, data, signature, start_timestamp, end_timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-                (block_hash, tx.get('sender', ''), data_str, tx.get('signature', ''), start_timestamp, end_timestamp)
+            block = Block(
+                index=block_index,
+                timestamp=timestamp,
+                prev_hash=prev_hash,
+                current_hash=block_hash,
+                nonce=nonce,
+                miner_id=self.node_id,
+                signature=signature,
+                public_key_pem=public_key_pem,
+                transactions=[transaction]
             )
-            conn.commit()
-            conn.close()
+            self.ledger.add_block(block)
         except Exception as e:
-            logger.error("DB write failed: %s", e)
+            logger.error("Ledger write failed: %s", e)
             return
 
         self.last_block_index = block_index

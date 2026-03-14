@@ -1,6 +1,0 @@
-אפשרויות מפתח ->  ניפוי שגיאות במאצעות wifi (מתחת לUSB) ->  צימוד
-צמד מכשיר באמצעות קוד צימוד:
-adb pair <ip>:<port>
-pairing code
-כתובת ip פתוחה
-adb connect <ip>:<port>

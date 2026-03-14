@@ -131,17 +131,12 @@ def _upload_via_service_account(
         uploads_folder_id,
         safe_username,
     )
-    asset_folder_id = _ensure_drive_folder(
-        service,
-        username_folder_id,
-        safe_asset,
-    )
 
     mime_type = "image/png" if detected_type == "png" else "image/jpeg"
     media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
     metadata = {
         "name": file_name,
-        "parents": [asset_folder_id],
+        "parents": [username_folder_id],
     }
     if description:
         metadata["description"] = description
