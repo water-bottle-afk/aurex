@@ -138,6 +138,10 @@ from config import (
 from classes import PROTO, CustomLogger
 from DB_ORM import MarketplaceDB
 from google_drive_uploader import upload_file_to_drive
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'blockchain'))
+from classes import NotificationsManager
 
 server_logger = CustomLogger("server", LOGGING_LEVEL).logger
 
@@ -647,6 +651,11 @@ class ClientSession:
                 file_name,
                 session.description,
                 apps_script_url=GOOGLE_APPS_SCRIPT_URL,
+                parent_folder_id=GOOGLE_DRIVE_PARENT_FOLDER_ID,
+                service_account_file=GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
+                username=session.username,
+                asset_name=session.asset_name,
+                uploads_folder_name=GOOGLE_DRIVE_UPLOADS_FOLDER_NAME,
             )
         except Exception as e:
             self._cleanup_upload(upload_id)
@@ -1014,8 +1023,8 @@ class ClientSession:
             except Exception:
                 limit = 50
         try:
-            items = self.db.get_notifications(username, limit=limit)
-            unread_count = self.db.get_unread_notifications_count(username)
+            items = self.notifications_manager.get_notifications(username, limit=limit)
+            unread_count = self.notifications_manager.get_unread_count(username)
             return f"OK|{json.dumps(items)}|{unread_count}"
         except Exception as e:
             return f"ERR03|Error getting notifications: {str(e)}"
@@ -1036,8 +1045,8 @@ class ClientSession:
         if username != self.username:
             return "ERR02|Unauthorized"
         try:
-            ok = self.db.mark_all_notifications_read(username)
-            return "OK|read" if ok else "ERR03|Failed to mark read"
+            self.notifications_manager.mark_read(username)
+            return "OK|read"
         except Exception as e:
             return f"ERR03|Error marking notifications: {str(e)}"
 
@@ -1127,6 +1136,7 @@ class Server:
         self.clients_by_username = {}  # username -> set(ClientSession)
         self.is_running = False
         self.db = MarketplaceDB()
+        self.notifications_manager = NotificationsManager()
 
         # Purchase -> gateway queue + status tracking
         self.tx_queue = queue.Queue()
@@ -1197,7 +1207,7 @@ class Server:
         self.broadcast_event(payload)
 
     def create_and_push_notification(self, username, title, body, notif_type="system", asset_id=None, tx_id=None):
-        notif = self.db.create_notification(
+        notif = self.notifications_manager.create_notification(
             username=username,
             title=title,
             body=body,

@@ -28,6 +28,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
     super.initState();
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
+    context.read<UserProvider>().addListener(_onUserChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -44,7 +45,16 @@ class _MarketplacePageState extends State<MarketplacePage> {
   void dispose() {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    context.read<UserProvider>().removeListener(_onUserChanged);
     super.dispose();
+  }
+
+  void _onUserChanged() {
+    final userProvider = context.read<UserProvider>();
+    final username = userProvider.localUser?.username;
+    if (username != null && username.isNotEmpty && _walletBalance == null && !_walletLoading) {
+      _loadWalletBalance();
+    }
   }
 
   /// Detect when user scrolls near the bottom and load more assets
