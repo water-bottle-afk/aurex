@@ -4,6 +4,10 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import '../providers/client_provider.dart';
 import '../providers/user_provider.dart';
+import '../services/asset_hash_service.dart';
+import '../services/wallet_key_service.dart';
+import '../services/tx_signing.dart';
+import '../utils/tx_utils.dart';
 
 class UploadAssetPage extends StatefulWidget {
   const UploadAssetPage({super.key});
@@ -78,6 +82,25 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
       final userProvider = Provider.of<UserProvider>(context, listen: false);
       final username = userProvider.username;
 
+      setState(() {
+        _statusMessage = 'Hashing file...';
+      });
+      final assetHash = await AssetHashService.sha256File(_selectedFile!);
+      final mintTxId = generateTxId('MINT', username);
+      final mintTimestamp = DateTime.now().toUtc().toIso8601String();
+      final publicKey = await WalletKeyService.getPublicKeyBase64();
+      final mintPayload = {
+        'action': 'asset_mint',
+        'tx_id': mintTxId,
+        'asset_hash': assetHash,
+        'asset_name': _assetName,
+        'owner': username,
+        'owner_pub': publicKey,
+        'timestamp': mintTimestamp,
+      };
+      final mintSignature =
+          await WalletKeyService.signMessage(canonicalTxMessage(username, mintPayload));
+
       // Upload file to server via chunked protocol
       setState(() {
         _statusMessage = 'Uploading file to server...';
@@ -93,6 +116,11 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         username: username,
         fileType: _fileType,
         cost: _assetCost,
+        assetHash: assetHash,
+        mintTxId: mintTxId,
+        mintTimestamp: mintTimestamp,
+        publicKey: publicKey,
+        mintSignature: mintSignature,
       );
 
       if (result == "success") {

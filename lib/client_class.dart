@@ -31,7 +31,7 @@
 ///    Recv: OK or ERR|error_message
 ///
 /// 8. UPLOAD_INIT - Start chunked upload session
-///    Send: UPLOAD_INIT|base64(json)
+///    Send: UPLOAD_INIT|base64(json) (includes asset_hash + mint signature)
 ///    Recv: OK|upload_id|chunk_size or ERR|error_message
 ///
 /// 9. UPLOAD_CHUNK - Send file chunk
@@ -59,11 +59,11 @@
 ///     Recv: OK|item1|item2|... or ERR|error_message
 ///
 /// 15. BUY - Purchase an asset from marketplace
-///     Send: BUY|asset_id|username|amount
+///     Send: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature
 ///     Recv: OK|PENDING|transaction_id or ERR|error_message
 ///
 /// 16. SEND - Send purchased asset to another user
-///     Send: SEND|asset_id|sender_username|receiver_username
+///     Send: SEND|asset_id|sender_username|receiver_username|tx_id|timestamp|public_key|signature
 ///     Recv: OK|transaction_id or ERR|error_message
 ///
 /// 17. GET_PROFILE - Get user profile (anonymous)
@@ -100,6 +100,9 @@ import 'package:flutter/foundation.dart';
 import 'config.dart';
 import 'utils/app_logger.dart';
 import 'models/server_event.dart';
+import 'services/wallet_key_service.dart';
+import 'services/tx_signing.dart';
+import 'utils/tx_utils.dart';
 
 /// Message event for debugging - tracks sent/received messages
 class MessageEvent {
@@ -964,6 +967,11 @@ class Client extends ChangeNotifier {
     required String username,
     required String fileType,
     required double cost,
+    required String assetHash,
+    required String mintTxId,
+    required String mintTimestamp,
+    required String publicKey,
+    required String mintSignature,
   }) async {
     String? uploadId;
     try {
@@ -979,6 +987,11 @@ class Client extends ChangeNotifier {
         "cost": cost,
         "file_size": fileSize,
         "original_name": originalName,
+        "asset_hash": assetHash,
+        "mint_tx_id": mintTxId,
+        "mint_timestamp": mintTimestamp,
+        "public_key": publicKey,
+        "mint_signature": mintSignature,
       };
 
       final initMessage =
@@ -1217,19 +1230,43 @@ class Client extends ChangeNotifier {
   }
 
   /// Buy marketplace asset
-  /// Send: BUY|asset_id|username|amount
+  /// Send: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature
   /// Receive: OK|PENDING|transaction_id or ERR|error_message
   Future<BuyResult> buyAsset({
     required String assetId,
     required String username,
     required double amount,
+    required String assetName,
+    required String seller,
+    required String assetHash,
   }) async {
     try {
-      final message = "BUY|$assetId|$username|$amount";
+      if (assetHash.isEmpty) {
+        throw Exception("Missing asset hash");
+      }
+      final txId = generateTxId('TXN', username, assetId: assetId);
+      final timestamp = DateTime.now().toUtc().toIso8601String();
+      final publicKey = await WalletKeyService.getPublicKeyBase64();
+      final payload = {
+        'action': 'purchase',
+        'tx_id': txId,
+        'asset_id': assetId,
+        'asset_hash': assetHash,
+        'asset_name': assetName,
+        'price': amount,
+        'from': username,
+        'to': seller,
+        'amount': amount,
+        'timestamp': timestamp,
+      };
+      final messageBytes = canonicalTxMessage(username, payload);
+      final signature = await WalletKeyService.signMessage(messageBytes);
+      final message =
+          "BUY|$assetId|$username|$amount|$txId|$timestamp|$publicKey|$signature";
 
       pushMessageToScreen(
         type: 'sent',
-        message: "BUY|$assetId|$username|$amount",
+        message: "BUY|$assetId|$username|$amount|$txId|$timestamp|<public_key>|<signature>",
         status: 'pending',
       );
 
@@ -1412,19 +1449,42 @@ class Client extends ChangeNotifier {
   }
 
   /// Send purchased asset to another user
-  /// Send: SEND|asset_id|sender_username|receiver_username
+  /// Send: SEND|asset_id|sender_username|receiver_username|tx_id|timestamp|public_key|signature
   /// Receive: OK|transaction_id or ERR|error_message
   Future<String> sendAssetToUser({
     required String assetId,
     required String senderUsername,
     required String receiverUsername,
+    required String assetName,
+    required String assetHash,
   }) async {
     try {
-      final message = "SEND|$assetId|$senderUsername|$receiverUsername";
+      if (assetHash.isEmpty) {
+        throw Exception("Missing asset hash");
+      }
+      final txId = generateTxId('SEND', senderUsername, assetId: assetId);
+      final timestamp = DateTime.now().toUtc().toIso8601String();
+      final publicKey = await WalletKeyService.getPublicKeyBase64();
+      final payload = {
+        'action': 'asset_transfer',
+        'tx_id': txId,
+        'asset_id': assetId,
+        'asset_hash': assetHash,
+        'asset_name': assetName,
+        'from': senderUsername,
+        'to': receiverUsername,
+        'amount': 0,
+        'timestamp': timestamp,
+      };
+      final messageBytes = canonicalTxMessage(senderUsername, payload);
+      final signature = await WalletKeyService.signMessage(messageBytes);
+      final message =
+          "SEND|$assetId|$senderUsername|$receiverUsername|$txId|$timestamp|$publicKey|$signature";
 
       pushMessageToScreen(
         type: 'sent',
-        message: message,
+        message:
+            "SEND|$assetId|$senderUsername|$receiverUsername|$txId|$timestamp|<public_key>|<signature>",
         status: 'pending',
       );
 

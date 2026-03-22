@@ -12,10 +12,11 @@ from pathlib import Path
 class Transaction:
     """A single transaction: sender, payload, signature, and timestamps for ledger."""
 
-    def __init__(self, sender='', data=None, signature='', start_timestamp=None, end_timestamp=None):
+    def __init__(self, sender='', data=None, signature='', public_key='', start_timestamp=None, end_timestamp=None):
         self.sender = sender
         self.data = data if data is not None else {}
         self.signature = signature
+        self.public_key = public_key
         self.start_timestamp = start_timestamp or datetime.utcnow().isoformat()
         self.end_timestamp = end_timestamp  # set when block is written
 
@@ -24,6 +25,7 @@ class Transaction:
             'sender': self.sender,
             'data': self.data,
             'signature': self.signature,
+            'public_key': self.public_key,
             'start_timestamp': self.start_timestamp,
             'end_timestamp': self.end_timestamp,
         }
@@ -36,13 +38,19 @@ class Transaction:
             sender=d.get('sender', ''),
             data=d.get('data', d),
             signature=d.get('signature', ''),
+            public_key=d.get('public_key', ''),
             start_timestamp=d.get('start_timestamp'),
             end_timestamp=d.get('end_timestamp'),
         )
 
     def to_mempool_dict(self):
         """Payload used when adding to mempool / sending NEW_TRANSACTION (no end_timestamp yet)."""
-        return {'sender': self.sender, 'data': self.data, 'signature': self.signature}
+        return {
+            'sender': self.sender,
+            'data': self.data,
+            'signature': self.signature,
+            'public_key': self.public_key,
+        }
 
 
 class Block:
@@ -94,7 +102,10 @@ class Ledger:
 
     def __init__(self, pickle_path='ledger.pickle'):
         self.blocks = []
-        self.pickle_path = Path(__file__).parent / pickle_path
+        path = Path(pickle_path)
+        if not path.is_absolute():
+            path = Path(__file__).parent / path
+        self.pickle_path = path
         self.load()
 
     def add_block(self, block):

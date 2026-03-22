@@ -69,6 +69,7 @@ class MyAssetsProvider extends ChangeNotifier {
             price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
             isListed: (item['is_listed']?.toString() ?? '1') == '1',
             token: item['id']?.toString(),
+            assetHash: item['asset_hash']?.toString(),
           );
         }).toList());
 
@@ -95,7 +96,8 @@ class MyAssetsProvider extends ChangeNotifier {
     final current = userProvider.localUser?.username;
     if (type == 'purchase_confirmed' ||
         type == 'asset_received' ||
-        type == 'asset_sent') {
+        type == 'asset_sent' ||
+        type == 'asset_uploaded') {
       if (username != null && username == current) {
         refreshAssets();
       }

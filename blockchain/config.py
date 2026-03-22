@@ -31,6 +31,20 @@ DEFAULT_POW_DIFFICULTY = 2
 MINING_PROGRESS_INTERVAL = 100000  # Log progress every N attempts
 
 # ============================================================================
+# SECURITY / POLICY
+# ============================================================================
+# Replay protection window (seconds). Transactions outside this window are rejected.
+TX_TIME_WINDOW_SECONDS = 600
+
+# Miner allowlist enforcement: if True, only blocks signed by allowed public keys are accepted.
+# Leave ALLOWED_MINER_KEY_FINGERPRINTS empty to allow all (useful for local dev).
+ENFORCE_MINER_ALLOWLIST = False
+ALLOWED_MINER_KEY_FINGERPRINTS = [
+    # Example fingerprints (sha256 hex of public_key_pem bytes)
+    # "3b9f2c...",
+]
+
+# ============================================================================
 # MESSAGE TYPES
 # ============================================================================
 MSG_TYPE_BLOCK_FOUND = "BLOCK_FOUND"

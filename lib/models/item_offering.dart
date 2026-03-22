@@ -7,6 +7,7 @@ class ItemOffering {
   final double price;
   final bool isListed;
   final String? token; // Blockchain asset token
+  final String? assetHash;
 
   ItemOffering({
     required this.id,
@@ -17,5 +18,6 @@ class ItemOffering {
     required this.price,
     this.isListed = true,
     this.token,
+    this.assetHash,
   });
 }

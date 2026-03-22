@@ -1,7 +1,7 @@
 """
 SQLite Database Initialization for Aurex Blockchain PoW
 - Shared DB: DB/database.sqlite3 (nodes registry, etc.)
-- Per-node ledger: blockchain/node_{port}.sqlite3 (blocks, transactions)
+- PoW nodes persist ledgers as per-node pickle files (see pow_node.py)
 """
 
 import sqlite3

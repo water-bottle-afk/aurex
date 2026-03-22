@@ -8,20 +8,30 @@ import socket
 import json
 import hashlib
 import time
-import uuid
 import threading
 import multiprocessing
 import logging
 import struct
-from datetime import datetime
+from datetime import datetime, timezone
 import sys
 import os
+import base64
+from pathlib import Path
+
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from key_manager import NodeKeyManager
 from classes import Ledger, Block, Transaction
-from config import NODE_PORTS, RPC_HOST, RPC_PORT
+from config import (
+    NODE_PORTS,
+    RPC_HOST,
+    RPC_PORT,
+    TX_TIME_WINDOW_SECONDS,
+    ENFORCE_MINER_ALLOWLIST,
+    ALLOWED_MINER_KEY_FINGERPRINTS,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +39,26 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 logger = logging.getLogger('pow_node')
+
+
+def _canonical_tx_message(sender, data):
+    payload = {"sender": sender, "data": data}
+    return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+
+
+def _verify_ed25519_signature(public_key_b64, message_bytes, signature_b64):
+    try:
+        public_key_raw = base64.b64decode(public_key_b64.encode())
+        signature_raw = base64.b64decode(signature_b64.encode())
+        public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_raw)
+        public_key.verify(signature_raw, message_bytes)
+        return True
+    except Exception:
+        return False
+
+
+def _fingerprint_public_key(public_key_pem):
+    return hashlib.sha256(public_key_pem.encode()).hexdigest()
 
 
 def hashing_process(data, difficulty, stop_event, result_queue):
@@ -50,11 +80,11 @@ def hashing_process(data, difficulty, stop_event, result_queue):
 class PoWNode:
     """
     Proof of Work Node: listener (main thread) + mining (multiprocessing).
-    Each node has its own ledger: blockchain/node_{port}.sqlite3.
+    Each node has its own ledger pickle in blockchain/BLOCKCHAIN_DB.
     """
 
     def __init__(self, host='0.0.0.0', port=11111, difficulty=2):
-        self.node_id = str(uuid.uuid4())
+        self.node_id = f"node_{port}"
         self.host = host
         self.port = port
         self.difficulty = difficulty
@@ -65,8 +95,18 @@ class PoWNode:
         self.mempool = []
         self.mempool_lock = threading.Lock()
 
-        # Ledger
-        self.ledger = Ledger()
+        # Ledger (per-node pickle)
+        ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB"
+        ledger_dir.mkdir(exist_ok=True)
+        ledger_path = ledger_dir / f"ledger_node_{self.port}.pickle"
+        self.ledger = Ledger(pickle_path=str(ledger_path))
+        self.seen_tx_ids = set()
+        for block in self.ledger.blocks:
+            for tx in getattr(block, 'transactions', []):
+                tx_data = getattr(tx, 'data', {}) if tx else {}
+                tx_id = tx_data.get('tx_id')
+                if tx_id:
+                    self.seen_tx_ids.add(tx_id)
 
         # Last block on our chain
         self.last_block_index = self.ledger.get_last_block().index if self.ledger.blocks else -1
@@ -96,6 +136,45 @@ class PoWNode:
             if p != self.port:
                 self.known_nodes[f"node_{p}"] = (RPC_HOST, p)
         logger.info("discovered %s peers (ports in NODE_PORTS)", len(self.known_nodes))
+
+    def _is_allowed_miner(self, public_key_pem):
+        if not ENFORCE_MINER_ALLOWLIST:
+            return True
+        if not ALLOWED_MINER_KEY_FINGERPRINTS:
+            return True
+        if not public_key_pem:
+            return False
+        fp = _fingerprint_public_key(public_key_pem)
+        return fp in ALLOWED_MINER_KEY_FINGERPRINTS
+
+    def _is_timestamp_valid(self, ts_str):
+        if not ts_str:
+            return False
+        try:
+            ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            delta = abs((now - ts).total_seconds())
+            return delta <= TX_TIME_WINDOW_SECONDS
+        except Exception:
+            return False
+
+    def _validate_incoming_tx(self, sender, data, signature, public_key_b64):
+        tx_id = data.get('tx_id') if isinstance(data, dict) else None
+        timestamp = data.get('timestamp') if isinstance(data, dict) else None
+        if not tx_id or not timestamp:
+            return False, "missing tx_id/timestamp"
+        if tx_id in self.seen_tx_ids:
+            return False, "duplicate tx_id"
+        if not self._is_timestamp_valid(timestamp):
+            return False, "stale timestamp"
+        if not public_key_b64 or not signature:
+            return False, "missing signature"
+        message_bytes = _canonical_tx_message(sender, data)
+        if not _verify_ed25519_signature(public_key_b64, message_bytes, signature):
+            return False, "invalid signature"
+        return True, "ok"
 
     def start_listening(self):
         self.is_running = True
@@ -202,6 +281,10 @@ class PoWNode:
             return
         logger.info("validation: signature ok")
 
+        if not self._is_allowed_miner(public_key_pem):
+            logger.warning("validation failed: miner not allowlisted")
+            return
+
         # 3) Chain: prev_hash must match our latest block
         if block_index != self.last_block_index + 1:
             logger.warning("validation failed: index %s expected %s", block_index, self.last_block_index + 1)
@@ -210,6 +293,17 @@ class PoWNode:
             logger.warning("validation failed: prev_hash mismatch")
             return
         logger.info("validation: chain ok prev_hash link")
+
+        # Validate transactions
+        for tx in tx_list:
+            sender = tx.get('sender', '')
+            data = tx.get('data', {})
+            sig = tx.get('signature', '')
+            pub = tx.get('public_key', '')
+            ok, reason = self._validate_incoming_tx(sender, data, sig, pub)
+            if not ok:
+                logger.warning("validation failed: tx rejected (%s)", reason)
+                return
 
         # Write to our ledger
         try:
@@ -230,6 +324,11 @@ class PoWNode:
             logger.error("Ledger write failed: %s", e)
             return
 
+        for tx in tx_list:
+            tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+            if tx_id:
+                self.seen_tx_ids.add(tx_id)
+
         self.last_block_index = block_index
         self.last_block_hash = current_hash
         logger.info("gossip: block accepted index=%s hash=%s...", block_index, current_hash[:16])
@@ -242,15 +341,28 @@ class PoWNode:
             tx_data = message.get('data', {})
             sender = message.get('sender', '')
             signature = message.get('signature', '')
+            public_key = message.get('public_key', '')
             start_timestamp = datetime.utcnow().isoformat()
 
             ack = {'type': 'MINING_STARTED', 'miner': self.node_id, 'message': 'Mining started'}
             client_socket.send(json.dumps(ack).encode())
             client_socket.close()
 
+            ok, reason = self._validate_incoming_tx(sender, tx_data, signature, public_key)
+            if not ok:
+                logger.warning("tx rejected: %s", reason)
+                return
+
             with self.mempool_lock:
+                tx_id = tx_data.get('tx_id')
+                if tx_id in self.seen_tx_ids:
+                    logger.warning("tx rejected: duplicate tx_id")
+                    return
                 self.mempool.append({
-                    'sender': sender, 'data': tx_data, 'signature': signature,
+                    'sender': sender,
+                    'data': tx_data,
+                    'signature': signature,
+                    'public_key': public_key,
                     'start_timestamp': start_timestamp,
                 })
 
@@ -323,6 +435,7 @@ class PoWNode:
                 sender=tx.get('sender', ''),
                 data=tx.get('data', {}),
                 signature=tx.get('signature', ''),
+                public_key=tx.get('public_key', ''),
                 start_timestamp=tx.get('start_timestamp'),
                 end_timestamp=timestamp
             )
@@ -345,6 +458,9 @@ class PoWNode:
         self.last_block_index = block_index
         self.last_block_hash = block_hash
         logger.info("block mined index=%s hash=%s...", block_index, block_hash[:16])
+        tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+        if tx_id:
+            self.seen_tx_ids.add(tx_id)
 
         payload = {
             'index': block_index,

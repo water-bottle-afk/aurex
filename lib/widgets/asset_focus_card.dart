@@ -21,6 +21,11 @@ class AssetFocusCard extends StatelessWidget {
     final theme = Theme.of(context);
     final price = '\$${asset.price.toStringAsFixed(2)}';
     final action = isPrimaryDisabled ? null : onPrimaryAction;
+    final assetHash = asset.assetHash ?? '';
+    final hasHash = assetHash.isNotEmpty;
+    final shortHash = assetHash.length > 20
+        ? '${assetHash.substring(0, 10)}...${assetHash.substring(assetHash.length - 10)}'
+        : assetHash;
 
     return Card(
       elevation: 6,
@@ -119,6 +124,32 @@ class AssetFocusCard extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (hasHash) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.teal[50],
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.teal[100]!),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.fingerprint, color: Colors.teal[700], size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Hash: $shortHash',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: Colors.teal[900],
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 18),
                 SizedBox(
                   width: double.infinity,

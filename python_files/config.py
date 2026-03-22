@@ -45,6 +45,9 @@ GOOGLE_DRIVE_UPLOADS_FOLDER_NAME = 'uploads'
 UPLOAD_TMP_DIR = '../DB/upload_tmp'
 UPLOAD_CHUNK_SIZE = 32768  # 32 KB raw bytes per chunk (safe for 2-byte length + base64)
 
+# Transaction security
+TX_TIME_WINDOW_SECONDS = 600
+
 # Logging
 LOGGING_LEVEL = 10  # 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL
 

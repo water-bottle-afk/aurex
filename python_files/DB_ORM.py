@@ -127,7 +127,10 @@ class MarketplaceDB:
                 is_verified INTEGER DEFAULT 0,
                 verification_code TEXT,
                 reset_time TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                wallet_balance REAL DEFAULT 0,
+                wallet_updated_at TEXT,
+                wallet_public_key TEXT
             )
         ''')
 
@@ -135,8 +138,13 @@ class MarketplaceDB:
         cursor.execute("PRAGMA table_info(users)")
         existing_cols = {row[1] for row in cursor.fetchall()}
 
-        # Wallets are now stored in users table (wallet_balance, wallet_updated_at)
-        # No separate wallets table needed
+        # Wallets are now stored in users table (wallet_balance, wallet_updated_at, wallet_public_key)
+        if "wallet_balance" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN wallet_balance REAL DEFAULT 0")
+        if "wallet_updated_at" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN wallet_updated_at TEXT")
+        if "wallet_public_key" not in existing_cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN wallet_public_key TEXT")
         
         # Marketplace items table
         cursor.execute('''
@@ -148,6 +156,7 @@ class MarketplaceDB:
                 url TEXT NOT NULL,
                 file_type TEXT NOT NULL,
                 cost REAL NOT NULL,
+                asset_hash TEXT,
                 timestamp TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 is_listed INTEGER NOT NULL DEFAULT 1,
@@ -160,6 +169,8 @@ class MarketplaceDB:
         item_cols = {row[1] for row in cursor.fetchall()}
         if "description" not in item_cols:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN description TEXT")
+        if "asset_hash" not in item_cols:
+            cursor.execute("ALTER TABLE marketplace_items ADD COLUMN asset_hash TEXT")
         if "is_listed" not in item_cols:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN is_listed INTEGER NOT NULL DEFAULT 1")
 
@@ -196,8 +207,8 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO users (username, email, password_hash, salt, created_at, wallet_balance, wallet_updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (username, email, password_hash, salt, created_at, wallet_balance, wallet_updated_at, wallet_public_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 user.username,
                 user.email,
@@ -206,6 +217,7 @@ class MarketplaceDB:
                 user.created_at,
                 100.0,  # Default starting balance
                 user.created_at,  # Initial wallet update time
+                None,
             ))
 
             # Wallet is now part of users table - no separate wallets table
@@ -250,6 +262,44 @@ class MarketplaceDB:
         except Exception as e:
             print(f"Error getting user: {e}")
             return None
+
+    def get_user_public_key(self, username):
+        """Get stored public key for a user (if set)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT wallet_public_key FROM users WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return row[0]
+            return None
+        except Exception as e:
+            print(f"Error getting user public key: {e}")
+            return None
+
+    def set_user_public_key(self, username, public_key):
+        """Set public key for a user if not already set. Returns True if set or matches."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT wallet_public_key FROM users WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            existing = row[0] if row else None
+            if existing and existing != public_key:
+                conn.close()
+                return False
+            if not existing:
+                cursor.execute(
+                    'UPDATE users SET wallet_public_key = ? WHERE username = ?',
+                    (public_key, username)
+                )
+                conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error setting user public key: {e}")
+            return False
     
     def get_user_by_email(self, email):
         """Get user by email"""
@@ -426,7 +476,7 @@ class MarketplaceDB:
             print(f"Error updating user: {e}")
             return False
     
-    def add_marketplace_item(self, asset_name, username, url, file_type, cost, description=""):
+    def add_marketplace_item(self, asset_name, username, url, file_type, cost, description="", asset_hash=None):
         """Add item to marketplace"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -437,9 +487,9 @@ class MarketplaceDB:
             
             cursor.execute('''
                 INSERT INTO marketplace_items (
-                    asset_name, description, username, url, file_type, cost, timestamp, created_at, is_listed
+                    asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 asset_name,
                 description,
@@ -447,16 +497,18 @@ class MarketplaceDB:
                 direct_url,
                 file_type,
                 cost,
+                asset_hash,
                 datetime.now().isoformat(),
                 datetime.now().isoformat(),
                 1,
             ))
             
+            item_id = cursor.lastrowid
             conn.commit()
             conn.close()
-            return True, "Item added successfully"
+            return True, "Item added successfully", item_id
         except Exception as e:
-            return False, f"Error adding item: {str(e)}"
+            return False, f"Error adding item: {str(e)}", None
     
     def get_all_items(self):
         """Get all marketplace items"""
@@ -465,7 +517,7 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at, is_listed
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
                 FROM marketplace_items
                 WHERE is_listed = 1
                 ORDER BY created_at DESC
@@ -484,9 +536,10 @@ class MarketplaceDB:
                     'url': row[4],
                     'file_type': row[5],
                     'cost': row[6],
-                    'timestamp': row[7],
-                    'created_at': row[8],
-                    'is_listed': row[9],
+                    'asset_hash': row[7],
+                    'timestamp': row[8],
+                    'created_at': row[9],
+                    'is_listed': row[10],
                 })
             return items
         except Exception as e:
@@ -500,7 +553,7 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at, is_listed
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
                 FROM marketplace_items WHERE id = ?
             ''', (item_id,))
             
@@ -516,14 +569,45 @@ class MarketplaceDB:
                     'url': result[4],
                     'file_type': result[5],
                     'cost': result[6],
-                    'timestamp': result[7],
-                    'created_at': result[8],
-                    'is_listed': result[9],
+                    'asset_hash': result[7],
+                    'timestamp': result[8],
+                    'created_at': result[9],
+                    'is_listed': result[10],
                 }
             return None
         except Exception as e:
             print(f"Error getting item: {e}")
             return None    
+
+    def get_item_by_hash(self, asset_hash):
+        """Get marketplace item by asset hash"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
+                FROM marketplace_items WHERE asset_hash = ?
+            ''', (asset_hash,))
+            result = cursor.fetchone()
+            conn.close()
+            if result:
+                return {
+                    'id': result[0],
+                    'asset_name': result[1],
+                    'description': result[2],
+                    'username': result[3],
+                    'url': result[4],
+                    'file_type': result[5],
+                    'cost': result[6],
+                    'asset_hash': result[7],
+                    'timestamp': result[8],
+                    'created_at': result[9],
+                    'is_listed': result[10],
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting item by hash: {e}")
+            return None
     def get_items_paginated(self, limit=10, last_timestamp=None):
         """Get paginated marketplace items (lazy scrolling)
         
@@ -541,7 +625,7 @@ class MarketplaceDB:
             if last_timestamp:
                 # Get items older than last_timestamp
                 cursor.execute('''
-                    SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at, is_listed
+                    SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
                     FROM marketplace_items
                     WHERE created_at < ? AND is_listed = 1
                     ORDER BY created_at DESC
@@ -550,7 +634,7 @@ class MarketplaceDB:
             else:
                 # Get newest items
                 cursor.execute('''
-                    SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at, is_listed
+                    SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
                     FROM marketplace_items
                     WHERE is_listed = 1
                     ORDER BY created_at DESC
@@ -570,9 +654,10 @@ class MarketplaceDB:
                     'url': row[4],
                     'file_type': row[5],
                     'cost': row[6],
-                    'timestamp': row[7],
-                    'created_at': row[8],
-                    'is_listed': row[9],
+                    'asset_hash': row[7],
+                    'timestamp': row[8],
+                    'created_at': row[9],
+                    'is_listed': row[10],
                 })
             return items
         except Exception as e:
@@ -593,7 +678,7 @@ class MarketplaceDB:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, timestamp, created_at, is_listed
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
                 FROM marketplace_items
                 WHERE username = ?
                 ORDER BY created_at DESC
@@ -602,7 +687,8 @@ class MarketplaceDB:
             conn.close()
             return [
                 {'id': row[0], 'asset_name': row[1], 'description': row[2], 'username': row[3], 'url': row[4],
-                 'file_type': row[5], 'cost': row[6], 'timestamp': row[7], 'created_at': row[8], 'is_listed': row[9]}
+                 'file_type': row[5], 'cost': row[6], 'asset_hash': row[7], 'timestamp': row[8], 'created_at': row[9],
+                 'is_listed': row[10]}
                 for row in results
             ]
         except Exception as e:
@@ -677,6 +763,23 @@ class MarketplaceDB:
             return updated
         except Exception as e:
             print(f"Error updating asset owner: {e}")
+            return False
+
+    def update_asset_owner_by_hash(self, asset_hash, new_owner):
+        """Update marketplace item owner by asset hash. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE marketplace_items SET username = ? WHERE asset_hash = ?',
+                (new_owner, asset_hash)
+            )
+            conn.commit()
+            updated = cursor.rowcount > 0
+            conn.close()
+            return updated
+        except Exception as e:
+            print(f"Error updating asset owner by hash: {e}")
             return False
 
     def create_notification(self, username, title, body, notif_type="system", asset_id=None, tx_id=None):
