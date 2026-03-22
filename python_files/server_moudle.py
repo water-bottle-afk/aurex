@@ -169,6 +169,7 @@ def _is_timestamp_valid(ts_str):
     if not ts_str:
         return False
     try:
+        ts_str = ts_str.replace('Z', '+00:00')
         ts = datetime.datetime.fromisoformat(ts_str)
         now = datetime.datetime.utcnow()
         delta = abs((now - ts.replace(tzinfo=None)).total_seconds())
@@ -945,7 +946,6 @@ class ClientSession:
             asset_hash = item.get('asset_hash')
             if not asset_hash:
                 return "ERR02|Asset missing verified hash"
-            seller_public_key = self.db.get_user_public_key(seller) if seller else None
             tx_payload = {
                 'action': 'purchase',
                 'tx_id': tx_id,

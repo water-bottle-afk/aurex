@@ -41,6 +41,10 @@ class _NotificationsPageState extends State<NotificationsPage> {
         return Icons.shopping_bag;
       case 'asset_uploaded':
         return Icons.cloud_upload;
+      case 'asset_received':
+        return Icons.call_received;
+      case 'asset_sent':
+        return Icons.call_made;
       default:
         return Icons.notifications;
     }
@@ -56,6 +60,10 @@ class _NotificationsPageState extends State<NotificationsPage> {
         return Colors.blue;
       case 'asset_uploaded':
         return Colors.teal;
+      case 'asset_received':
+        return Colors.green;
+      case 'asset_sent':
+        return Colors.orange;
       default:
         return Colors.blueGrey;
     }
