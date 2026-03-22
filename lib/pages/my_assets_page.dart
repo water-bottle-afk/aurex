@@ -193,6 +193,12 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
           },
         ),
       ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => context.go('/upload-asset'),
+        backgroundColor: Colors.blueGrey.shade800,
+        icon: const Icon(Icons.add),
+        label: const Text('Upload'),
+      ),
       body: Consumer<MyAssetsProvider>(
         builder: (context, assetsProvider, child) {
           if (assetsProvider.isLoading) {
@@ -235,6 +241,12 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
                   ElevatedButton(
                     onPressed: () => context.go('/marketplace'),
                     child: const Text('Browse Marketplace'),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: () => context.go('/upload-asset'),
+                    icon: const Icon(Icons.add),
+                    label: const Text('Upload Asset'),
                   ),
                 ],
               ),

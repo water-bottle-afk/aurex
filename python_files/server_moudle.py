@@ -38,7 +38,7 @@ Supported Commands:
      Recv: OK or ERR|error_message
   
   8. UPLOAD_INIT - Start chunked upload session
-     Send: UPLOAD_INIT|base64(json)
+     Send: UPLOAD_INIT|base64(json) (includes asset_hash + mint signature)
      Recv: OK|upload_id|chunk_size or ERR|error_message
 
   9. UPLOAD_CHUNK - Send file chunk (base64)
@@ -53,9 +53,9 @@ Supported Commands:
       Send: UPLOAD_ABORT|upload_id
       Recv: OK|message or ERR|error_message
 
-  12. UPLOAD - Legacy direct-URL upload/register
+  12. UPLOAD - Legacy direct-URL upload/register (disabled)
       Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
-      Recv: OK|asset_id or ERR|error_message
+      Recv: ERR|Legacy upload disabled
   
   13. GET_ITEMS - Get all marketplace items
      Send: GET_ITEMS
@@ -66,11 +66,11 @@ Supported Commands:
       Recv: OK|item1|item2|... or ERR|error_message
   
   15. BUY - Purchase an asset from marketplace
-      Send: BUY|asset_id|username|amount
+      Send: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature
       Recv: OK|PENDING|transaction_id or ERR|error_message
   
   16. SEND - Send purchased asset to another user
-      Send: SEND|asset_id|sender_username|receiver_username
+      Send: SEND|asset_id|sender_username|receiver_username|tx_id|timestamp|public_key|signature
       Recv: OK|transaction_id or ERR|error_message
   
   17. GET_PROFILE - Get user profile (anonymous - username only)
@@ -113,6 +113,7 @@ Supported Commands:
 import base64
 import datetime
 import json
+import hashlib
 import logging
 import os
 import queue
@@ -134,6 +135,7 @@ from config import (
     GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL,
     GOOGLE_DRIVE_UPLOADS_FOLDER_NAME,
     UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
+    TX_TIME_WINDOW_SECONDS,
 )
 from classes import PROTO, CustomLogger
 from DB_ORM import MarketplaceDB
@@ -142,8 +144,45 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'blockchain'))
 from classes import NotificationsManager
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 server_logger = CustomLogger("server", LOGGING_LEVEL).logger
+
+
+def _canonical_tx_message(sender, data):
+    payload = {"sender": sender, "data": data}
+    return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+
+
+def _verify_ed25519_signature(public_key_b64, message_bytes, signature_b64):
+    try:
+        public_key_raw = base64.b64decode(public_key_b64.encode())
+        signature_raw = base64.b64decode(signature_b64.encode())
+        public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_raw)
+        public_key.verify(signature_raw, message_bytes)
+        return True
+    except Exception:
+        return False
+
+
+def _is_timestamp_valid(ts_str):
+    if not ts_str:
+        return False
+    try:
+        ts = datetime.datetime.fromisoformat(ts_str)
+        now = datetime.datetime.utcnow()
+        delta = abs((now - ts.replace(tzinfo=None)).total_seconds())
+        return delta <= TX_TIME_WINDOW_SECONDS
+    except Exception:
+        return False
+
+
+def _sha256_file(path):
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 @dataclass
@@ -158,6 +197,11 @@ class UploadSession:
     file_size: int
     original_name: str
     temp_path: str
+    asset_hash: str = ''
+    mint_tx_id: str = ''
+    mint_timestamp: str = ''
+    public_key: str = ''
+    mint_signature: str = ''
     total_chunks: int = 0
     received_chunks: int = 0
     next_seq: int = 0
@@ -458,6 +502,7 @@ class ClientSession:
         """Protocol Message: UPLOAD - Legacy direct-URL upload
         Format: UPLOAD|asset_name|username|google_drive_url|file_type|cost
         """
+        return "ERR01|Legacy upload disabled. Use chunked upload (UPLOAD_INIT)."
         if not self.is_authenticated:
             return "ERR03|Not authenticated"
         
@@ -486,10 +531,23 @@ class ClientSession:
             
             # Add to marketplace database (ORM: DB/marketplace.db)
             marketplace_db = MarketplaceDB()
-            success, message = marketplace_db.add_marketplace_item(asset_name, username, url, normalized_type, cost)
+            success, message, item_id = marketplace_db.add_marketplace_item(
+                asset_name,
+                username,
+                url,
+                normalized_type,
+                cost,
+            )
             
             if success:
                 self.Print(f" Asset uploaded: {asset_name} by {username} - \\${cost}", 20)
+                self.create_and_push_notification(
+                    username=username,
+                    title="Asset uploaded",
+                    body=f"Your asset {asset_name} is now in the marketplace.",
+                    notif_type="asset_uploaded",
+                    asset_id=str(item_id) if item_id else None,
+                )
                 return f"OK|Asset '{asset_name}' uploaded successfully"
             else:
                 self.Print(f" Failed to upload asset: {message}", 40)
@@ -523,6 +581,11 @@ class ClientSession:
         file_type = self._normalize_file_type(data.get("file_type", ""))
         original_name = str(data.get("original_name", "")).strip()
         file_size = int(data.get("file_size", 0) or 0)
+        asset_hash = str(data.get("asset_hash", "")).strip()
+        mint_tx_id = str(data.get("mint_tx_id", "")).strip()
+        mint_timestamp = str(data.get("mint_timestamp", "")).strip()
+        public_key = str(data.get("public_key", "")).strip()
+        mint_signature = str(data.get("mint_signature", "")).strip()
         try:
             cost = float(data.get("cost", 0))
         except Exception:
@@ -534,6 +597,30 @@ class ClientSession:
             return "ERR01|Invalid parameters"
         if file_type not in ("jpg", "png"):
             return "ERR01|Invalid file type. Supported: jpg, png"
+        if not asset_hash or not mint_tx_id or not mint_timestamp or not public_key or not mint_signature:
+            return "ERR01|Missing mint signature data"
+        if not _is_timestamp_valid(mint_timestamp):
+            return "ERR01|Invalid mint timestamp"
+        with self.server.tx_status_lock:
+            if mint_tx_id in self.server.tx_status:
+                return "ERR02|Duplicate mint tx_id"
+        if not self.db.set_user_public_key(username, public_key):
+            return "ERR02|Public key mismatch"
+        mint_payload = {
+            "action": "asset_mint",
+            "tx_id": mint_tx_id,
+            "asset_hash": asset_hash,
+            "asset_name": asset_name,
+            "owner": username,
+            "owner_pub": public_key,
+            "timestamp": mint_timestamp,
+        }
+        if not _verify_ed25519_signature(
+            public_key,
+            _canonical_tx_message(username, mint_payload),
+            mint_signature,
+        ):
+            return "ERR02|Invalid mint signature"
 
         upload_id = uuid.uuid4().hex
         temp_path = str(self.upload_tmp_dir / f"upload_{upload_id}.bin")
@@ -548,6 +635,11 @@ class ClientSession:
             file_size=file_size,
             original_name=original_name or f"{asset_name}.{file_type}",
             temp_path=temp_path,
+            asset_hash=asset_hash,
+            mint_tx_id=mint_tx_id,
+            mint_timestamp=mint_timestamp,
+            public_key=public_key,
+            mint_signature=mint_signature,
         )
         self.upload_sessions[upload_id] = session
 
@@ -638,6 +730,14 @@ class ClientSession:
         if actual_size != session.file_size:
             self._cleanup_upload(upload_id)
             return "ERR06|File size mismatch"
+        try:
+            actual_hash = _sha256_file(session.temp_path)
+        except Exception:
+            self._cleanup_upload(upload_id)
+            return "ERR06|Hash calculation failed"
+        if session.asset_hash and actual_hash != session.asset_hash:
+            self._cleanup_upload(upload_id)
+            return "ERR06|Asset hash mismatch"
 
         file_name = f"{session.asset_name}.{session.file_type}"
         try:
@@ -663,13 +763,14 @@ class ClientSession:
 
         try:
             marketplace_db = MarketplaceDB()
-            success, message = marketplace_db.add_marketplace_item(
+            success, message, item_id = marketplace_db.add_marketplace_item(
                 session.asset_name,
                 session.username,
                 drive_url,
                 session.file_type,
                 session.cost,
                 session.description,
+                actual_hash,
             )
         except Exception as e:
             self._cleanup_upload(upload_id)
@@ -679,6 +780,39 @@ class ClientSession:
         if not success:
             return f"ERR03|{message}"
         self.Print(f" Asset uploaded: {session.asset_name} by {session.username} - ${session.cost}", 20)
+        self.create_and_push_notification(
+            username=session.username,
+            title="Asset uploaded",
+            body=f"Your asset {session.asset_name} is now in the marketplace.",
+            notif_type="asset_uploaded",
+            asset_id=str(item_id) if item_id else None,
+        )
+        # Queue mint transaction to blockchain
+        mint_job = {
+            'tx_type': 'mint',
+            'tx_id': session.mint_tx_id,
+            'owner': session.username,
+            'asset_hash': actual_hash,
+            'asset_name': session.asset_name,
+            'timestamp': session.mint_timestamp,
+            'public_key': session.public_key,
+            'signature': session.mint_signature,
+        }
+        with self.server.tx_status_lock:
+            if session.mint_tx_id in self.server.tx_status:
+                self.server.tx_status[session.mint_tx_id]['status'] = 'failed'
+                self.server.tx_status[session.mint_tx_id]['message'] = 'Duplicate mint tx_id'
+            else:
+                self.server.tx_status[session.mint_tx_id] = {
+                    'status': 'queued',
+                    'message': 'Queued for PoW mint',
+                    'created_at': time.time(),
+                    'tx_type': 'mint',
+                    'asset_hash': actual_hash,
+                    'asset_name': session.asset_name,
+                    'owner': session.username,
+                }
+                self.server.tx_queue.put(mint_job)
         return f"OK|{session.asset_name}|{drive_url}"
 
     def handle_upload_abort(self, params):
@@ -736,7 +870,8 @@ class ClientSession:
                 if items:
                     items_list = items if isinstance(items[0], dict) else [
                         {'id': r[0], 'asset_name': r[1], 'description': r[2], 'username': r[3], 'url': r[4],
-                         'file_type': r[5], 'cost': r[6], 'timestamp': r[7], 'created_at': r[8]}
+                         'file_type': r[5], 'cost': r[6], 'asset_hash': r[7], 'timestamp': r[8], 'created_at': r[9],
+                         'is_listed': r[10]}
                         for r in items
                     ]
                     response = f"OK|{json.dumps(items_list)}"
@@ -758,18 +893,22 @@ class ClientSession:
     def handle_buy_asset(self, params):
         """
         BUY - Purchase an asset from marketplace
-        Format: BUY|asset_id|username|amount
+        Format: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature
         """
         if not self.is_authenticated:
             return "ERR03|Not authenticated"
-        if len(params) < 3:
+        if len(params) < 7:
             self.Print(f"[RECV] BUY - Invalid format", 40)
-            return "ERR01|Invalid format: BUY|asset_id|username|amount"
+            return "ERR01|Invalid format: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature"
 
         try:
             asset_id = params[0].strip()
             username = params[1].strip()
             amount = float(params[2].strip())
+            tx_id = params[3].strip()
+            timestamp = params[4].strip()
+            public_key = params[5].strip()
+            signature = params[6].strip()
 
             self.Print(f" Processing purchase: {username} buying asset {asset_id} for {amount}", 20)
 
@@ -796,18 +935,49 @@ class ClientSession:
             if float(wallet.get('balance', 0)) < price:
                 return "ERR02|Insufficient funds"
 
-            tx_id = f"TXN_{asset_id}_{username}_{uuid.uuid4().hex[:8]}"
+            if not tx_id or not timestamp or not public_key or not signature:
+                return "ERR02|Missing signature parameters"
+            if not _is_timestamp_valid(timestamp):
+                return "ERR02|Invalid or stale timestamp"
+            if not self.db.set_user_public_key(username, public_key):
+                return "ERR02|Public key mismatch"
+
+            asset_hash = item.get('asset_hash')
+            if not asset_hash:
+                return "ERR02|Asset missing verified hash"
+            seller_public_key = self.db.get_user_public_key(seller) if seller else None
+            tx_payload = {
+                'action': 'purchase',
+                'tx_id': tx_id,
+                'asset_id': asset_id,
+                'asset_hash': asset_hash,
+                'asset_name': item.get('asset_name'),
+                'price': price,
+                'from': username,
+                'to': seller,
+                'amount': price,
+                'timestamp': timestamp,
+            }
+            msg_bytes = _canonical_tx_message(username, tx_payload)
+            if not _verify_ed25519_signature(public_key, msg_bytes, signature):
+                return "ERR02|Invalid signature"
+
             purchase = {
                 'tx_id': tx_id,
                 'buyer': username,
                 'seller': seller,
                 'asset_id': asset_id,
+                'asset_hash': asset_hash,
                 'asset_name': item.get('asset_name'),
                 'amount': price,
-                'timestamp': datetime.datetime.utcnow().isoformat(),
+                'timestamp': timestamp,
+                'public_key': public_key,
+                'signature': signature,
             }
 
             with self.server.tx_status_lock:
+                if tx_id in self.server.tx_status:
+                    return "ERR02|Duplicate tx_id"
                 self.server.tx_status[tx_id] = {
                     'status': 'queued',
                     'message': 'Queued for PoW',
@@ -834,18 +1004,22 @@ class ClientSession:
     def handle_send_asset(self, params):
         """
         SEND - Send purchased asset to another user
-        Format: SEND|asset_id|sender_username|receiver_username
+        Format: SEND|asset_id|sender_username|receiver_username|tx_id|timestamp|public_key|signature
         """
         if not self.is_authenticated:
             return "ERR02|Not authenticated"
-        if len(params) < 3:
+        if len(params) < 7:
             self.Print(f"[RECV] SEND - Invalid format", 40)
-            return "ERR01|Invalid format: SEND|asset_id|sender|receiver"
+            return "ERR01|Invalid format: SEND|asset_id|sender|receiver|tx_id|timestamp|public_key|signature"
         
         try:
             asset_id = params[0].strip()
             sender_username = params[1].strip()
             receiver_username = params[2].strip()
+            tx_id = params[3].strip()
+            timestamp = params[4].strip()
+            public_key = params[5].strip()
+            signature = params[6].strip()
 
             if not asset_id or not sender_username or not receiver_username:
                 return "ERR01|Invalid parameters"
@@ -865,22 +1039,50 @@ class ClientSession:
             receiver = self.db.get_user(receiver_username)
             if not receiver:
                 return "ERR02|Receiver not found"
-            
-            self.Print(f" Processing asset send: {sender_username} → {receiver_username} (asset: {asset_id})", 20)
 
-            tx_id = f"SEND_{asset_id}_{sender_username}_{uuid.uuid4().hex[:8]}"
+            if not tx_id or not timestamp or not public_key or not signature:
+                return "ERR02|Missing signature parameters"
+            if not _is_timestamp_valid(timestamp):
+                return "ERR02|Invalid or stale timestamp"
+            if not self.db.set_user_public_key(sender_username, public_key):
+                return "ERR02|Public key mismatch"
+            asset_hash = item.get('asset_hash')
+            if not asset_hash:
+                return "ERR02|Asset missing verified hash"
+            tx_payload = {
+                'action': 'asset_transfer',
+                'tx_id': tx_id,
+                'asset_id': asset_id,
+                'asset_hash': asset_hash,
+                'asset_name': item.get('asset_name'),
+                'from': sender_username,
+                'to': receiver_username,
+                'amount': 0,
+                'timestamp': timestamp,
+            }
+            msg_bytes = _canonical_tx_message(sender_username, tx_payload)
+            if not _verify_ed25519_signature(public_key, msg_bytes, signature):
+                return "ERR02|Invalid signature"
+
+            self.Print(f" Processing asset send: {sender_username} -> {receiver_username} (asset: {asset_id})", 20)
+
             transfer = {
                 'tx_id': tx_id,
                 'tx_type': 'transfer',
                 'from': sender_username,
                 'to': receiver_username,
                 'asset_id': asset_id,
+                'asset_hash': asset_hash,
                 'asset_name': item.get('asset_name'),
                 'amount': 0,
-                'timestamp': datetime.datetime.utcnow().isoformat(),
+                'timestamp': timestamp,
+                'public_key': public_key,
+                'signature': signature,
             }
 
             with self.server.tx_status_lock:
+                if tx_id in self.server.tx_status:
+                    return "ERR02|Duplicate tx_id"
                 self.server.tx_status[tx_id] = {
                     'status': 'queued',
                     'message': 'Queued for PoW transfer',
@@ -1384,13 +1586,23 @@ class Server:
                                         to_user = data.get('to')
                                         amount = data.get('amount') if data.get('amount') is not None else data.get('price')
                                         asset_id = data.get('asset_id')
+                                        asset_hash = data.get('asset_hash')
                                         tx_id = data.get('tx_id')
+                                        if action == 'asset_mint':
+                                            if tx_id:
+                                                self._set_tx_status(tx_id, "confirmed", "Mint confirmed")
+                                            continue
                                         if action == 'asset_transfer':
-                                            if from_user and to_user and asset_id:
-                                                updated = self.db.update_asset_owner(asset_id, to_user)
+                                            if from_user and to_user and (asset_id or asset_hash):
+                                                updated = False
+                                                if asset_hash:
+                                                    updated = self.db.update_asset_owner_by_hash(asset_hash, to_user)
+                                                if not updated and asset_id:
+                                                    updated = self.db.update_asset_owner(asset_id, to_user)
                                                 if updated:
-                                                    self.db.set_item_listed(asset_id, False)
-                                                    self.broadcast_marketplace_remove(asset_id)
+                                                    if asset_id:
+                                                        self.db.set_item_listed(asset_id, False)
+                                                        self.broadcast_marketplace_remove(asset_id)
                                                     server_logger.info(
                                                         "asset transfer updated: asset_id=%s owner=%s", asset_id, to_user
                                                     )
@@ -1414,8 +1626,12 @@ class Server:
                                                     wa, wb = self.db.get_wallet(from_user), self.db.get_wallet(to_user)
                                                     if wa and wb:
                                                         server_logger.info("balances: %s=%.2f %s=%.2f", from_user, wa['balance'], to_user, wb['balance'])
-                                                    if asset_id:
-                                                        updated = self.db.update_asset_owner(asset_id, to_user)
+                                                    if asset_id or asset_hash:
+                                                        updated = False
+                                                        if asset_id:
+                                                            updated = self.db.update_asset_owner(asset_id, to_user)
+                                                        if not updated and asset_hash:
+                                                            updated = self.db.update_asset_owner_by_hash(asset_hash, to_user)
                                                         if updated:
                                                             server_logger.info("asset ownership updated: asset_id=%s owner=%s", asset_id, to_user)
                                                         else:
@@ -1492,6 +1708,8 @@ class Server:
             try:
                 if tx_type == 'transfer':
                     response = self._submit_transfer_to_gateway(tx_job)
+                elif tx_type == 'mint':
+                    response = self._submit_mint_to_gateway(tx_job)
                 else:
                     response = self._submit_purchase_to_gateway(tx_job)
                 if response and response.get('status') == 'submitted':
@@ -1512,9 +1730,12 @@ class Server:
                 'buyer': purchase.get('buyer'),
                 'seller': purchase.get('seller'),
                 'asset_id': purchase.get('asset_id'),
+                'asset_hash': purchase.get('asset_hash'),
                 'asset_name': purchase.get('asset_name'),
                 'price': purchase.get('amount'),
                 'timestamp': purchase.get('timestamp'),
+                'public_key': purchase.get('public_key'),
+                'signature': purchase.get('signature'),
             }
         }
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1531,6 +1752,7 @@ class Server:
             'action': 'asset_transfer',
             'tx_id': transfer.get('tx_id'),
             'asset_id': transfer.get('asset_id'),
+            'asset_hash': transfer.get('asset_hash'),
             'asset_name': transfer.get('asset_name'),
             'from': transfer.get('from'),
             'to': transfer.get('to'),
@@ -1542,7 +1764,36 @@ class Server:
             'body': {
                 'sender': transfer.get('from'),
                 'data': tx_payload,
-                'signature': f"SIG_{transfer.get('from')}_{transfer.get('tx_id')}",
+                'signature': transfer.get('signature'),
+                'public_key': transfer.get('public_key'),
+            }
+        }
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect((GATEWAY_HOST, GATEWAY_PORT))
+        raw = json.dumps(payload).encode()
+        sock.send(struct.pack('>H', len(raw)) + raw)
+        response = self._recv_gateway_json(sock)
+        sock.close()
+        return response
+
+    def _submit_mint_to_gateway(self, mint):
+        tx_payload = {
+            'action': 'asset_mint',
+            'tx_id': mint.get('tx_id'),
+            'asset_hash': mint.get('asset_hash'),
+            'asset_name': mint.get('asset_name'),
+            'owner': mint.get('owner'),
+            'owner_pub': mint.get('public_key'),
+            'timestamp': mint.get('timestamp'),
+        }
+        payload = {
+            'action': 'submit_transaction',
+            'body': {
+                'sender': mint.get('owner'),
+                'data': tx_payload,
+                'signature': mint.get('signature'),
+                'public_key': mint.get('public_key'),
             }
         }
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

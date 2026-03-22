@@ -13,6 +13,8 @@ import struct
 import logging
 import hashlib
 from datetime import datetime
+import base64
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -26,9 +28,11 @@ from config import (
     DEFAULT_SOCKET_TIMEOUT,
     SOCKET_BUFFER_SIZE,
     DEFAULT_POW_DIFFICULTY,
+    TX_TIME_WINDOW_SECONDS,
 )
 from models import Transaction
 from db_init import get_db_connection, init_database
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 # Logging
 logging.basicConfig(
@@ -39,6 +43,65 @@ logging.basicConfig(
 logger = logging.getLogger('gateway_server')
 
 SOCKET_TIMEOUT = 3
+SEEN_TX_IDS = {}
+SEEN_TX_LOCK = threading.Lock()
+
+
+def _canonical_tx_message(sender, data):
+    payload = {"sender": sender, "data": data}
+    return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+
+
+def _verify_ed25519_signature(public_key_b64, message_bytes, signature_b64):
+    try:
+        public_key_raw = base64.b64decode(public_key_b64.encode())
+        signature_raw = base64.b64decode(signature_b64.encode())
+        public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_raw)
+        public_key.verify(signature_raw, message_bytes)
+        return True
+    except Exception:
+        return False
+
+
+def _is_timestamp_valid(ts_str):
+    if not ts_str:
+        return False
+    try:
+        ts = datetime.fromisoformat(ts_str)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=None)
+        now = datetime.utcnow()
+        delta = abs((now - ts.replace(tzinfo=None)).total_seconds())
+        return delta <= TX_TIME_WINDOW_SECONDS
+    except Exception:
+        return False
+
+
+def _register_tx_id(tx_id, ts_str):
+    if not tx_id:
+        return False, "missing tx_id"
+    with SEEN_TX_LOCK:
+        if tx_id in SEEN_TX_IDS:
+            return False, "duplicate tx_id"
+        SEEN_TX_IDS[tx_id] = ts_str or datetime.utcnow().isoformat()
+    return True, "ok"
+
+
+def _cleanup_seen_tx_ids():
+    while True:
+        time.sleep(max(30, TX_TIME_WINDOW_SECONDS))
+        cutoff = datetime.utcnow()
+        with SEEN_TX_LOCK:
+            to_delete = []
+            for tx_id, ts_str in SEEN_TX_IDS.items():
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                    if abs((cutoff - ts).total_seconds()) > TX_TIME_WINDOW_SECONDS * 2:
+                        to_delete.append(tx_id)
+                except Exception:
+                    to_delete.append(tx_id)
+            for tx_id in to_delete:
+                SEEN_TX_IDS.pop(tx_id, None)
 
 
 def _send_json(sock, obj):
@@ -72,6 +135,7 @@ def broadcast_transaction(transaction_data):
         'sender': transaction_data.get('sender', ''),
         'data': transaction_data.get('data', transaction_data),
         'signature': transaction_data.get('signature', ''),
+        'public_key': transaction_data.get('public_key', ''),
     }
     raw = json.dumps(message).encode()
     success = 0
@@ -196,6 +260,7 @@ def _record_block_confirmation(confirmation):
 def main():
     init_database()
     logger.info("Gateway server starting (socket, no Flask); submit_transaction -> nodes %s", NODE_PORTS)
+    threading.Thread(target=_cleanup_seen_tx_ids, daemon=True).start()
     # Single listener: clients send action=submit_transaction or action=health; nodes send type=block_confirmation
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -239,7 +304,7 @@ def main():
                 return
             if action == 'submit_purchase':
                 body = msg.get('body') or {}
-                required = ['buyer', 'seller', 'asset_id', 'asset_name', 'price', 'timestamp', 'tx_id']
+                required = ['buyer', 'seller', 'asset_id', 'asset_name', 'price', 'timestamp', 'tx_id', 'public_key', 'signature']
                 missing = [k for k in required if k not in body or body.get(k) in (None, '')]
                 if missing:
                     _send_json(conn, {'status': 'failed', 'message': f"Missing fields: {', '.join(missing)}"})
@@ -258,12 +323,24 @@ def main():
                     return
                 ts = body.get('timestamp')
                 tx_id = body.get('tx_id')
-                signature = body.get('signature') or f"SIG_{buyer}_{tx_id}"
+                signature = body.get('signature')
+                public_key = body.get('public_key')
+                asset_hash = body.get('asset_hash')
 
+                if not _is_timestamp_valid(ts):
+                    _send_json(conn, {'status': 'failed', 'message': 'Invalid or stale timestamp'})
+                    conn.close()
+                    return
+                ok, reason = _register_tx_id(tx_id, ts)
+                if not ok:
+                    _send_json(conn, {'status': 'failed', 'message': reason})
+                    conn.close()
+                    return
                 tx_payload = {
                     'action': 'purchase',
                     'tx_id': tx_id,
                     'asset_id': asset_id,
+                    'asset_hash': asset_hash,
                     'asset_name': asset_name,
                     'price': price,
                     'from': buyer,
@@ -272,7 +349,13 @@ def main():
                     'timestamp': ts,
                 }
 
-                tx = Transaction(sender=buyer, data=tx_payload, signature=signature)
+                msg_bytes = _canonical_tx_message(buyer, tx_payload)
+                if not _verify_ed25519_signature(public_key, msg_bytes, signature):
+                    _send_json(conn, {'status': 'failed', 'message': 'Invalid signature'})
+                    conn.close()
+                    return
+
+                tx = Transaction(sender=buyer, data=tx_payload, signature=signature, public_key=public_key)
                 count, _ = make_transaction(tx)
                 status_msg = "Transaction submitted. Broadcast to %s node(s). Pending confirmation." % count
                 if count == 0:
@@ -304,6 +387,32 @@ def main():
                         body.get('data'),
                         body.get('signature'),
                     )
+                    sender = body.get('sender', '')
+                    data = body.get('data', {}) or {}
+                    signature = body.get('signature', '')
+                    public_key = body.get('public_key', '')
+
+                    tx_id = data.get('tx_id') if isinstance(data, dict) else None
+                    tx_ts = data.get('timestamp') if isinstance(data, dict) else None
+                    if not tx_id or not tx_ts:
+                        _send_json(conn, {'status': 'failed', 'message': 'Missing tx_id/timestamp'})
+                        conn.close()
+                        return
+                    if not _is_timestamp_valid(tx_ts):
+                        _send_json(conn, {'status': 'failed', 'message': 'Invalid or stale timestamp'})
+                        conn.close()
+                        return
+                    ok, reason = _register_tx_id(tx_id, tx_ts)
+                    if not ok:
+                        _send_json(conn, {'status': 'failed', 'message': reason})
+                        conn.close()
+                        return
+                    msg_bytes = _canonical_tx_message(sender, data)
+                    if not _verify_ed25519_signature(public_key, msg_bytes, signature):
+                        _send_json(conn, {'status': 'failed', 'message': 'Invalid signature'})
+                        conn.close()
+                        return
+
                     count, _ = make_transaction(body)
                     # Don't say "3/5 nodes" - say tx submitted and how many nodes got it
                     status_msg = "Transaction submitted. Broadcast to %s node(s). Pending confirmation." % count

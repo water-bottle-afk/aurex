@@ -37,6 +37,23 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
       return;
     }
 
+    if ((widget.asset.assetHash ?? '').isEmpty) {
+      setState(() => _isProcessing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This asset is missing a verified hash.')),
+      );
+      return;
+    }
+
+    final ownerName = widget.asset.author.trim().toLowerCase();
+    if (ownerName.isNotEmpty && ownerName == username.trim().toLowerCase()) {
+      setState(() => _isProcessing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You already own this asset.')),
+      );
+      return;
+    }
+
     if (!clientProvider.isConnected) {
       final connected = await clientProvider.initializeConnection();
       if (!connected) {
@@ -59,6 +76,9 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
         assetId: widget.asset.id,
         username: username,
         amount: widget.asset.price,
+        assetName: widget.asset.title,
+        seller: widget.asset.author,
+        assetHash: widget.asset.assetHash ?? '',
       );
 
       if (buyResult.status == 'PENDING') {
@@ -118,9 +138,16 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
               ? constraints.maxWidth
               : 700.0;
           final assetsProvider = Provider.of<AssetsProvider>(context);
+          final userProvider = Provider.of<UserProvider>(context);
+          final username = userProvider.localUser?.username ?? '';
+          final isOwner = username.isNotEmpty &&
+              username.trim().toLowerCase() ==
+                  widget.asset.author.trim().toLowerCase();
+          final hasHash = (widget.asset.assetHash ?? '').isNotEmpty;
           final isPending =
               assetsProvider.isPurchasePending(widget.asset.id) ||
                   _isProcessing;
+          final isDisabled = isPending || isOwner || !hasHash;
           return Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
@@ -128,10 +155,13 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
                 constraints: BoxConstraints(maxWidth: maxWidth),
                 child: AssetFocusCard(
                   asset: widget.asset,
-                  primaryActionLabel:
-                      isPending ? 'In Process' : 'Buy Now',
-                  isPrimaryDisabled: isPending,
-                  onPrimaryAction: isPending ? null : _startPurchase,
+                  primaryActionLabel: isOwner
+                      ? 'Your Asset'
+                      : (hasHash
+                          ? (isPending ? 'In Process' : 'Buy Now')
+                          : 'Unverified'),
+                  isPrimaryDisabled: isDisabled,
+                  onPrimaryAction: isDisabled ? null : _startPurchase,
                 ),
               ),
             ),
