@@ -67,7 +67,7 @@ def _is_timestamp_valid(ts_str):
     if not ts_str:
         return False
     try:
-        ts = datetime.fromisoformat(ts_str)
+        ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=None)
         now = datetime.utcnow()

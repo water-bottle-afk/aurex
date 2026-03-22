@@ -145,6 +145,13 @@ flutter run
 **Configuration Notes**
 - `python_files/config.py` controls server ports and Google Drive setup.
 - `blockchain/config.py` controls node ports, difficulty, replay windows, allowlist.
+  
+Allowlist helper:
+```powershell
+cd c:\dev\aurex\blockchain
+python print_key_fingerprints.py
+```
+Copy the printed fingerprints into `blockchain/config.py` and set `ENFORCE_MINER_ALLOWLIST = True`.
 
 ---
 

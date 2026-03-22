@@ -151,7 +151,7 @@ class PoWNode:
         if not ts_str:
             return False
         try:
-            ts = datetime.fromisoformat(ts_str)
+            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
