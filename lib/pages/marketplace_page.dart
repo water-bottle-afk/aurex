@@ -34,7 +34,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
       if (!mounted) return;
       final assetsProvider = context.read<AssetsProvider>();
       if (assetsProvider.assets.isEmpty) {
-        assetsProvider.loadNextPage();
+        assetsProvider.refreshAssets();
       }
       _loadWalletBalance();
       context.read<NotificationsProvider>().refresh();
@@ -52,8 +52,19 @@ class _MarketplacePageState extends State<MarketplacePage> {
   void _onUserChanged() {
     final userProvider = context.read<UserProvider>();
     final username = userProvider.localUser?.username;
-    if (username != null && username.isNotEmpty && _walletBalance == null && !_walletLoading) {
-      _loadWalletBalance();
+    if (username != null && username.isNotEmpty) {
+      context.read<AssetsProvider>().refreshAssets();
+      context.read<NotificationsProvider>().refresh();
+      if (_walletBalance == null && !_walletLoading) {
+        _loadWalletBalance();
+      }
+      return;
+    }
+    if (_walletBalance != null || _walletError != null) {
+      setState(() {
+        _walletBalance = null;
+        _walletError = null;
+      });
     }
   }
 
@@ -113,6 +124,15 @@ class _MarketplacePageState extends State<MarketplacePage> {
       final clientProvider = context.read<ClientProvider>();
       if (!clientProvider.isConnected) {
         await clientProvider.initializeConnection();
+      }
+      if (!clientProvider.client.isAuthenticated) {
+        if (mounted) {
+          setState(() {
+            _walletError = 'Not signed in';
+            _walletLoading = false;
+          });
+        }
+        return;
       }
 
       final wallet = await clientProvider.client.getWallet(username);
@@ -316,13 +336,6 @@ class _MarketplacePageState extends State<MarketplacePage> {
               onTap: () {
                 Navigator.pop(context);
                 context.go('/about');
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.person),
-              title: const Text('Profile'),
-              onTap: () {
-                Navigator.pop(context);
               },
             ),
             ListTile(

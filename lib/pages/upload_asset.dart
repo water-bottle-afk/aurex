@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:go_router/go_router.dart';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import '../providers/client_provider.dart';
+import '../providers/assets_provider.dart';
 import '../providers/user_provider.dart';
 import '../services/asset_hash_service.dart';
 import '../services/wallet_key_service.dart';
@@ -80,7 +82,12 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
 
     try {
       final userProvider = Provider.of<UserProvider>(context, listen: false);
-      final username = userProvider.username;
+      final username = userProvider.localUser?.username ?? '';
+      if (username.isEmpty) {
+        _showErrorSnackBar('Please log in before uploading an asset');
+        setState(() => _isUploading = false);
+        return;
+      }
 
       setState(() {
         _statusMessage = 'Hashing file...';
@@ -107,7 +114,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
       });
 
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      final client = clientProvider.client;
+      final dynamic client = clientProvider.client;
 
       final result = await client.uploadMarketplaceItemChunked(
         file: _selectedFile!,
@@ -131,6 +138,7 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         });
 
         _showSuccessSnackBar('Asset uploaded and registered successfully!');
+        Provider.of<AssetsProvider>(context, listen: false).refreshAssets();
 
         // Clear form after successful upload
         Future.delayed(const Duration(seconds: 2), () {
@@ -177,7 +185,11 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () {
-            Navigator.of(context).maybePop();
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go('/marketplace');
+            }
           },
         ),
       ),

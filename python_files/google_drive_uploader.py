@@ -70,6 +70,8 @@ def upload_file_to_drive(
             file_name=file_name,
             description=description,
             apps_script_url=apps_script_url,
+            username=username,
+            asset_name=asset_name,
         )
     raise RuntimeError("No Google Drive upload method configured")
 
@@ -159,6 +161,9 @@ def _upload_via_apps_script(
     file_name: str,
     description: str,
     apps_script_url: str,
+    *,
+    username: str | None = None,
+    asset_name: str | None = None,
 ) -> str:
     """Upload using a legacy Apps Script endpoint."""
     if not os.path.exists(file_path):
@@ -177,6 +182,10 @@ def _upload_via_apps_script(
         "description": description,
         "timestamp": datetime.now().isoformat(),
     }
+    if username:
+        fields["username"] = username
+    if asset_name:
+        fields["asset_name"] = asset_name
 
     preamble = _encode_fields(fields, boundary)
     file_header = _encode_file_header("file", file_name, mime_type, boundary)

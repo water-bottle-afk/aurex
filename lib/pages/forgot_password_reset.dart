@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:go_router/go_router.dart';
 import '../providers/client_provider.dart';
 
 class ForgotPasswordFlow extends StatefulWidget {
@@ -17,6 +18,7 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
   final _confirmPasswordController = TextEditingController();
 
   bool _isLoading = false;
+  String? _devOtp;
 
   @override
   void initState() {
@@ -56,7 +58,14 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
 
       if (mounted) {
         setState(() => _isLoading = false);
-        if (result == "success") {
+        if (result.startsWith("success")) {
+          if (result.contains(':')) {
+            final parts = result.split(':');
+            if (parts.length == 2 && parts[1].trim().isNotEmpty) {
+              _devOtp = parts[1].trim();
+              _codeController.text = _devOtp!;
+            }
+          }
           _pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
         }
       }
@@ -188,26 +197,48 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
       appBar: AppBar(
         title: const Text('Reset Password'),
         centerTitle: true,
+        backgroundColor: Colors.blue[700],
+        foregroundColor: Colors.white,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go('/login');
+            }
+          },
+        ),
       ),
-      body: PageView(
-        controller: _pageController,
-        physics: const NeverScrollableScrollPhysics(),
-        children: [
-          // Step 1: Email
-          _buildEmailStep(),
-          // Step 2: Code
-          _buildCodeStep(),
-          // Step 3: New Password
-          _buildPasswordStep(),
-        ],
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.blue.shade700,
+              Colors.blue.shade900,
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: PageView(
+            controller: _pageController,
+            physics: const NeverScrollableScrollPhysics(),
+            children: [
+              _buildEmailStep(),
+              _buildCodeStep(),
+              _buildPasswordStep(),
+            ],
+          ),
+        ),
       ),
     );
   }
 
   Widget _buildEmailStep() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
+    return _wrapStepContent(
+      Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(height: 20),
@@ -248,9 +279,8 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
   }
 
   Widget _buildCodeStep() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
+    return _wrapStepContent(
+      Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(height: 20),
@@ -258,6 +288,16 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
             'Enter verification code',
             style: Theme.of(context).textTheme.headlineSmall,
           ),
+          if (_devOtp != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Dev OTP: $_devOtp',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: Colors.orange[700]),
+            ),
+          ],
           const SizedBox(height: 8),
           Text(
             'Check your email for the 6-digit code',
@@ -305,9 +345,8 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
   }
 
   Widget _buildPasswordStep() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
+    return _wrapStepContent(
+      Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(height: 20),
@@ -348,6 +387,21 @@ class _ForgotPasswordFlowState extends State<ForgotPasswordFlow> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _wrapStepContent(Widget child) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Card(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: child,
+          ),
+        ),
       ),
     );
   }

@@ -47,6 +47,13 @@ class NotificationsProvider extends ChangeNotifier {
       if (!clientProvider.isConnected) {
         await clientProvider.initializeConnection();
       }
+      if (!clientProvider.client.isAuthenticated) {
+        _items.clear();
+        _unreadCount = 0;
+        _isLoading = false;
+        notifyListeners();
+        return;
+      }
       final result = await clientProvider.client.getNotifications(
         username: username,
         limit: limit,
@@ -71,6 +78,9 @@ class NotificationsProvider extends ChangeNotifier {
     try {
       if (!clientProvider.isConnected) {
         await clientProvider.initializeConnection();
+      }
+      if (!clientProvider.client.isAuthenticated) {
+        return;
       }
       final ok = await clientProvider.client.markNotificationsRead(username);
       if (ok) {

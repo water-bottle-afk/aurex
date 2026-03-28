@@ -72,7 +72,8 @@ class _AssetDetailsPageState extends State<AssetDetailsPage> {
     var snackColor = Colors.blueGrey.shade700;
 
     try {
-      final buyResult = await clientProvider.client.buyAsset(
+      final dynamic client = clientProvider.client;
+      final buyResult = await client.buyAsset(
         assetId: widget.asset.id,
         username: username,
         amount: widget.asset.price,

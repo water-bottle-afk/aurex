@@ -17,6 +17,18 @@ class NotificationService {
       iOS: iosSettings,
     );
     await _plugin.initialize(settings);
+    final androidPlugin =
+        _plugin.resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin != null) {
+      const channel = AndroidNotificationChannel(
+        'aurex_notifications',
+        'Aurex Notifications',
+        description: 'Updates about purchases and marketplace activity',
+        importance: Importance.defaultImportance,
+      );
+      await androidPlugin.createNotificationChannel(channel);
+    }
     _initialized = true;
   }
 

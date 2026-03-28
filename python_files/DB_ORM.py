@@ -193,6 +193,20 @@ class MarketplaceDB:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at)')
 
+        # Device tokens for push notifications
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                token TEXT NOT NULL UNIQUE,
+                platform TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (username) REFERENCES users (username)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(username)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_device_tokens_platform ON device_tokens(platform)')
+
         # Wallet data is now stored in users table columns: wallet_balance, wallet_updated_at
         # No migration needed from separate wallets table
         
@@ -874,4 +888,63 @@ class MarketplaceDB:
             return True
         except Exception as e:
             print(f"Error marking notifications read: {e}")
+            return False
+
+    # ---- Device token management (push notifications) ----
+    def upsert_device_token(self, username, token, platform="unknown"):
+        """Insert or update a device token for push notifications."""
+        try:
+            if not username or not token:
+                return False
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            cursor.execute('SELECT id FROM device_tokens WHERE token = ?', (token,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(
+                    'UPDATE device_tokens SET username = ?, platform = ?, updated_at = ? WHERE token = ?',
+                    (username, platform, now, token),
+                )
+            else:
+                cursor.execute(
+                    'INSERT INTO device_tokens (username, token, platform, updated_at) VALUES (?, ?, ?, ?)',
+                    (username, token, platform, now),
+                )
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error upserting device token: {e}")
+            return False
+
+    def get_device_tokens(self, username):
+        """Return all device tokens for a user."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT token FROM device_tokens WHERE username = ?',
+                (username,),
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception as e:
+            print(f"Error getting device tokens: {e}")
+            return []
+
+    def delete_device_token(self, token):
+        """Remove a device token (e.g. invalidated by FCM)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM device_tokens WHERE token = ?', (token,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error deleting device token: {e}")
             return False

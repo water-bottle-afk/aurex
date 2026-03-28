@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:go_router/go_router.dart';
 import '../models/notification_item.dart';
 import '../providers/notifications_provider.dart';
 
@@ -106,6 +107,16 @@ class _NotificationsPageState extends State<NotificationsPage> {
         title: const Text('Notifications'),
         backgroundColor: Colors.blue[600],
         foregroundColor: Colors.white,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go('/marketplace');
+            }
+          },
+        ),
       ),
       body: Consumer<NotificationsProvider>(
         builder: (context, provider, child) {

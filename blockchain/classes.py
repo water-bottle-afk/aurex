@@ -1,10 +1,10 @@
 """
 Blockchain classes: Transaction, Block, Ledger, Notification.
-All persisted using pickle.
+Ledgers are persisted as JSON; notifications remain persisted via pickle.
 """
 
+import json
 import pickle
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -98,14 +98,15 @@ class Block:
 
 
 class Ledger:
-    """The blockchain ledger: list of blocks, persisted to pickle."""
+    """The blockchain ledger: list of blocks, persisted to JSON."""
 
-    def __init__(self, pickle_path='ledger.pickle'):
+    def __init__(self, ledger_path='ledger.json'):
         self.blocks = []
-        path = Path(pickle_path)
+        path = Path(ledger_path)
         if not path.is_absolute():
             path = Path(__file__).parent / path
-        self.pickle_path = path
+        self.ledger_path = path
+        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         self.load()
 
     def add_block(self, block):
@@ -126,15 +127,29 @@ class Ledger:
         return None
 
     def save(self):
-        with open(self.pickle_path, 'wb') as f:
-            pickle.dump(self.blocks, f)
+        payload = [block.to_dict() for block in self.blocks]
+        with open(self.ledger_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def load(self):
-        if self.pickle_path.exists():
-            with open(self.pickle_path, 'rb') as f:
-                self.blocks = pickle.load(f)
-        else:
-            self.blocks = []
+        if self.ledger_path.exists():
+            try:
+                with open(self.ledger_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f) or []
+                self.blocks = [Block.from_dict(d) for d in data]
+                return
+            except Exception:
+                self.blocks = []
+
+        # Migrate legacy pickle if present
+        legacy_path = self.ledger_path.with_suffix('.pickle')
+        if legacy_path.exists():
+            try:
+                with open(legacy_path, 'rb') as f:
+                    self.blocks = pickle.load(f)
+                self.save()
+            except Exception:
+                self.blocks = []
 
 
 class Notification:

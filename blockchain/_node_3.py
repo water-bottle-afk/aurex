@@ -10,7 +10,7 @@ try:
         node_name="PoW_Node_3",
         host='127.0.0.1',
         port=13247,
-        difficulty=3
+        difficulty=2
     )
     node.start()
     while node.running:

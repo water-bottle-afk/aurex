@@ -4,6 +4,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
 import '../providers/user_provider.dart';
 import '../providers/client_provider.dart';
+import '../services/push_notification_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -68,6 +69,12 @@ class _LoginScreenState extends State<LoginScreen> {
           username: result,
           email: '',
         );
+        if (clientProvider.client.isAuthenticated) {
+          await PushNotificationService.registerTokenForUser(
+            client: clientProvider.client,
+            username: result,
+          );
+        }
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Welcome, $result!')),
@@ -119,21 +126,30 @@ class _LoginScreenState extends State<LoginScreen> {
 
       final username = await clientProvider.client.getUserByEmail(googleEmail);
       if (!mounted) return;
-      if (username != null) {
-        final displayName = googleUser.displayName ?? googleEmail.split('@')[0];
-        Provider.of<UserProvider>(context, listen: false).setLocalUser(
-          username: username,
-          email: googleEmail,
-        );
+      final suggestedUsername =
+          (googleUser.displayName ?? googleEmail.split('@')[0])
+              .replaceAll(' ', '_');
+
+      if (username != null && username.isNotEmpty) {
+        _usernameController.text = username;
+        _passwordController.clear();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Welcome, $displayName!')),
+          const SnackBar(
+            content: Text('Account exists. Enter your password to sign in.'),
+          ),
         );
-        context.go('/marketplace');
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No account with this email. Sign up with email first.'),
+            content: Text('No account found. Please create one to continue.'),
           ),
+        );
+        context.go(
+          '/signup',
+          extra: {
+            'username': suggestedUsername,
+            'email': googleEmail,
+          },
         );
       }
     } catch (e) {
@@ -227,7 +243,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     Align(
                       alignment: Alignment.centerRight,
                       child: TextButton(
-                        onPressed: () => context.go('/forgot-password'),
+                        onPressed: () => context.push('/forgot-password'),
                         child: const Text('Forgot password?'),
                       ),
                     ),

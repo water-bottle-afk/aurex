@@ -1,7 +1,7 @@
 """
 SQLite Database Initialization for Aurex Blockchain PoW
 - Shared DB: DB/database.sqlite3 (nodes registry, etc.)
-- PoW nodes persist ledgers as per-node pickle files (see pow_node.py)
+- PoW nodes persist ledgers as per-node JSON files (see pow_node.py)
 """
 
 import sqlite3
@@ -26,44 +26,10 @@ def get_node_db_path(port):
 
 
 def init_node_database(port):
-    """Initialize SQLite ledger for a single node: blocks + transactions."""
-    path = get_node_db_path(port)
-    conn = sqlite3.connect(path)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS blocks (
-            "index" INTEGER PRIMARY KEY,
-            timestamp TEXT NOT NULL,
-            prev_hash TEXT NOT NULL,
-            current_hash TEXT NOT NULL,
-            nonce INTEGER NOT NULL,
-            miner_id TEXT NOT NULL,
-            signature TEXT NOT NULL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            block_hash TEXT NOT NULL,
-            sender TEXT NOT NULL,
-            data TEXT NOT NULL,
-            signature TEXT,
-            start_timestamp TEXT,
-            end_timestamp TEXT
-        )
-    ''')
-    # Migrate existing DBs: add columns if missing
-    for col in ('start_timestamp', 'end_timestamp'):
-        try:
-            cursor.execute(f'ALTER TABLE transactions ADD COLUMN {col} TEXT')
-        except sqlite3.OperationalError:
-            pass
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_blocks_index ON blocks("index")')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_blocks_current_hash ON blocks(current_hash)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_tx_block_hash ON transactions(block_hash)')
-    conn.commit()
-    conn.close()
-    print(f" Node ledger initialized at {path}")
+    """No-op: PoW nodes persist ledgers as JSON (see pow_node.py)."""
+    ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB"
+    ledger_dir.mkdir(exist_ok=True)
+    print(f" Node ledger uses JSON at {ledger_dir}")
 
 
 def get_node_db_connection(port):
