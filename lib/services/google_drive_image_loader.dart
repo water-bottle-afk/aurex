@@ -5,22 +5,28 @@ import 'package:cached_network_image/cached_network_image.dart';
 class GoogleDriveImageLoader {
   /// Convert share URL to direct view URL (if needed)
   static String convertShareUrl(String url) {
-    // If already converted, return as is
-    if (url.contains('export=view')) {
-      return url;
+    final trimmed = url.trim();
+    if (trimmed.isEmpty) return url;
+
+    // Already a direct view / download link with id=
+    final ucMatch = RegExp(r'[?&]id=([a-zA-Z0-9-_]+)').firstMatch(trimmed);
+    if (trimmed.contains('drive.google.com') && ucMatch != null) {
+      final fileId = ucMatch.group(1);
+      if (fileId != null && fileId.isNotEmpty) {
+        return 'https://drive.google.com/uc?export=view&id=$fileId';
+      }
     }
-    
-    // Convert share URL to direct view URL
-    if (url.contains('/file/d/')) {
+
+    if (trimmed.contains('/file/d/')) {
       final regex = RegExp(r'/file/d/([a-zA-Z0-9-_]+)');
-      final match = regex.firstMatch(url);
+      final match = regex.firstMatch(trimmed);
       if (match != null) {
         final fileId = match.group(1);
         return 'https://drive.google.com/uc?export=view&id=$fileId';
       }
     }
-    
-    return url;
+
+    return trimmed;
   }
   
   /// Get thumbnail URL from Google Drive file ID

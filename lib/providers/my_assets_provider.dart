@@ -4,6 +4,7 @@ import '../models/item_offering.dart';
 import 'client_provider.dart';
 import 'user_provider.dart';
 import '../models/server_event.dart';
+import '../services/google_drive_image_loader.dart';
 
 class MyAssetsProvider extends ChangeNotifier {
   final ClientProvider clientProvider;
@@ -58,13 +59,17 @@ class MyAssetsProvider extends ChangeNotifier {
       _assets
         ..clear()
         ..addAll(items.map((item) {
+          final rawUrl = item['url']?.toString() ?? '';
+          final imageUrl = rawUrl.isEmpty
+              ? ''
+              : GoogleDriveImageLoader.convertShareUrl(rawUrl);
           return ItemOffering(
             id: item['id']?.toString() ?? 'unknown_${_assets.length}',
             title: item['asset_name'] ?? 'Asset',
             description: item['description'] ??
                 item['file_type'] ??
                 'No description provided.',
-            imageUrl: item['url'] ?? '',
+            imageUrl: imageUrl,
             author: item['username'] ?? 'Unknown',
             price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
             isListed: (item['is_listed']?.toString() ?? '1') == '1',
@@ -97,6 +102,7 @@ class MyAssetsProvider extends ChangeNotifier {
     if (type == 'purchase_confirmed' ||
         type == 'asset_received' ||
         type == 'asset_sent' ||
+        type == 'asset_sold' ||
         type == 'asset_uploaded') {
       if (username != null && username == current) {
         refreshAssets();

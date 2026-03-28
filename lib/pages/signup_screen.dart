@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:provider/provider.dart';
+import '../providers/user_provider.dart';
+import '../providers/client_provider.dart';
 
 class SignupScreen extends StatefulWidget {
   final String? prefillUsername;
@@ -19,20 +22,22 @@ class SignupScreen extends StatefulWidget {
 class _SignupScreenState extends State<SignupScreen> {
   bool _isLoading = false;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
-  late final TextEditingController _usernameController;
-  late final TextEditingController _emailController;
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
 
   @override
   void initState() {
     super.initState();
-    _usernameController = TextEditingController(
-      text: widget.prefillUsername ?? '',
-    );
-    _emailController = TextEditingController(
-      text: widget.prefillEmail ?? '',
-    );
+    final u = widget.prefillUsername;
+    if (u != null && u.trim().isNotEmpty) {
+      _usernameController.text = u.trim();
+    }
+    final e = widget.prefillEmail;
+    if (e != null && e.trim().isNotEmpty) {
+      _emailController.text = e.trim();
+    }
   }
 
   Future<void> _signUpWithEmail() async {
@@ -104,7 +109,7 @@ class _SignupScreenState extends State<SignupScreen> {
     }
   }
 
-  /// Google sign-up: get email/name, then prefill fields for manual signup.
+  /// Google: prefills username and email only; user reviews and completes Sign Up manually.
   Future<void> _signUpWithGoogle() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
@@ -118,19 +123,32 @@ class _SignupScreenState extends State<SignupScreen> {
       }
 
       final googleEmail = googleUser.email;
-      final displayName =
-          googleUser.displayName ?? googleEmail.split('@')[0];
+      final displayName = googleUser.displayName?.trim().isNotEmpty == true
+          ? googleUser.displayName!.trim()
+          : (googleEmail.contains('@')
+              ? googleEmail.split('@').first
+              : googleEmail);
+
       if (googleEmail.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not read email from Google')),
+          );
+        }
         setState(() => _isLoading = false);
         return;
       }
 
       if (!mounted) return;
-      _usernameController.text = displayName.replaceAll(' ', '_');
-      _emailController.text = googleEmail;
+      setState(() {
+        _emailController.text = googleEmail;
+        _usernameController.text = displayName;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Google details loaded. Please set a password to sign up.'),
+          content: Text(
+            'Email and username filled from Google. Review, set a password, then tap Sign Up.',
+          ),
         ),
       );
     } catch (e) {

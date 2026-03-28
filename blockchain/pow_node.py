@@ -28,6 +28,7 @@ from config import (
     NODE_PORTS,
     RPC_HOST,
     RPC_PORT,
+    DEFAULT_SOCKET_TIMEOUT,
     TX_TIME_WINDOW_SECONDS,
     ENFORCE_MINER_ALLOWLIST,
     ALLOWED_MINER_KEY_FINGERPRINTS,
@@ -83,11 +84,13 @@ class PoWNode:
     Each node has its own ledger JSON in blockchain/BLOCKCHAIN_DB.
     """
 
-    def __init__(self, host='0.0.0.0', port=11111, difficulty=2):
+    def __init__(self, host='0.0.0.0', port=11111, difficulty=2, gateway_host=None, gateway_port=None):
         self.node_id = f"node_{port}"
         self.host = host
         self.port = port
         self.difficulty = difficulty
+        self.gateway_host = gateway_host if gateway_host is not None else RPC_HOST
+        self.gateway_port = int(gateway_port if gateway_port is not None else RPC_PORT)
         self.is_running = False
         self.key_manager = NodeKeyManager(self.node_id)
 
@@ -112,6 +115,8 @@ class PoWNode:
         self.last_block_index = self.ledger.get_last_block().index if self.ledger.blocks else -1
         self.last_block_hash = self.ledger.get_last_hash()
 
+        self._gateway_handshake_logged = False
+
         # Mining control: event shared with miner process; when set, miner stops
         self.stop_mining_event = multiprocessing.Event()
         self.result_queue = multiprocessing.Queue()  # single queue for all miner runs
@@ -129,6 +134,59 @@ class PoWNode:
 
     def _register_node(self):
         pass  # No DB
+
+    def _register_with_gateway_once(self):
+        """Length-prefixed JSON handshake so the gateway adds this node to its broadcast set."""
+        try:
+            peer_host = '127.0.0.1' if self.host in ('0.0.0.0', '') else self.host
+            payload = json.dumps({
+                'type': 'node_register',
+                'node_id': self.node_id,
+                'host': peer_host,
+                'port': self.port,
+            }).encode()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(DEFAULT_SOCKET_TIMEOUT)
+            sock.connect((self.gateway_host, self.gateway_port))
+            sock.send(struct.pack('>H', len(payload)) + payload)
+            try:
+                sock.recv(65536)
+            except Exception:
+                pass
+            sock.close()
+            if not self._gateway_handshake_logged:
+                logger.info(
+                    "gateway handshake ok -> %s:%s (this node %s:%s)",
+                    self.gateway_host,
+                    self.gateway_port,
+                    peer_host,
+                    self.port,
+                )
+                self._gateway_handshake_logged = True
+            else:
+                logger.debug(
+                    "gateway heartbeat %s:%s node %s:%s",
+                    self.gateway_host,
+                    self.gateway_port,
+                    peer_host,
+                    self.port,
+                )
+        except Exception as e:
+            logger.debug("gateway handshake failed: %s", e)
+
+    def _start_gateway_heartbeat(self):
+        """Re-register periodically so the gateway does not prune this node."""
+
+        def loop():
+            interval_s = max(15, NODE_REGISTRY_STALE_SECONDS // 3)
+            while self.is_running:
+                self._register_with_gateway_once()
+                for _ in range(interval_s):
+                    if not self.is_running:
+                        return
+                    time.sleep(1)
+
+        threading.Thread(target=loop, daemon=True).start()
 
     def discover_nodes(self):
         """Discover peers from config; only add nodes whose port is in NODE_PORTS."""
@@ -512,7 +570,7 @@ class PoWNode:
             length = struct.pack('>H', len(raw))
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3)
-            sock.connect((RPC_HOST, RPC_PORT))
+            sock.connect((self.gateway_host, self.gateway_port))
             sock.send(length + raw)
             sock.close()
             logger.info("block_confirmation sent to RPC block_index=%s", block_index)

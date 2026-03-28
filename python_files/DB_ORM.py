@@ -29,16 +29,27 @@ EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD", "your-app-password")
 
 def convert_drive_url(drive_url):
     """
-    Convert Google Drive share link to direct view URL
-    Input:  https://drive.google.com/file/d/{ID}/view?usp=sharing
-    Output: https://drive.google.com/uc?export=view&id={ID}
-    (This URL works in Flutter Image widget)
+    Normalize Google Drive links to a direct view URL the Flutter client can load.
+
+    Handles /file/d/{id}/, open?id=, and already-normalized uc?export=view&id= links.
+    Physical folder path (uploads/{username}/…) is not part of the URL; the file id
+    is authoritative once the service account uploads under the correct folder.
     """
-    match = re.search(r'/file/d/([a-zA-Z0-9-_]+)', drive_url)
+    if not drive_url or not str(drive_url).strip():
+        return drive_url
+    s = str(drive_url).strip()
+
+    match = re.search(r'/file/d/([a-zA-Z0-9-_]+)', s)
     if match:
         file_id = match.group(1)
         return f"https://drive.google.com/uc?export=view&id={file_id}"
-    return drive_url
+
+    match_open = re.search(r'[?&]id=([a-zA-Z0-9-_]+)', s)
+    if match_open and 'drive.google.com' in s:
+        file_id = match_open.group(1)
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+
+    return s
 
 
 class User:

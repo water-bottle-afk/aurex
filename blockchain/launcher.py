@@ -13,7 +13,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from db_init import init_database, init_node_database
-from config import NODE_PORTS, NUM_NODES
+from config import NODE_PORTS, NUM_NODES, RPC_HOST, RPC_PORT
 
 
 class SimpleBlockchainManager:
@@ -60,6 +60,9 @@ import os
 import traceback
 sys.path.insert(0, r"{os.path.dirname(__file__)}")
 
+GATEWAY_HOST = os.environ.get("AUREX_GATEWAY_HOST", "{RPC_HOST}")
+GATEWAY_PORT = int(os.environ.get("AUREX_GATEWAY_PORT", "{RPC_PORT}"))
+
 try:
     from blockchain_node import BlockchainNode
     
@@ -67,7 +70,9 @@ try:
         node_name="{node_name}",
         host='127.0.0.1',
         port={port},
-        difficulty={self.difficulty}
+        difficulty={self.difficulty},
+        gateway_host=GATEWAY_HOST,
+        gateway_port=GATEWAY_PORT,
     )
     node.start()
     while node.running:

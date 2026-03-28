@@ -314,8 +314,18 @@ class ClientSession:
     def process_message(self, message):
         """Parse and handle incoming message"""
         try:
-            parts = message.split('|')
-            command = parts[0].strip()
+            # UPLOAD_CHUNK payloads are base64; use a bounded split so accidental '|'
+            # in metadata never splits the binary payload (defense in depth).
+            if message.startswith("UPLOAD_CHUNK|"):
+                parts = message.split("|", 4)
+                if len(parts) < 5:
+                    return "ERR01|Invalid format: UPLOAD_CHUNK|upload_id|seq|total|data"
+                command = parts[0].strip()
+                tail = parts[1:]
+            else:
+                parts = message.split('|')
+                command = parts[0].strip()
+                tail = parts[1:]
             
             if command not in self.handlers:
                 self.Print(f" Unknown command: {command}", 40)
@@ -323,8 +333,8 @@ class ClientSession:
                 return f"ERR02|Unknown command: {command}"
             
             handler = self.handlers[command]
-            self.Print(f" Processing command: {command}", 20)
-            return handler(parts[1:])
+            self.Print(f" Processing command: {command}", 10)
+            return handler(tail)
         except Exception as e:
             self.Print(f" Error processing message: {e}", 40)
             return f"ERR99|{str(e)}"
@@ -676,6 +686,12 @@ class ClientSession:
 
         upload_id = uuid.uuid4().hex
         temp_path = str(self.upload_tmp_dir / f"upload_{upload_id}.bin")
+        try:
+            self.upload_tmp_dir.mkdir(parents=True, exist_ok=True)
+            with open(temp_path, "wb"):
+                pass
+        except OSError as e:
+            return f"ERR99|Cannot create upload temp file: {e}"
 
         session = UploadSession(
             upload_id=upload_id,
@@ -733,6 +749,11 @@ class ClientSession:
         if session.total_chunks and session.total_chunks != total:
             return "ERR01|Total chunk mismatch"
         session.total_chunks = total
+
+        expected_parts = (session.file_size + UPLOAD_CHUNK_SIZE - 1) // UPLOAD_CHUNK_SIZE
+        if expected_parts != total:
+            self._cleanup_upload(upload_id)
+            return f"ERR01|Chunk count mismatch (client {total} vs expected {expected_parts} for size {session.file_size})"
 
         if seq != session.next_seq:
             return f"ERR05|Out of order chunk (expected {session.next_seq})"
@@ -794,6 +815,9 @@ class ClientSession:
         if actual_size != session.file_size:
             self._cleanup_upload(upload_id)
             return "ERR06|File size mismatch"
+        if session.bytes_received != session.file_size:
+            self._cleanup_upload(upload_id)
+            return "ERR06|Byte count mismatch"
         try:
             actual_hash = _sha256_file(session.temp_path)
         except Exception:
@@ -1754,6 +1778,44 @@ class Server:
                                             if tx_id:
                                                 self._set_tx_status(tx_id, "confirmed", "Mint confirmed")
                                             continue
+                                        if action == 'purchase':
+                                            buyer = from_user
+                                            seller = to_user
+                                            try:
+                                                amt = float(amount) if amount is not None else None
+                                            except (ValueError, TypeError):
+                                                amt = None
+                                            if not buyer or not seller or amt is None:
+                                                if tx_id:
+                                                    self._set_tx_status(tx_id, "failed", "Invalid purchase payload")
+                                                continue
+                                            ok, res = self.db.transfer(buyer, seller, amt)
+                                            if ok:
+                                                new_owner = buyer
+                                                updated = False
+                                                if asset_id:
+                                                    updated = self.db.update_asset_owner(str(asset_id), new_owner)
+                                                if not updated and asset_hash:
+                                                    updated = self.db.update_asset_owner_by_hash(asset_hash, new_owner)
+                                                if updated:
+                                                    server_logger.info(
+                                                        "purchase: asset_id=%s new_owner=%s", asset_id, new_owner
+                                                    )
+                                                    if tx_id:
+                                                        self._set_tx_status(tx_id, "confirmed", "Transaction confirmed")
+                                                else:
+                                                    server_logger.warning(
+                                                        "purchase: ownership update failed asset_id=%s", asset_id
+                                                    )
+                                                    if tx_id:
+                                                        self._set_tx_status(
+                                                            tx_id, "failed", "Asset ownership update failed"
+                                                        )
+                                            else:
+                                                server_logger.warning("purchase: wallet transfer failed: %s", res)
+                                                if tx_id:
+                                                    self._set_tx_status(tx_id, "failed", res)
+                                            continue
                                         if action == 'asset_transfer':
                                             if from_user and to_user and (asset_id or asset_hash):
                                                 updated = False
@@ -2055,18 +2117,16 @@ class Server:
         """Handle a single client connection (non-blocking event loop)"""
         session = None
         try:
-            self.Print(f" New client connection established: {addr[0]}:{addr[1]}", 20)
+            self.Print(f" Client connected {addr[0]}:{addr[1]} (session ready)", 20)
             
             # Create session for this client
             session = ClientSession(sock, addr, self.logging_level, server=self)
             with self.clients_lock:
                 self.clients[addr] = session
-            self.Print(f" Client session created for {addr[0]}:{addr[1]}", 20)
             
             # Receive messages until client disconnects
             while session.is_connected:
                 try:
-                    self.Print(f"⏳ Calling recv_one_message() for {addr[0]}:{addr[1]}...", 20)
                     message = session.proto.recv_one_message()
                     
                     if message is None:
@@ -2074,8 +2134,6 @@ class Server:
                         session.is_connected = False
                         break
                     
-                    self.Print(f" Message received, processing...", 20)
-                    # Decode and process
                     try:
                         msg_str = message.decode() if isinstance(message, bytes) else message
                         log_msg = msg_str
@@ -2085,14 +2143,13 @@ class Server:
                                 log_msg = f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|<chunk>"
                         elif isinstance(msg_str, str) and msg_str.startswith("UPLOAD_INIT|"):
                             log_msg = "UPLOAD_INIT|<payload>"
-                        self.Print(f" Received from {addr[0]}:{addr[1]}: {log_msg}", 20)
+                        self.Print(f" {addr[0]}:{addr[1]} <- {log_msg}", 20)
                         
                         response = session.process_message(msg_str)
                         
-                        # Send response
-                        self.Print(f" Sending to {addr[0]}:{addr[1]}: {response}", 20)
+                        resp_preview = response if len(response) < 200 else f"{response[:197]}..."
+                        self.Print(f" {addr[0]}:{addr[1]} -> {resp_preview}", 20)
                         session.proto.send_one_message(response.encode())
-                        self.Print(f" Response sent successfully to {addr[0]}:{addr[1]}", 20)
                     
                     except Exception as e:
                         self.Print(f" Error processing message from {addr[0]}:{addr[1]}: {e}", 40)
