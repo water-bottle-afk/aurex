@@ -12,12 +12,14 @@ from db_init import init_database
 class BlockchainNode:
     """Wrapper around PoWNode that runs in a thread"""
     
-    def __init__(self, node_name, host, port, difficulty):
+    def __init__(self, node_name, host, port, difficulty, gateway_host=None, gateway_port=None):
         """Initialize a blockchain node"""
         self.node_name = node_name
         self.host = host
         self.port = port
         self.difficulty = difficulty
+        self.gateway_host = gateway_host
+        self.gateway_port = gateway_port
         self.node = None
         self.thread = None
         self.running = False
@@ -38,7 +40,13 @@ class BlockchainNode:
             init_database()
             
             # Create PoW node
-            self.node = PoWNode(host=self.host, port=self.port, difficulty=self.difficulty)
+            self.node = PoWNode(
+                host=self.host,
+                port=self.port,
+                difficulty=self.difficulty,
+                gateway_host=self.gateway_host,
+                gateway_port=self.gateway_port,
+            )
             
             # Discover peers
             self.node.discover_nodes()

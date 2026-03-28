@@ -4,6 +4,7 @@ import '../models/item_offering.dart';
 import '../models/server_event.dart';
 import 'client_provider.dart';
 import '../utils/app_logger.dart';
+import '../services/google_drive_image_loader.dart';
 
 class AssetsProvider extends ChangeNotifier {
   final ClientProvider clientProvider;
@@ -147,21 +148,18 @@ class AssetsProvider extends ChangeNotifier {
     }
   }
 
-  /// Download image for asset (placeholder for now)
-  Future<String> downloadAssetImage(String token) async {
-    try {
-      // In production:
-      // 1. Send DNLOD|token to server
-      // 2. Server returns image URL or direct image data
-      // 3. Cache image locally
-      // 4. Return local path
-
-      // For now, return placeholder
-      return 'assets/images/leather_jacket.png';
-    } catch (e) {
-      _log.error('Error downloading asset image: $e');
-      rethrow;
+  /// Resolve a Drive share URL or raw file id to a view URL usable by [Image.network].
+  Future<String> downloadAssetImage(String urlOrFileId) async {
+    final t = urlOrFileId.trim();
+    if (t.isEmpty) {
+      throw ArgumentError('downloadAssetImage: empty input');
     }
+    if (t.startsWith('http')) {
+      return GoogleDriveImageLoader.convertShareUrl(t);
+    }
+    return GoogleDriveImageLoader.convertShareUrl(
+      'https://drive.google.com/uc?export=view&id=$t',
+    );
   }
 
   void _handleServerEvent(ServerEvent event) {
@@ -182,6 +180,13 @@ class AssetsProvider extends ChangeNotifier {
           assetId.isNotEmpty &&
           (type == 'purchase_failed' || type == 'purchase_confirmed')) {
         clearPurchasePending(assetId);
+      }
+      if (type == 'purchase_confirmed' ||
+          type == 'purchase_failed' ||
+          type == 'asset_sold') {
+        scheduleMicrotask(() {
+          refreshAssets();
+        });
       }
     }
   }

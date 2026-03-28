@@ -153,6 +153,18 @@ def _upload_via_service_account(
     if not file_id:
         raise RuntimeError("Drive upload failed: missing file id")
 
+    # Prefer link sharing so Flutter can load images without Google Sign-In.
+    try:
+        service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            fields="id",
+        ).execute()
+    except Exception as perm_err:
+        print(
+            f"[google_drive_uploader] warning: could not set link sharing on {file_id}: {perm_err}"
+        )
+
     return f"https://drive.google.com/uc?export=view&id={file_id}"
 
 

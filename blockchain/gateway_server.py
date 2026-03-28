@@ -29,6 +29,8 @@ from config import (
     SOCKET_BUFFER_SIZE,
     DEFAULT_POW_DIFFICULTY,
     TX_TIME_WINDOW_SECONDS,
+    NODE_REGISTRY_STALE_SECONDS,
+    NODE_REGISTRY_REAP_INTERVAL_SECONDS,
 )
 from models import Transaction
 from db_init import get_db_connection, init_database
@@ -45,6 +47,64 @@ logger = logging.getLogger('gateway_server')
 SOCKET_TIMEOUT = 3
 SEEN_TX_IDS = {}
 SEEN_TX_LOCK = threading.Lock()
+
+# (host, port) -> {'node_id': str, 'last_seen': monotonic time}
+NODE_REGISTRY = {}
+NODE_REGISTRY_LOCK = threading.Lock()
+
+
+def _normalize_peer_host(host):
+    h = (host or RPC_HOST or '127.0.0.1').strip()
+    if h in ('0.0.0.0', ''):
+        return '127.0.0.1'
+    return h
+
+
+def register_peer(host, port, node_id=''):
+    """Record or refresh a PoW node that registered / heartbeats with the gateway."""
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    h = _normalize_peer_host(host)
+    key = (h, p)
+    nid = node_id or f'node_{p}'
+    with NODE_REGISTRY_LOCK:
+        NODE_REGISTRY[key] = {
+            'node_id': nid,
+            'last_seen': time.monotonic(),
+        }
+    logger.debug("node registry update %s:%s id=%s", h, p, nid)
+    return True
+
+
+def _prune_stale_peers():
+    cutoff = time.monotonic() - NODE_REGISTRY_STALE_SECONDS
+    with NODE_REGISTRY_LOCK:
+        dead = [k for k, v in NODE_REGISTRY.items() if v.get('last_seen', 0) < cutoff]
+        for k in dead:
+            NODE_REGISTRY.pop(k, None)
+        if dead:
+            logger.info("node registry: pruned %s stale peer(s); active=%s", len(dead), len(NODE_REGISTRY))
+
+
+def _registry_reaper_loop():
+    while True:
+        time.sleep(NODE_REGISTRY_REAP_INTERVAL_SECONDS)
+        _prune_stale_peers()
+
+
+def get_broadcast_targets():
+    """
+    Endpoints to send NEW_TRANSACTION / STOP_MINING to.
+    Prefer dynamically registered nodes; if none are active, fall back to NODE_PORTS (bootstrap).
+    """
+    _prune_stale_peers()
+    with NODE_REGISTRY_LOCK:
+        endpoints = list(NODE_REGISTRY.keys())
+    if endpoints:
+        return endpoints, 'registry'
+    return [(RPC_HOST, p) for p in NODE_PORTS], 'config_fallback'
 
 
 def _canonical_tx_message(sender, data):
@@ -129,7 +189,7 @@ def _recv_json(sock, max_size=65536):
 
 
 def broadcast_transaction(transaction_data):
-    """Send NEW_TRANSACTION to all node ports. Returns count of nodes that accepted."""
+    """Send NEW_TRANSACTION to registered peers (or NODE_PORTS fallback)."""
     message = {
         'type': 'NEW_TRANSACTION',
         'sender': transaction_data.get('sender', ''),
@@ -138,34 +198,46 @@ def broadcast_transaction(transaction_data):
         'public_key': transaction_data.get('public_key', ''),
     }
     raw = json.dumps(message).encode()
+    endpoints, source = get_broadcast_targets()
     success = 0
-    for port in NODE_PORTS:
+    failures = []
+    for host, port in endpoints:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(SOCKET_TIMEOUT)
-            sock.connect((RPC_HOST, port))
+            sock.connect((host, port))
             sock.send(raw)
             sock.close()
             success += 1
-            logger.info("broadcast tx to node port=%s", port)
         except Exception as e:
-            logger.warning("node port=%s: %s", port, e)
+            failures.append((host, port, str(e)))
+    logger.info(
+        "broadcast tx: %s/%s peer(s) ok source=%s",
+        success,
+        len(endpoints),
+        source,
+    )
+    for host, port, err in failures[:5]:
+        logger.warning("broadcast tx fail %s:%s: %s", host, port, err)
+    if len(failures) > 5:
+        logger.warning("broadcast tx: %s additional peer errors omitted", len(failures) - 5)
     return success
 
 
 def broadcast_stop_mining(block_index=None, block_hash=None):
-    """Tell all nodes to stop mining (safety stop after a block is confirmed)."""
+    """Tell all active peers to stop mining (same target set as transaction broadcast)."""
     message = {
         'type': 'STOP_MINING',
         'block_index': block_index,
         'block_hash': block_hash,
     }
     raw = json.dumps(message).encode()
-    for port in NODE_PORTS:
+    endpoints, _ = get_broadcast_targets()
+    for host, port in endpoints:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(SOCKET_TIMEOUT)
-            sock.connect((RPC_HOST, port))
+            sock.connect((host, port))
             sock.send(raw)
             sock.close()
         except Exception:
@@ -174,15 +246,17 @@ def broadcast_stop_mining(block_index=None, block_hash=None):
 
 def make_transaction(transaction_obj):
     """
-    Accept a Transaction (or dict). Broadcast to all nodes to start mining race.
-    Returns (nodes_reached, total_nodes).
+    Accept a Transaction (or dict). Broadcast to all active peers.
+    Returns (nodes_reached, peers_attemptecount).
     """
     if isinstance(transaction_obj, Transaction):
         payload = transaction_obj.to_mempool_dict()
     else:
         payload = transaction_obj if isinstance(transaction_obj, dict) else {}
+    endpoints, _ = get_broadcast_targets()
+    total = len(endpoints)
     count = broadcast_transaction(payload)
-    return count, len(NODE_PORTS)
+    return count, total
 
 
 def notify_server(confirmation):
@@ -259,8 +333,12 @@ def _record_block_confirmation(confirmation):
 
 def main():
     init_database()
-    logger.info("Gateway server starting (socket, no Flask); submit_transaction -> nodes %s", NODE_PORTS)
+    logger.info(
+        "Gateway starting; NODE_PORTS fallback=%s (used until peers register)",
+        NODE_PORTS,
+    )
     threading.Thread(target=_cleanup_seen_tx_ids, daemon=True).start()
+    threading.Thread(target=_registry_reaper_loop, daemon=True).start()
     # Single listener: clients send action=submit_transaction or action=health; nodes send type=block_confirmation
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -297,9 +375,37 @@ def main():
                 )
                 conn.close()
                 return
+            mtype = msg.get('type')
+            if mtype in ('node_register', 'node_ping'):
+                host = msg.get('host')
+                port = msg.get('port')
+                node_id = msg.get('node_id', '') or ''
+                if port is None:
+                    _send_json(conn, {'status': 'failed', 'message': 'missing port'})
+                    conn.close()
+                    return
+                if register_peer(host, port, node_id):
+                    endpoints, src = get_broadcast_targets()
+                    _send_json(conn, {
+                        'status': 'ok',
+                        'registered': True,
+                        'type': 'node_registered',
+                        'active_peers': len(endpoints),
+                        'peer_source': src,
+                    })
+                else:
+                    _send_json(conn, {'status': 'failed', 'message': 'invalid registration'})
+                conn.close()
+                return
             action = msg.get('action')
             if action == 'health':
-                _send_json(conn, {'status': 'ok', 'service': 'gateway_server'})
+                endpoints, src = get_broadcast_targets()
+                _send_json(conn, {
+                    'status': 'ok',
+                    'service': 'gateway_server',
+                    'active_peers': len(endpoints),
+                    'peer_source': src,
+                })
                 conn.close()
                 return
             if action == 'submit_purchase':

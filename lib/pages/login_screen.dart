@@ -4,7 +4,6 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:provider/provider.dart';
 import '../providers/user_provider.dart';
 import '../providers/client_provider.dart';
-import '../services/push_notification_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -17,6 +16,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
   final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
 
@@ -50,46 +50,32 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final clientProvider = Provider.of<ClientProvider>(context, listen: false);
 
-      if (!clientProvider.isConnected) {
-        final connected = await clientProvider.initializeConnection();
-        if (!connected) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Server connection failed')),
-          );
-          return;
-        }
-      }
-
       final result = await clientProvider.client.login(username, password);
 
-      if (!mounted) return;
       if (result != null) {
+        final emailHint = _emailController.text.trim();
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: result,
-          email: '',
+          email: emailHint,
         );
-        if (clientProvider.client.isAuthenticated) {
-          await PushNotificationService.registerTokenForUser(
-            client: clientProvider.client,
-            username: result,
-          );
-        }
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Welcome, $result!')),
-        );
-        context.go('/marketplace');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Welcome, $result!')),
+          );
+          context.go('/marketplace');
+        }
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('user not found')),
         );
       }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -97,7 +83,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  /// Sign in with Google: get email, then look up user by email on server (ORM get_user_by_email).
+  /// Google: only prefills email and username; user must enter password and tap Login.
   Future<void> _signInWithGoogle() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
@@ -110,53 +96,40 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      if (!mounted) return;
       final googleEmail = googleUser.email;
       if (googleEmail.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not get email from Google')),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not get email from Google')),
+          );
+        }
         setState(() => _isLoading = false);
         return;
       }
 
-      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      await clientProvider.initializeConnection();
+      final suggestedUsername = googleUser.displayName?.trim().isNotEmpty == true
+          ? googleUser.displayName!.trim()
+          : googleEmail.split('@').first;
 
-      final username = await clientProvider.client.getUserByEmail(googleEmail);
       if (!mounted) return;
-      final suggestedUsername =
-          (googleUser.displayName ?? googleEmail.split('@')[0])
-              .replaceAll(' ', '_');
-
-      if (username != null && username.isNotEmpty) {
-        _usernameController.text = username;
-        _passwordController.clear();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Account exists. Enter your password to sign in.'),
+      setState(() {
+        _emailController.text = googleEmail;
+        _usernameController.text = suggestedUsername;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Email and username filled from Google. '
+            'If your Aurex username differs, edit it, enter your password, then tap Login.',
           ),
-        );
-      } else {
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No account found. Please create one to continue.'),
-          ),
-        );
-        context.go(
-          '/signup',
-          extra: {
-            'username': suggestedUsername,
-            'email': googleEmail,
-          },
+          SnackBar(content: Text('Error signing in: $e')),
         );
       }
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error signing in: $e')),
-      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -167,6 +140,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void dispose() {
     _usernameController.dispose();
+    _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -219,6 +193,19 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 16),
                     TextField(
+                      controller: _emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      decoration: InputDecoration(
+                        hintText: 'Email (optional — filled by Google)',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(color: Colors.grey[300]!),
+                        ),
+                        contentPadding: const EdgeInsets.all(16),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
                       controller: _passwordController,
                       obscureText: _obscurePassword,
                       decoration: InputDecoration(
@@ -239,15 +226,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: () => context.push('/forgot-password'),
-                        child: const Text('Forgot password?'),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 24),
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
@@ -295,6 +274,11 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: () => context.go('/forgot-password'),
+                      child: const Text('Forgot Password?'),
                     ),
                   ],
                 ),

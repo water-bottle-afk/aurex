@@ -10,7 +10,7 @@ POA_DEFAULT_PORT = 13246
 # Five node ports for PoW race (RPC broadcasts to all)
 NODE_PORTS = [13245, 13246, 13247, 13248, 13249]
 NUM_NODES = len(NODE_PORTS)
-# RPC server: socket listener (no Flask)
+# RPC server: socket listener
 RPC_HOST = '127.0.0.1'
 RPC_PORT = 5000
 RPC_LISTEN_HOST = '0.0.0.0'
@@ -21,6 +21,10 @@ SERVER_NOTIFY_PORT = 23457
 DEFAULT_SOCKET_TIMEOUT = 5
 DEFAULT_LISTEN_BACKLOG = 5
 SOCKET_BUFFER_SIZE = 4096
+# Gateway dynamic node registry: entries older than this (seconds) are dropped
+NODE_REGISTRY_STALE_SECONDS = 120
+# Background thread: reap stale registry entries
+NODE_REGISTRY_REAP_INTERVAL_SECONDS = 30
 
 # ============================================================================
 # CONSENSUS CONFIGURATION
@@ -29,20 +33,6 @@ POW_MODE = "POW"
 POA_MODE = "POA"
 DEFAULT_POW_DIFFICULTY = 2
 MINING_PROGRESS_INTERVAL = 100000  # Log progress every N attempts
-
-# ============================================================================
-# SECURITY / POLICY
-# ============================================================================
-# Replay protection window (seconds). Transactions outside this window are rejected.
-TX_TIME_WINDOW_SECONDS = 600
-
-# Miner allowlist enforcement: if True, only blocks signed by allowed public keys are accepted.
-# Leave ALLOWED_MINER_KEY_FINGERPRINTS empty to allow all (useful for local dev).
-ENFORCE_MINER_ALLOWLIST = False
-ALLOWED_MINER_KEY_FINGERPRINTS = [
-    # Example fingerprints (sha256 hex of public_key_pem bytes)
-    # "3b9f2c...",
-]
 
 # ============================================================================
 # MESSAGE TYPES

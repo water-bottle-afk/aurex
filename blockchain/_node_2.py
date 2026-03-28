@@ -1,7 +1,10 @@
 import sys
 import os
 import traceback
-sys.path.insert(0, r"c:\dev\aurex\blockchain")
+sys.path.insert(0, r"C:\dev\aurex\blockchain")
+
+GATEWAY_HOST = os.environ.get("AUREX_GATEWAY_HOST", "127.0.0.1")
+GATEWAY_PORT = int(os.environ.get("AUREX_GATEWAY_PORT", "5000"))
 
 try:
     from blockchain_node import BlockchainNode
@@ -10,7 +13,9 @@ try:
         node_name="PoW_Node_2",
         host='127.0.0.1',
         port=13246,
-        difficulty=2
+        difficulty=2,
+        gateway_host=GATEWAY_HOST,
+        gateway_port=GATEWAY_PORT,
     )
     node.start()
     while node.running:

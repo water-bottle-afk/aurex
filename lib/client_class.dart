@@ -101,6 +101,7 @@
 /// 25. UNLIST_ITEM - Remove an asset from the marketplace
 ///     Send: UNLIST_ITEM|asset_id|username
 ///     Recv: OK|UNLISTED or ERR|error_message
+library;
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
@@ -457,12 +458,18 @@ class Client extends ChangeNotifier {
 
     // Wait for any ongoing send to complete
     while (_isSending) {
-      await Future.delayed(Duration(milliseconds: 10));
+      await Future.delayed(const Duration(milliseconds: 10));
     }
 
     _isSending = true;
     try {
       final messageBytes = utf8.encode(message);
+      if (messageBytes.length > 65535) {
+        throw Exception(
+          'Protocol limit: message is ${messageBytes.length} bytes (max 65535). '
+          'Reduce UPLOAD_CHUNK_SIZE on the server or use a smaller chunk.',
+        );
+      }
       final lengthPrefix = ByteData(2);
       lengthPrefix.setUint16(0, messageBytes.length, Endian.big);
 

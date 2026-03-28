@@ -1,0 +1,48 @@
+import subprocess
+import time
+import os
+import sys
+
+# --- CONFIGURATION ---
+# Adjust these paths if your folder structure differs
+PYTHON_EXEC = "python"  # Uses your current python environment
+BLOCKCHAIN_DIR = "blockchain"
+MARKETPLACE_DIR = "python_files"
+FLUTTER_DIR = "." # Root where pubspec.yaml lives
+
+def launch_task(name, command, cwd):
+    print(f"[+] Starting {name}...")
+    # opens a new terminal window for each service so you can see logs
+    return subprocess.Popen(["start", "cmd", "/k", f"title {name} && {command}"], 
+                            cwd=cwd, shell=True)
+
+def main():
+    print("=== AUREX PROJECT ORCHESTRATOR ===")
+    
+    # 1. Start Blockchain Nodes (PoW Launcher)
+    # Assuming launcher.py handles starting multiple nodes
+    nodes_count = 3
+    difficulty = 2
+    launch_task("Aurex-Nodes", f"{PYTHON_EXEC} launcher.py --nodes {nodes_count} --difficulty {difficulty}", BLOCKCHAIN_DIR)
+    time.sleep(2)
+
+    # 2. Start Blockchain Gateway
+    launch_task("Aurex-Gateway", f"{PYTHON_EXEC} gateway_server.py", BLOCKCHAIN_DIR)
+    print("[!] Waiting for Gateway to stabilize...")
+    time.sleep(3) 
+
+    # 3. Start Marketplace Server
+    # Note: Using the renamed 'server_module.py'
+    launch_task("Aurex-Marketplace", f"{PYTHON_EXEC} server_module.py", MARKETPLACE_DIR)
+    time.sleep(2)
+
+    # 4. Launch Flutter App
+    print("[+] Launching Flutter Mobile App...")
+    # 'flutter run' will target the connected device/emulator
+    launch_task("Aurex-Flutter", "flutter run", FLUTTER_DIR)
+
+    print("\n[SUCCESS] All systems dispatched.")
+    print("Monitor the individual CMD windows for 'UPLOAD_INIT' or 'BLOCK_CONFIRMED' logs.")
+
+if __name__ == "__main__":
+    main()
