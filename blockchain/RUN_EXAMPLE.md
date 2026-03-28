@@ -71,7 +71,7 @@ If you want wallet updates (alice −10, bob +10) when the block is confirmed, s
 
 ```bash
 cd c:\dev\aurex\python_files
-python server_moudle.py
+python server_module.py
 ```
 
 Then when a block is confirmed, the server will log "Saved: Transferred 10 from alice to bob" and update balances.

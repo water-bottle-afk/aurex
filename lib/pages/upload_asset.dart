@@ -3,7 +3,6 @@ import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
-import '../providers/client_provider.dart';
 import '../providers/assets_provider.dart';
 import '../providers/user_provider.dart';
 import '../services/asset_hash_service.dart';
@@ -113,10 +112,9 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         _statusMessage = 'Uploading file to server...';
       });
 
-      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      final dynamic client = clientProvider.client;
+      final assetsProvider = Provider.of<AssetsProvider>(context, listen: false);
 
-      final result = await client.uploadMarketplaceItemChunked(
+      final result = await assetsProvider.streamUpload(
         file: _selectedFile!,
         assetName: _assetName,
         description: _assetDescription,
@@ -134,11 +132,10 @@ class _UploadAssetPageState extends State<UploadAssetPage> {
         setState(() {
           _isUploading = false;
           _statusMessage = ' Asset successfully registered on marketplace!';
-          _uploadedAssetId = _assetName; // Use asset name as ID display
+          _uploadedAssetId = _assetName;
         });
 
         _showSuccessSnackBar('Asset uploaded and registered successfully!');
-        Provider.of<AssetsProvider>(context, listen: false).refreshAssets();
 
         // Clear form after successful upload
         Future.delayed(const Duration(seconds: 2), () {

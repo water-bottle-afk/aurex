@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../models/item_offering.dart';
-import '../services/google_drive_image_loader.dart';
+import 'item_image.dart';
 
 class ItemCard extends StatelessWidget {
   final ItemOffering item;
@@ -20,12 +20,7 @@ class ItemCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            GoogleDriveImageLoader.buildCachedImage(
-              imageUrl: item.imageUrl,
-              height: 200,
-              width: double.infinity,
-              fit: BoxFit.cover,
-            ),
+            ItemImage(relPath: item.imageUrl, height: 200, width: double.infinity, fit: BoxFit.cover),
             Padding(
               padding: const EdgeInsets.all(12.0),
               child: Row(

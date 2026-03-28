@@ -44,9 +44,12 @@ GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE = 'credentials.json'  # Path to service accoun
 GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL = 'aurex.main.service@gmail.com'
 GOOGLE_DRIVE_UPLOADS_FOLDER_NAME = 'uploads'
 
+# Local Asset Storage (replaces Google Drive)
+UPLOADS_DIR = '../assets/uploads'
+
 # Upload Settings
 UPLOAD_TMP_DIR = '../DB/upload_tmp'
-UPLOAD_CHUNK_SIZE = 32768  # 32 KB raw bytes per chunk (safe for 2-byte length + base64)
+UPLOAD_CHUNK_SIZE = 2048
 
 # Transaction security
 TX_TIME_WINDOW_SECONDS = 600

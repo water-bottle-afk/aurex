@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/item_offering.dart';
-import '../services/google_drive_image_loader.dart';
+import 'item_image.dart';
 
 class AssetFocusCard extends StatelessWidget {
   final ItemOffering asset;
@@ -39,10 +39,7 @@ class AssetFocusCard extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                GoogleDriveImageLoader.buildCachedImage(
-                  imageUrl: asset.imageUrl,
-                  fit: BoxFit.cover,
-                ),
+                ItemImage(relPath: asset.imageUrl, fit: BoxFit.cover),
                 Container(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
