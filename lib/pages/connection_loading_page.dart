@@ -186,7 +186,7 @@ class _ConnectionLoadingPageState extends State<ConnectionLoadingPage> {
                         TextField(
                           controller: _ipController,
                           decoration: InputDecoration(
-                            hintText: '192.168.1.61',
+                            hintText: '192.168.1.50',
                             hintStyle: const TextStyle(color: Colors.white30),
                             prefixIcon: const Icon(
                               Icons.language,

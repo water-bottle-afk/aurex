@@ -82,15 +82,25 @@
 ///     Send: GET_WALLET|username
 ///     Recv: OK|balance|updated_at or ERR|error_message
 ///
-/// 21. LIST_ITEM - List an owned asset for sale
+/// 21. GET_NOTIFICATIONS - Get notifications for a user
+///     Send: GET_NOTIFICATIONS|username|limit
+///     Recv: OK|json_list|unread_count or ERR|error_message
+///
+/// 22. MARK_NOTIFICATIONS_READ - Mark all notifications as read
+///     Send: MARK_NOTIFICATIONS_READ|username
+///     Recv: OK|read or ERR|error_message
+///
+/// 23. REGISTER_DEVICE - Register push token for device
+///     Send: REGISTER_DEVICE|username|platform|token
+///     Recv: OK|registered or ERR|error_message
+///
+/// 24. LIST_ITEM - List an owned asset for sale
 ///     Send: LIST_ITEM|asset_id|username|price
 ///     Recv: OK|LISTED or ERR|error_message
 ///
-/// 22. UNLIST_ITEM - Remove an asset from the marketplace
+/// 25. UNLIST_ITEM - Remove an asset from the marketplace
 ///     Send: UNLIST_ITEM|asset_id|username
 ///     Recv: OK|UNLISTED or ERR|error_message
-library;
-
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
@@ -686,7 +696,7 @@ class Client extends ChangeNotifier {
   }
 
   /// Protocol Message: SIGNUP (User Registration with field validation)
-  /// Send: SIGNUP|username|password
+  /// Send: SIGNUP|username|password|email
   /// Receive: OK|username or ERR|error_message
   /// 
   /// Field validation rules:
@@ -696,6 +706,7 @@ class Client extends ChangeNotifier {
   Future<String> signUp({
     required String username,
     required String password,
+    required String email,
   }) async {
     try {
       // Client-side field validation
@@ -708,8 +719,11 @@ class Client extends ChangeNotifier {
         );
         throw Exception(validation);
       }
+      if (email.isEmpty || email.contains('|')) {
+        throw Exception("Invalid email format");
+      }
 
-      final message = "SIGNUP|$username|$password";
+      final message = "SIGNUP|$username|$password|$email";
 
       pushMessageToScreen(
         type: 'sent',
@@ -1111,12 +1125,13 @@ class Client extends ChangeNotifier {
       final parts = response.split('|');
 
       if (parts[0] == "OK") {
+        final otp = parts.length >= 3 ? parts[2] : null;
         pushMessageToScreen(
           type: 'received',
           message: "Reset code sent to $email",
           status: 'success',
         );
-        return "success";
+        return otp != null && otp.isNotEmpty ? "success:$otp" : "success";
       } else {
         final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
         pushMessageToScreen(
@@ -1374,6 +1389,9 @@ class Client extends ChangeNotifier {
           'updated_at': updatedAt,
         };
       }
+      if (parts[0] == "ERR02") {
+        return null;
+      }
       final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
       throw Exception(errorMsg);
     } catch (e) {
@@ -1403,17 +1421,26 @@ class Client extends ChangeNotifier {
       final parts = response.split('|');
 
       if (parts[0] == "OK" && parts.length >= 2) {
-        final items = jsonDecode(parts[1]) as List<dynamic>;
+        final decoded = jsonDecode(parts[1]);
+        final rawList = decoded is List ? decoded : <dynamic>[];
+        final items = <Map<String, dynamic>>[];
+        for (final entry in rawList) {
+          if (entry is Map) {
+            items.add(Map<String, dynamic>.from(entry));
+          }
+        }
         final unreadCount = parts.length >= 3
-            ? int.tryParse(parts[2]) ?? 0
+            ? (int.tryParse(parts[2]) ??
+                double.tryParse(parts[2])?.toInt() ??
+                0)
             : 0;
         return NotificationResult(
-          items: items
-              .cast<Map<String, dynamic>>()
-              .map((m) => Map<String, dynamic>.from(m))
-              .toList(),
+          items: items,
           unreadCount: unreadCount,
         );
+      }
+      if (parts[0] == "ERR02") {
+        return NotificationResult(items: const [], unreadCount: 0);
       }
       final errorMsg = parts.length > 1 ? parts[1] : "Unknown error";
       throw Exception(errorMsg);
@@ -1442,6 +1469,35 @@ class Client extends ChangeNotifier {
       pushMessageToScreen(
         type: 'system',
         message: 'markNotificationsRead error: $e',
+        status: 'error',
+      );
+      return false;
+    }
+  }
+
+  /// Register a device push token for the user.
+  /// Send: REGISTER_DEVICE|username|platform|token
+  /// Receive: OK|registered or ERR|error_message
+  Future<bool> registerDeviceToken({
+    required String username,
+    required String platform,
+    required String token,
+  }) async {
+    try {
+      if (username.isEmpty || username.contains('|')) {
+        throw Exception("Invalid username");
+      }
+      if (token.isEmpty || token.contains('|')) {
+        throw Exception("Invalid token");
+      }
+      final message = "REGISTER_DEVICE|$username|$platform|$token";
+      await sendMessage(message, logPreview: "REGISTER_DEVICE|$username|$platform|<token>");
+      final response = await receiveMessage();
+      return response.startsWith('OK');
+    } catch (e) {
+      pushMessageToScreen(
+        type: 'system',
+        message: 'registerDeviceToken error: $e',
         status: 'error',
       );
       return false;

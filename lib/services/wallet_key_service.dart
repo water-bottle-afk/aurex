@@ -15,7 +15,11 @@ class WalletKeyService {
     if (privB64 != null && pubB64 != null) {
       final priv = base64Decode(privB64);
       final pub = base64Decode(pubB64);
-      return SimpleKeyPairData(priv, publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519));
+      return SimpleKeyPairData(
+        priv,
+        publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519),
+        type: KeyPairType.ed25519,
+      );
     }
 
     final keyPair = await _algo.newKeyPair();

@@ -1,121 +1,68 @@
-# Aurex — Blockchain Image Ownership Marketplace
+﻿# Aurex - Blockchain Image Ownership Marketplace
 
-Aurex is a Flutter marketplace where users upload images, sell them, and transfer ownership. The system anchors ownership to a **distributed PoW ledger** using **content hashes** and **client-signed transactions**, while the marketplace database acts as a fast cache for UI and search.
+Aurex is a Flutter marketplace where users upload images, sell them, and transfer ownership. Ownership is anchored to a PoW blockchain using content hashes and client-signed transactions.
 
-**Core idea**
-Ownership is tied to the image content hash (SHA‑256), not usernames or database IDs. The chain is the source of truth; the DB is a cache/index.
+## What You Can Do
+- Run the blockchain network (nodes + gateway)
+- Run the marketplace server
+- Run the Flutter app
+- Upload an asset (mint on-chain)
+- Purchase an asset (on-chain transfer)
 
----
+## Prerequisites
+- Python 3.10+
+- Flutter SDK (stable channel)
+- Android SDK / emulator or iOS Simulator (for mobile testing)
+- Google Drive setup for uploads (see below)
 
-**Technologies**
-- Flutter (mobile UI)
-- Python (marketplace server + gateway + nodes)
-- TLS sockets (client ↔ server; gateway ↔ nodes)
-- PoW blockchain network with allowlisted miners
-- Ed25519 client signatures
-- SHA‑256 content hashing
-- SQLite (marketplace + internal metadata)
-- Google Drive storage (image hosting)
-
----
-
-**System Components**
-1. **Mobile App (Flutter)**
-   - Uploads assets
-   - Signs blockchain transactions locally
-   - Shows marketplace, wallet, notifications, ownership history
-
-2. **Marketplace Server (Python)**
-   - Auth, wallet, listings, notifications
-   - Validates signatures and timestamps
-   - Submits txs to Gateway
-   - Listens for block confirmations
-
-3. **Gateway (Python)**
-   - Entry point for transactions
-   - Replay protection and signature verification
-   - Broadcasts to nodes
-
-4. **PoW Nodes (Python)**
-   - Mine transactions
-   - Validate signatures + PoW + allowlist
-   - Persist per‑node ledger
-
----
-
-**Ownership Model (No DB Trust)**
-The asset identity is the SHA‑256 hash of the image file. This hash is recorded on-chain.
-
-- **Chain is authoritative**
-- **DB is index/cache**
-- If the DB is lost, ownership can be rebuilt by replaying the chain
-
----
-
-**Workflows**
-
-**Upload + Mint**
-```text
-User (Flutter)
-  -> SHA-256 hash of image
-  -> Sign mint payload (Ed25519)
-  -> Upload chunks
-Server
-  -> Verify signature + hash
-  -> Upload to Google Drive
-  -> Save to DB
-  -> Submit mint tx to Gateway
-Gateway
-  -> Verify signature + replay protection
-  -> Broadcast to nodes
-Nodes
-  -> PoW mine + validate
-  -> Block confirmation -> Server
+## Install
+### Python deps
+```powershell
+cd c:\dev\aurex
+python -m pip install -r python_files\requirements.txt
 ```
 
-**Purchase**
-```text
-Buyer (Flutter)
-  -> Sign purchase payload (tx_id + asset_hash + price)
-Server
-  -> Verify signature + wallet + ownership
-  -> Submit purchase tx to Gateway
-Gateway
-  -> Verify signature + replay protection
-Nodes
-  -> Mine and confirm
-Server
-  -> Update wallet + ownership
-  -> Notify buyer & seller
+### Flutter deps
+```powershell
+cd c:\dev\aurex
+flutter pub get
 ```
 
-**Transfer**
-```text
-Sender (Flutter)
-  -> Sign transfer payload (tx_id + asset_hash)
-Server -> Gateway -> Nodes -> Server
+## Configuration
+### Server discovery IP
+- The server binds to `SERVER_HOST` in `python_files/config.py` (default `0.0.0.0`).
+- The broadcast reply IP is auto-detected at runtime. If auto-detect is wrong, set it explicitly:
+
+```powershell
+$env:AUREX_SERVER_IP = "192.168.1.50"
 ```
 
----
+### Mobile connection notes
+- Android emulator: use `10.0.2.2` as the host.
+- iOS simulator: use `127.0.0.1` as the host.
+- Real device: use your machine LAN IP and allow TCP `23456` and UDP `12345` through the firewall.
 
-**Security Model**
-- **Client‑signed transactions:** Ed25519 signatures generated on device.
-- **Content hash anchoring:** SHA‑256 hash stored on chain.
-- **Replay protection:** `tx_id` uniqueness + timestamp windows.
-- **Permissioned miners:** optional allowlist of miner public keys.
-- **TLS sockets** for client ↔ server.
+The app tries broadcast discovery first. If that fails, it lets you enter the IP/port manually.
 
----
-
-**Ledger Storage**
-Each node maintains its **own ledger file**:
-```text
-blockchain/BLOCKCHAIN_DB/ledger_node_<port>.pickle
+You can also hardcode a default host/port at build time:
+```powershell
+flutter run --dart-define=AUREX_SERVER_HOST=10.0.2.2 --dart-define=AUREX_SERVER_PORT=23456
 ```
 
----
+### Google Drive upload
+Uploads require one of the following:
 
-**Run It**
+1. Service account (recommended)
+- Create a service account in Google Cloud and download the JSON key file.
+- Set `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` in `python_files/config.py` to that JSON path.
+- Create a Drive folder and set `GOOGLE_DRIVE_PARENT_FOLDER_ID` in `python_files/config.py`.
+- Share the folder with the service account email.
+
+2. Apps Script endpoint (legacy)
+- Set `GOOGLE_APPS_SCRIPT_URL` in `python_files/config.py`.
+- Leave `GOOGLE_DRIVE_PARENT_FOLDER_ID` and `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` empty.
+
+## Run
 1. Start nodes
 ```powershell
 cd c:\dev\aurex\blockchain
@@ -140,30 +87,16 @@ cd c:\dev\aurex
 flutter run
 ```
 
----
+## Upload And Purchase Walkthrough
+1. Launch the app and connect to the server (broadcast discovery or manual IP).
+2. Sign up two users: a seller and a buyer.
+3. Seller uploads an asset with a price.
+4. Buyer purchases the asset from the marketplace.
+5. Wait for the blockchain confirmation; the app will show a notification when the purchase is confirmed.
 
-**Configuration Notes**
-- `python_files/config.py` controls server ports and Google Drive setup.
-- `blockchain/config.py` controls node ports, difficulty, replay windows, allowlist.
-  
-Allowlist helper:
-```powershell
-cd c:\dev\aurex\blockchain
-python print_key_fingerprints.py
-```
-Copy the printed fingerprints into `blockchain/config.py` and set `ENFORCE_MINER_ALLOWLIST = True`.
+## Notes
+- Starting wallet balance is `100` by default. Change it in `python_files/config.py`.
+- TLS certs are loaded from `python_files/cert.pem` and `python_files/key.pem` by default.
 
----
-
-**Design Completeness (95% → 100%)**
-Recommended final polish:
-1. **Push notifications** via FCM/APNs (app‑closed delivery).
-2. **Key export/backup UI** with secure storage.
-3. **Chain viewer screen** for on‑device audit trail.
-4. **Fork handling strategy** (longest chain or cumulative difficulty).
-5. **Rate limiting** on gateway and server.
-
----
-
-**License**
+## License
 Private/internal project. All rights reserved.

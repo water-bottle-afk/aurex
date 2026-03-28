@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
@@ -22,13 +23,16 @@ import 'providers/settings_provider.dart';
 import 'providers/assets_provider.dart';
 import 'providers/my_assets_provider.dart';
 import 'services/notification_service.dart';
+import 'services/push_notification_service.dart';
 import 'utils/app_logger.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLogger.init();
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   await NotificationService.init();
   await NotificationService.requestPermissions();
+  await PushNotificationService.init();
 
   final clientProvider = ClientProvider();
   runApp(MyApp(initialClientProvider: clientProvider));
@@ -70,7 +74,19 @@ final _router = GoRouter(
     ),
     GoRoute(
       path: '/signup',
-      builder: (context, state) => const SignupScreen(),
+      builder: (context, state) {
+        final extra = state.extra;
+        String? prefillUsername;
+        String? prefillEmail;
+        if (extra is Map) {
+          prefillUsername = extra['username']?.toString();
+          prefillEmail = extra['email']?.toString();
+        }
+        return SignupScreen(
+          prefillUsername: prefillUsername,
+          prefillEmail: prefillEmail,
+        );
+      },
     ),
     GoRoute(
       path: '/forgot-password',

@@ -101,11 +101,15 @@ Supported Commands:
       Send: MARK_NOTIFICATIONS_READ|username
       Recv: OK|read or ERR|error_message
 
-  24. LIST_ITEM - List an owned asset for sale
+  24. REGISTER_DEVICE - Register push notification token
+      Send: REGISTER_DEVICE|username|platform|token
+      Recv: OK|registered or ERR|error_message
+
+  25. LIST_ITEM - List an owned asset for sale
       Send: LIST_ITEM|asset_id|username|price
       Recv: OK|LISTED or ERR|error_message
 
-  25. UNLIST_ITEM - Remove an asset from the marketplace
+  26. UNLIST_ITEM - Remove an asset from the marketplace
       Send: UNLIST_ITEM|asset_id|username
       Recv: OK|UNLISTED or ERR|error_message
 """
@@ -124,6 +128,9 @@ import struct
 import threading
 import time
 import uuid
+import urllib.error
+import urllib.request
+from importlib import util as importlib_util
 from dataclasses import dataclass, field
 from pathlib import Path
 from config import (
@@ -131,19 +138,17 @@ from config import (
     BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
     LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
     GATEWAY_HOST, GATEWAY_PORT,
+    GOOGLE_APPS_SCRIPT_URL,
     GOOGLE_DRIVE_PARENT_FOLDER_ID, GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
     GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL,
     GOOGLE_DRIVE_UPLOADS_FOLDER_NAME,
     UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
     TX_TIME_WINDOW_SECONDS,
+    FCM_ENABLED, FCM_SERVER_KEY,
 )
 from classes import PROTO, CustomLogger
 from DB_ORM import MarketplaceDB
 from google_drive_uploader import upload_file_to_drive
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'blockchain'))
-from classes import NotificationsManager
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 server_logger = CustomLogger("server", LOGGING_LEVEL).logger
@@ -184,6 +189,47 @@ def _sha256_file(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _resolve_path(path_value: str) -> str:
+    path_obj = Path(path_value)
+    if not path_obj.is_absolute():
+        path_obj = (Path(__file__).parent / path_obj).resolve()
+    return str(path_obj)
+
+
+def _detect_local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            local_ip = sock.getsockname()[0]
+            if local_ip:
+                return local_ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def _resolve_server_ip(config_ip: str, bind_host: str) -> str:
+    candidate = (config_ip or "").strip()
+    if candidate and candidate not in ("0.0.0.0", "127.0.0.1", "localhost"):
+        return candidate
+    if bind_host and bind_host not in ("0.0.0.0", "127.0.0.1", "localhost"):
+        return bind_host
+    return _detect_local_ip()
+
+
+def _load_blockchain_notifications_manager():
+    classes_path = (Path(__file__).parent.parent / "blockchain" / "classes.py").resolve()
+    spec = importlib_util.spec_from_file_location("blockchain_classes", classes_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load blockchain classes from {classes_path}")
+    module = importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.NotificationsManager
+
+
+NotificationsManager = _load_blockchain_notifications_manager()
 
 
 @dataclass
@@ -260,6 +306,7 @@ class ClientSession:
             "GET_WALLET": self.handle_get_wallet,
             "GET_NOTIFICATIONS": self.handle_get_notifications,
             "MARK_NOTIFICATIONS_READ": self.handle_mark_notifications_read,
+            "REGISTER_DEVICE": self.handle_register_device,
             "LIST_ITEM": self.handle_list_item,
             "UNLIST_ITEM": self.handle_unlist_item,
         }
@@ -326,13 +373,14 @@ class ClientSession:
         """
         if len(params) < 2:
             self.Print(" Invalid signup format", 40)
-            return "ERR10|Invalid signup format: SIGNUP|username|password"
+            return "ERR10|Invalid signup format: SIGNUP|username|password|email"
         
         username = params[0].strip()
         password = params[1].strip()
+        email = params[2].strip() if len(params) >= 3 else f"{username}@aurex.local"
         
         # Validate fields - no pipes or spaces
-        if '|' in username or '|' in password:
+        if '|' in username or '|' in password or '|' in email:
             self.Print(f" Invalid characters in signup fields", 40)
             return "ERR10|Fields cannot contain '|'"
         
@@ -356,7 +404,8 @@ class ClientSession:
             self.Print(f" Password too short", 40)
             return "ERR10|Password must be at least 6 characters"
         
-        email = f"{username}@aurex.local"
+        if not email or ' ' in email or '@' not in email:
+            return "ERR10|Invalid email format"
         success, message = self.db.add_user(username, password, email)
         if success:
             self.Print(f" User {username} signed up", 20)
@@ -405,7 +454,7 @@ class ClientSession:
         self.db.update_user(user_obj.username, user_obj)
         self.Print(f" Generated OTP {otp} for {email}", 20)
         self.Print(f" [DEV] OTP Code: {otp}", 30)
-        return "OK|otp_sent"
+        return f"OK|otp_sent|{otp}"
 
     def handle_verify_code(self, params):
         """Protocol Message: VERIFY_CODE - Verify OTP code
@@ -491,6 +540,8 @@ class ClientSession:
     def _cleanup_upload(self, upload_id: str) -> None:
         """Remove temp file and session data for a given upload."""
         session = self.upload_sessions.pop(upload_id, None)
+        with self.server.upload_sessions_lock:
+            self.server.upload_sessions.pop(upload_id, None)
         if not session:
             return
         try:
@@ -643,6 +694,8 @@ class ClientSession:
             mint_signature=mint_signature,
         )
         self.upload_sessions[upload_id] = session
+        with self.server.upload_sessions_lock:
+            self.server.upload_sessions[upload_id] = session
 
         return f"OK|{upload_id}|{UPLOAD_CHUNK_SIZE}"
 
@@ -660,7 +713,12 @@ class ClientSession:
         upload_id = params[0].strip()
         session = self.upload_sessions.get(upload_id)
         if not session:
-            return "ERR04|Upload session not found"
+            with self.server.upload_sessions_lock:
+                session = self.server.upload_sessions.get(upload_id)
+            if session and session.username == self.username:
+                self.upload_sessions[upload_id] = session
+            else:
+                return "ERR04|Upload session not found"
         if session.username != self.username:
             return "ERR02|Unauthorized"
 
@@ -718,7 +776,12 @@ class ClientSession:
         upload_id = params[0].strip()
         session = self.upload_sessions.get(upload_id)
         if not session:
-            return "ERR04|Upload session not found"
+            with self.server.upload_sessions_lock:
+                session = self.server.upload_sessions.get(upload_id)
+            if session and session.username == self.username:
+                self.upload_sessions[upload_id] = session
+            else:
+                return "ERR04|Upload session not found"
         if session.username != self.username:
             return "ERR02|Unauthorized"
         if session.total_chunks == 0 or session.received_chunks != session.total_chunks:
@@ -1227,7 +1290,11 @@ class ClientSession:
         try:
             items = self.notifications_manager.get_notifications(username, limit=limit)
             unread_count = self.notifications_manager.get_unread_count(username)
-            return f"OK|{json.dumps(items)}|{unread_count}"
+            payload = [
+                n.to_dict() if hasattr(n, "to_dict") else n
+                for n in items
+            ]
+            return f"OK|{json.dumps(payload)}|{unread_count}"
         except Exception as e:
             return f"ERR03|Error getting notifications: {str(e)}"
 
@@ -1251,6 +1318,36 @@ class ClientSession:
             return "OK|read"
         except Exception as e:
             return f"ERR03|Error marking notifications: {str(e)}"
+
+    def handle_register_device(self, params):
+        """
+        REGISTER_DEVICE - Register push notification token
+        Format: REGISTER_DEVICE|username|platform|token
+        Returns: OK|registered or ERR|error_message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 3:
+            return "ERR01|Invalid format: REGISTER_DEVICE|username|platform|token"
+
+        username = params[0].strip()
+        platform = params[1].strip().lower()
+        token = params[2].strip()
+
+        if not username or not token or '|' in username or '|' in token:
+            return "ERR01|Invalid parameters"
+        if username != self.username:
+            return "ERR02|Unauthorized"
+
+        if len(token) < 10:
+            return "ERR01|Invalid token"
+        if platform not in ("android", "ios", "web"):
+            platform = "unknown"
+
+        ok = self.db.upsert_device_token(username, token, platform)
+        if not ok:
+            return "ERR03|Failed to register device"
+        return "OK|registered"
 
     def handle_list_item(self, params):
         """
@@ -1328,7 +1425,7 @@ class Server:
     def __init__(self, host=SERVER_HOST, port=SERVER_PORT, logging_level=LOGGING_LEVEL):
         self.host = host
         self.port = port
-        self.server_ip = SERVER_IP  # Local network IP for broadcast response
+        self.server_ip = _resolve_server_ip(SERVER_IP, host)  # Broadcast response IP
         self.logging_level = logging_level
         self.logger = CustomLogger("Server", logging_level)
         self.Print = self.logger.Print
@@ -1339,6 +1436,8 @@ class Server:
         self.is_running = False
         self.db = MarketplaceDB()
         self.notifications_manager = NotificationsManager()
+        self.upload_sessions = {}
+        self.upload_sessions_lock = threading.Lock()
 
         # Purchase -> gateway queue + status tracking
         self.tx_queue = queue.Queue()
@@ -1418,12 +1517,84 @@ class Server:
             tx_id=tx_id,
         )
         if notif:
+            payload_notif = notif.to_dict() if hasattr(notif, "to_dict") else notif
             payload = {
                 'event': 'notification',
-                'payload': notif,
+                'payload': payload_notif,
             }
             self.send_event_to_user(username, payload)
+            if FCM_ENABLED and FCM_SERVER_KEY:
+                threading.Thread(
+                    target=self._send_push_notification,
+                    args=(username, title, body, notif_type, asset_id, tx_id),
+                    daemon=True,
+                ).start()
         return notif
+
+    def _send_push_notification(self, username, title, body, notif_type, asset_id=None, tx_id=None):
+        """Send push notification via FCM to all devices for a user."""
+        try:
+            tokens = self.db.get_device_tokens(username)
+            if not tokens:
+                return
+            payload = {
+                "registration_ids": tokens,
+                "priority": "high",
+                "notification": {
+                    "title": title,
+                    "body": body,
+                },
+                "data": {
+                    "type": notif_type or "system",
+                    "title": title,
+                    "body": body,
+                    "asset_id": asset_id or "",
+                    "tx_id": tx_id or "",
+                },
+            }
+            resp = self._post_fcm(payload)
+            if not resp or not isinstance(resp, dict):
+                return
+            results = resp.get("results") or []
+            invalid = []
+            for token, result in zip(tokens, results):
+                error = result.get("error")
+                if error in ("NotRegistered", "InvalidRegistration", "MismatchSenderId"):
+                    invalid.append(token)
+            for token in invalid:
+                self.db.delete_device_token(token)
+        except Exception as e:
+            server_logger.warning("push send failed: %s", e)
+
+    def _post_fcm(self, payload):
+        """Send raw payload to FCM legacy HTTP API."""
+        if not FCM_SERVER_KEY:
+            return None
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                "https://fcm.googleapis.com/fcm/send",
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"key={FCM_SERVER_KEY}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode("utf-8")
+            if not body:
+                return {}
+            return json.loads(body)
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8")
+                server_logger.warning("FCM HTTP error %s: %s", e.code, err_body)
+            except Exception:
+                server_logger.warning("FCM HTTP error %s", e.code)
+            return None
+        except Exception as e:
+            server_logger.warning("FCM send error: %s", e)
+            return None
 
     def _emit_tx_notifications(self, tx_id, info):
         tx_type = info.get('tx_type', 'purchase')
@@ -1510,9 +1681,9 @@ class Server:
                 broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 broadcast_sock.settimeout(1.0)  # 1 second timeout to allow checking is_running
-                broadcast_sock.bind(('0.0.0.0', 12345))
+                broadcast_sock.bind(('0.0.0.0', BROADCAST_PORT))
                 
-                self.Print(" Broadcast listener started on port 12345", 20)
+                self.Print(f" Broadcast listener started on port {BROADCAST_PORT}", 20)
                 
                 while self.is_running:
                     try:
@@ -1520,16 +1691,7 @@ class Server:
                         message = data.decode('utf-8').strip()
                         
                         if message == "WHRSRV":
-                            # Get the local IP address (not 0.0.0.0)
-                            try:
-                                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                                s.connect(("8.8.8.8", 53))  # Use DNS port instead of HTTP
-                                local_ip = s.getsockname()[0]
-                                s.close()
-                            except:
-                                local_ip = self.server_ip  # Fallback to configured IP
-                            
-                            response = f"SRVRSP|{local_ip}|{self.port}"
+                            response = f"SRVRSP|{self.server_ip}|{self.port}"
                             broadcast_sock.sendto(response.encode('utf-8'), addr)
                             self.Print(f" Broadcast response sent to {addr}: {response}", 10)
                     except socket.timeout:
@@ -1838,10 +2000,9 @@ class Server:
             
             # Create SSL context
             context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(
-                certfile='cert.pem',
-                keyfile='key.pem'
-            )
+            cert_path = _resolve_path(SSL_CERT_FILE)
+            key_path = _resolve_path(SSL_KEY_FILE)
+            context.load_cert_chain(certfile=cert_path, keyfile=key_path)
             
             # Create socket
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1974,12 +2135,10 @@ class Server:
 
 # Entry point
 if __name__ == "__main__":
-    logging_level = 10  # DEBUG
-    
     server = Server(
-        host='0.0.0.0',
-        port=23456,
-        logging_level=logging_level
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+        logging_level=LOGGING_LEVEL,
     )
     
     server.start()

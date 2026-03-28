@@ -80,7 +80,7 @@ def hashing_process(data, difficulty, stop_event, result_queue):
 class PoWNode:
     """
     Proof of Work Node: listener (main thread) + mining (multiprocessing).
-    Each node has its own ledger pickle in blockchain/BLOCKCHAIN_DB.
+    Each node has its own ledger JSON in blockchain/BLOCKCHAIN_DB.
     """
 
     def __init__(self, host='0.0.0.0', port=11111, difficulty=2):
@@ -95,11 +95,11 @@ class PoWNode:
         self.mempool = []
         self.mempool_lock = threading.Lock()
 
-        # Ledger (per-node pickle)
+        # Ledger (per-node JSON)
         ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB"
         ledger_dir.mkdir(exist_ok=True)
-        ledger_path = ledger_dir / f"ledger_node_{self.port}.pickle"
-        self.ledger = Ledger(pickle_path=str(ledger_path))
+        ledger_path = ledger_dir / f"ledger_node_{self.port}.json"
+        self.ledger = Ledger(ledger_path=str(ledger_path))
         self.seen_tx_ids = set()
         for block in self.ledger.blocks:
             for tx in getattr(block, 'transactions', []):

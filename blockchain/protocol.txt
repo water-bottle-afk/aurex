@@ -50,7 +50,7 @@ Each node must:
   1. PoW: current_hash.startswith('0' * difficulty)
   2. Signature: NodeKeyManager.verify_signature(public_key_pem, current_hash, signature)
   3. Chain: block index == last_block_index + 1 and prev_hash == last_block_hash
-If all pass: write block and transactions to local per-node ledger pickle, update last_block_*, set stop_mining_event.
+If all pass: write block and transactions to local per-node ledger JSON, update last_block_*, set stop_mining_event.
 
 ================================================================================
 4. GATEWAY SERVER (socket, not Flask)
@@ -82,11 +82,11 @@ When RPC receives block_confirmation, it opens a TCP connection to SERVER_NOTIFY
 Then closes. The server logs and can update internal state (e.g. mark transaction confirmed).
 
 ================================================================================
-6. LEDGER (per-node pickle)
+6. LEDGER (per-node JSON)
 ================================================================================
 
 Per-node ledger files:
-  blockchain/BLOCKCHAIN_DB/ledger_node_<port>.pickle
+  blockchain/BLOCKCHAIN_DB/ledger_node_<port>.json
 
 Each block stores transactions with sender, data, signature, public_key, timestamps.
 

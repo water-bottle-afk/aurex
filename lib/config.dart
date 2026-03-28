@@ -1,14 +1,14 @@
 /// Aurex Client Configuration
 /// Update these settings to match your server configuration
-library;
-
 class ClientConfig {
   // Server Connection
-  static const String defaultServerHost = '10.100.102.58';
-  static const int defaultServerPort = 23456;
+  static const String defaultServerHost =
+      String.fromEnvironment('AUREX_SERVER_HOST', defaultValue: '127.0.0.1');
+  static const int defaultServerPort =
+      int.fromEnvironment('AUREX_SERVER_PORT', defaultValue: 23456);
   
   // Broadcast Discovery
-  static const int broadcastPort = 23456;
+  static const int broadcastPort = 12345;
   static const Duration broadcastTimeout = Duration(seconds: 5);
   
   // Connection Timeouts

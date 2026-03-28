@@ -3,10 +3,13 @@ Aurex Server Configuration
 Update these settings when you change physical locations or network configuration
 """
 
+import os
+
 # Server Configuration
-SERVER_HOST = '0.0.0.0'  # Listen on all interfaces
-SERVER_PORT = 23456      # Main TLS connection port
-SERVER_IP = '192.168.1.61'  # Local network IP (update this when you change location)
+SERVER_HOST = os.getenv("AUREX_SERVER_HOST", "0.0.0.0")  # Bind address
+SERVER_PORT = int(os.getenv("AUREX_SERVER_PORT", "23456"))  # Main TLS connection port
+# Broadcast response IP for discovery. Leave empty to auto-detect at runtime.
+SERVER_IP = os.getenv("AUREX_SERVER_IP", "")
 # Block confirmation listener (RPC server sends block_confirmation here)
 BLOCK_CONFIRMATION_PORT = 23457
 
@@ -48,10 +51,16 @@ UPLOAD_CHUNK_SIZE = 32768  # 32 KB raw bytes per chunk (safe for 2-byte length +
 # Transaction security
 TX_TIME_WINDOW_SECONDS = 600
 
+# Push notifications (FCM)
+# Set FCM_ENABLED=True and provide FCM_SERVER_KEY to enable push delivery.
+FCM_ENABLED = False
+FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
+
 # Logging
 LOGGING_LEVEL = 10  # 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL
 
-print(" Config loaded: Server running on {server_ip}:{server_port}".format(
-    server_ip=SERVER_IP,
-    server_port=SERVER_PORT
+print(" Config loaded: Server running on {server_host}:{server_port} (broadcast ip: {server_ip})".format(
+    server_host=SERVER_HOST,
+    server_port=SERVER_PORT,
+    server_ip=SERVER_IP or "auto",
 ))

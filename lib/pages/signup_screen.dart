@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'package:provider/provider.dart';
-import '../providers/user_provider.dart';
-import '../providers/client_provider.dart';
 
 class SignupScreen extends StatefulWidget {
-  const SignupScreen({super.key});
+  final String? prefillUsername;
+  final String? prefillEmail;
+
+  const SignupScreen({
+    super.key,
+    this.prefillUsername,
+    this.prefillEmail,
+  });
 
   @override
   State<SignupScreen> createState() => _SignupScreenState();
@@ -15,10 +19,21 @@ class SignupScreen extends StatefulWidget {
 class _SignupScreenState extends State<SignupScreen> {
   bool _isLoading = false;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
+  late final TextEditingController _usernameController;
+  late final TextEditingController _emailController;
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _usernameController = TextEditingController(
+      text: widget.prefillUsername ?? '',
+    );
+    _emailController = TextEditingController(
+      text: widget.prefillEmail ?? '',
+    );
+  }
 
   Future<void> _signUpWithEmail() async {
     if (!mounted) return;
@@ -56,6 +71,7 @@ class _SignupScreenState extends State<SignupScreen> {
       final result = await clientProvider.client.signUp(
         username: username,
         password: password,
+        email: email,
       );
 
       if (result == "success") {
@@ -88,7 +104,7 @@ class _SignupScreenState extends State<SignupScreen> {
     }
   }
 
-  /// Google sign-up: get email/name, look up user by email on server; if exists, sign in; else set local and go (no server account created for Google-only).
+  /// Google sign-up: get email/name, then prefill fields for manual signup.
   Future<void> _signUpWithGoogle() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
@@ -102,37 +118,21 @@ class _SignupScreenState extends State<SignupScreen> {
       }
 
       final googleEmail = googleUser.email;
-      final displayName = googleUser.displayName ?? googleEmail.split('@')[0];
-
-
+      final displayName =
+          googleUser.displayName ?? googleEmail.split('@')[0];
       if (googleEmail.isEmpty) {
         setState(() => _isLoading = false);
         return;
       }
 
-      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
-      await clientProvider.initializeConnection();
-
-      final username = await clientProvider.client.getUserByEmail(googleEmail);
-      if (username != null && mounted) {
-        Provider.of<UserProvider>(context, listen: false).setLocalUser(
-          username: username,
-          email: googleEmail,
-        );
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Welcome, $displayName!')),
-        );
-        context.go('/marketplace');
-      } else if (mounted) {
-        Provider.of<UserProvider>(context, listen: false).setLocalUser(
-          username: displayName,
-          email: googleEmail,
-        );
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Welcome, $displayName!')),
-        );
-        context.go('/marketplace');
-      }
+      if (!mounted) return;
+      _usernameController.text = displayName.replaceAll(' ', '_');
+      _emailController.text = googleEmail;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Google details loaded. Please set a password to sign up.'),
+        ),
+      );
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
