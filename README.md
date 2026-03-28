@@ -78,7 +78,7 @@ python gateway_server.py
 3. Start marketplace server
 ```powershell
 cd c:\dev\aurex
-python python_files\server_moudle.py
+python python_files\server_module.py
 ```
 
 4. Run Flutter app

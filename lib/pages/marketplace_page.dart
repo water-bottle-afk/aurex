@@ -6,7 +6,7 @@ import '../providers/client_provider.dart';
 import '../providers/assets_provider.dart';
 import '../providers/notifications_provider.dart';
 import '../providers/user_provider.dart';
-import '../services/google_drive_image_loader.dart';
+import '../widgets/item_image.dart';
 import '../utils/app_logger.dart';
 
 class MarketplacePage extends StatefulWidget {
@@ -19,25 +19,38 @@ class MarketplacePage extends StatefulWidget {
 class _MarketplacePageState extends State<MarketplacePage> {
   final GoogleSignIn _googleSignIn = GoogleSignIn();
   late ScrollController _scrollController;
-  double? _walletBalance;
-  bool _walletLoading = false;
-  String? _walletError;
+  String? _lastKnownUsername;
 
   @override
   void initState() {
     super.initState();
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
+    _lastKnownUsername = context.read<UserProvider>().localUser?.username;
     context.read<UserProvider>().addListener(_onUserChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      final clientProvider = context.read<ClientProvider>();
+
+      // Fire wallet + notification refresh once authentication is confirmed.
+      clientProvider.client.onAuthenticated = (username) {
+        if (!mounted) return;
+        _loadWalletBalance();
+        context.read<NotificationsProvider>().refresh();
+      };
+
+      // Assets don't need auth — load immediately.
       final assetsProvider = context.read<AssetsProvider>();
       if (assetsProvider.assets.isEmpty) {
         assetsProvider.refreshAssets();
       }
-      _loadWalletBalance();
-      context.read<NotificationsProvider>().refresh();
+
+      // If already authenticated from a previous session, load wallet now.
+      if (clientProvider.client.isAuthenticated) {
+        _loadWalletBalance();
+        context.read<NotificationsProvider>().refresh();
+      }
     });
   }
 
@@ -46,26 +59,22 @@ class _MarketplacePageState extends State<MarketplacePage> {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     context.read<UserProvider>().removeListener(_onUserChanged);
+    context.read<ClientProvider>().client.onAuthenticated = null;
     super.dispose();
   }
 
   void _onUserChanged() {
     final userProvider = context.read<UserProvider>();
     final username = userProvider.localUser?.username;
+    // Only react to actual identity changes, not wallet-state notifications.
+    if (username == _lastKnownUsername) return;
+    _lastKnownUsername = username;
     if (username != null && username.isNotEmpty) {
       context.read<AssetsProvider>().refreshAssets();
       context.read<NotificationsProvider>().refresh();
-      if (_walletBalance == null && !_walletLoading) {
-        _loadWalletBalance();
-      }
-      return;
+      _loadWalletBalance();
     }
-    if (_walletBalance != null || _walletError != null) {
-      setState(() {
-        _walletBalance = null;
-        _walletError = null;
-      });
-    }
+    // Logout: clearUserData() already calls clearWallet() internally.
   }
 
   /// Detect when user scrolls near the bottom and load more assets
@@ -103,21 +112,15 @@ class _MarketplacePageState extends State<MarketplacePage> {
   }
 
   Future<void> _loadWalletBalance({bool force = false}) async {
-    if (_walletLoading && !force) return;
+    final userProvider = context.read<UserProvider>();
+    if (userProvider.walletLoading && !force) return;
 
-    setState(() {
-      _walletLoading = true;
-      _walletError = null;
-    });
+    userProvider.setWalletLoading(true);
 
     try {
-      final userProvider = context.read<UserProvider>();
       final username = userProvider.localUser?.username;
       if (username == null || username.isEmpty) {
-        setState(() {
-          _walletError = 'Not signed in';
-          _walletLoading = false;
-        });
+        userProvider.setWalletError('Not signed in');
         return;
       }
 
@@ -126,12 +129,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
         await clientProvider.initializeConnection();
       }
       if (!clientProvider.client.isAuthenticated) {
-        if (mounted) {
-          setState(() {
-            _walletError = 'Not signed in';
-            _walletLoading = false;
-          });
-        }
+        userProvider.setWalletError('Not signed in');
         return;
       }
 
@@ -139,28 +137,23 @@ class _MarketplacePageState extends State<MarketplacePage> {
       if (!mounted) return;
 
       if (wallet == null) {
-        setState(() {
-          _walletError = 'Balance unavailable';
-          _walletLoading = false;
-        });
+        userProvider.setWalletError('Balance unavailable');
         return;
       }
 
-      setState(() {
-        _walletBalance = (wallet['balance'] as double?) ?? 0.0;
-        _walletLoading = false;
-      });
+      userProvider.setWalletBalance(
+        (wallet['balance'] as double?) ?? 0.0,
+        updatedAt: wallet['updated_at'] as String?,
+      );
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _walletError = 'Balance unavailable';
-        _walletLoading = false;
-      });
+      userProvider.setWalletError('Balance unavailable');
     }
   }
 
   Widget _buildBalanceChip() {
-    if (_walletLoading) {
+    final userProvider = context.read<UserProvider>();
+    if (userProvider.walletLoading) {
       return const SizedBox(
         width: 20,
         height: 20,
@@ -168,15 +161,15 @@ class _MarketplacePageState extends State<MarketplacePage> {
       );
     }
 
-    if (_walletError != null) {
+    if (userProvider.walletError != null) {
       return Text(
-        _walletError!,
+        userProvider.walletError!,
         style: const TextStyle(fontSize: 12, color: Colors.white70),
       );
     }
 
-    final balanceText = _walletBalance != null
-        ? _walletBalance!.toStringAsFixed(2)
+    final balanceText = userProvider.walletBalance != null
+        ? userProvider.walletBalance!.toStringAsFixed(2)
         : '--';
 
     return Row(
@@ -360,6 +353,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
       ),
       body: Consumer<AssetsProvider>(
         builder: (context, assetsProvider, child) {
+          debugPrint('DEBUG: Rendering ${assetsProvider.assets.length} items to Grid');
           // Error state
           if (assetsProvider.error != null && assetsProvider.assets.isEmpty) {
             return Center(
@@ -446,11 +440,7 @@ class _MarketplacePageState extends State<MarketplacePage> {
                         Expanded(
                           child: Container(
                             color: Colors.grey[200],
-                            child: GoogleDriveImageLoader.buildCachedImage(
-                              imageUrl: item.imageUrl,
-                              fit: BoxFit.cover,
-                              width: double.infinity,
-                            ),
+                            child: ItemImage(relPath: item.imageUrl, fit: BoxFit.cover, width: double.infinity),
                           ),
                         ),
                         Padding(

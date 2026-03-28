@@ -5,7 +5,7 @@ import '../models/item_offering.dart';
 import '../providers/client_provider.dart';
 import '../providers/my_assets_provider.dart';
 import '../providers/user_provider.dart';
-import '../services/google_drive_image_loader.dart';
+import '../widgets/item_image.dart';
 
 class MyAssetsPage extends StatefulWidget {
   const MyAssetsPage({super.key});
@@ -281,11 +281,7 @@ class _MyAssetsPageState extends State<MyAssetsPage> {
                         Expanded(
                           child: Container(
                             color: Colors.grey[200],
-                            child: GoogleDriveImageLoader.buildCachedImage(
-                              imageUrl: item.imageUrl,
-                              fit: BoxFit.cover,
-                              width: double.infinity,
-                            ),
+                            child: ItemImage(relPath: item.imageUrl, fit: BoxFit.cover, width: double.infinity),
                           ),
                         ),
                         Padding(

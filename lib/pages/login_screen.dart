@@ -16,7 +16,6 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
   final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
 
@@ -53,10 +52,9 @@ class _LoginScreenState extends State<LoginScreen> {
       final result = await clientProvider.client.login(username, password);
 
       if (result != null) {
-        final emailHint = _emailController.text.trim();
         Provider.of<UserProvider>(context, listen: false).setLocalUser(
           username: result,
-          email: emailHint,
+          email: '',
         );
 
         if (mounted) {
@@ -83,7 +81,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  /// Google: only prefills email and username; user must enter password and tap Login.
+  /// Google: authenticate via Google, then auto-login with LOGIN_GOOGLE|email.
   Future<void> _signInWithGoogle() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
@@ -102,28 +100,44 @@ class _LoginScreenState extends State<LoginScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Could not get email from Google')),
           );
+          setState(() => _isLoading = false);
         }
-        setState(() => _isLoading = false);
         return;
       }
 
-      final suggestedUsername = googleUser.displayName?.trim().isNotEmpty == true
-          ? googleUser.displayName!.trim()
-          : googleEmail.split('@').first;
+      if (!mounted) return;
+
+      final clientProvider = Provider.of<ClientProvider>(context, listen: false);
+      if (!clientProvider.isConnected) {
+        final connected = await clientProvider.initializeConnection();
+        if (!connected) {
+          throw Exception('Server connection failed');
+        }
+      }
+
+      final result = await clientProvider.client.loginWithGoogle(googleEmail);
 
       if (!mounted) return;
-      setState(() {
-        _emailController.text = googleEmail;
-        _usernameController.text = suggestedUsername;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Email and username filled from Google. '
-            'If your Aurex username differs, edit it, enter your password, then tap Login.',
+
+      if (result != null) {
+        Provider.of<UserProvider>(context, listen: false).setLocalUser(
+          username: result,
+          email: googleEmail,
+        );
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Welcome, $result!')),
+        );
+        context.go('/marketplace');
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No Aurex account found for this Google email. '
+              'Please sign up first.',
+            ),
           ),
-        ),
-      );
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -140,7 +154,6 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void dispose() {
     _usernameController.dispose();
-    _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -184,19 +197,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       controller: _usernameController,
                       decoration: InputDecoration(
                         hintText: 'Username',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: Colors.grey[300]!),
-                        ),
-                        contentPadding: const EdgeInsets.all(16),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _emailController,
-                      keyboardType: TextInputType.emailAddress,
-                      decoration: InputDecoration(
-                        hintText: 'Email (optional — filled by Google)',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide: BorderSide(color: Colors.grey[300]!),

@@ -122,11 +122,13 @@ import logging
 import os
 import queue
 import random
+import re
 import socket
 import ssl as ssl_module
 import struct
 import threading
 import time
+import shutil
 import uuid
 import urllib.error
 import urllib.request
@@ -138,20 +140,53 @@ from config import (
     BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
     LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
     GATEWAY_HOST, GATEWAY_PORT,
-    GOOGLE_APPS_SCRIPT_URL,
-    GOOGLE_DRIVE_PARENT_FOLDER_ID, GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
-    GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL,
-    GOOGLE_DRIVE_UPLOADS_FOLDER_NAME,
+    UPLOADS_DIR,
     UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
     TX_TIME_WINDOW_SECONDS,
     FCM_ENABLED, FCM_SERVER_KEY,
 )
 from classes import PROTO, CustomLogger
 from DB_ORM import MarketplaceDB
-from google_drive_uploader import upload_file_to_drive
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+_UPLOADS_DIR_PATH = (Path(__file__).parent / UPLOADS_DIR).resolve()
+_UPLOADS_DIR_PATH.mkdir(parents=True, exist_ok=True)
+
 server_logger = CustomLogger("server", LOGGING_LEVEL).logger
+
+
+def _read_image_bytes(filename: str, max_width: int = 400) -> bytes | None:
+    path = _resolve_upload_file(filename)
+    if path is None:
+        return None
+    try:
+        return path.read_bytes()
+    except Exception:
+        return None
+
+
+def _resolve_upload_file(filename: str) -> Path | None:
+    rel_name = (filename or "").strip().replace("\\", "/")
+    if not rel_name:
+        return None
+    rel_path = Path(rel_name)
+    if rel_path.is_absolute() or any(part in ("", ".", "..") for part in rel_path.parts):
+        return None
+    try:
+        resolved = (_UPLOADS_DIR_PATH / rel_path).resolve()
+        resolved.relative_to(_UPLOADS_DIR_PATH)
+    except Exception:
+        return None
+    return resolved
+
+
+def _safe_asset_filename(name: str, extension: str, fallback: str = "asset") -> str:
+    raw_name = Path(name or "").stem if name else ""
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("._")
+    if not safe_stem:
+        safe_stem = fallback
+    normalized_ext = (extension or "").strip().lower().lstrip(".")
+    return f"{safe_stem}.{normalized_ext}" if normalized_ext else safe_stem
 
 
 def _canonical_tx_message(sender, data):
@@ -176,7 +211,7 @@ def _is_timestamp_valid(ts_str):
     try:
         ts_str = ts_str.replace('Z', '+00:00')
         ts = datetime.datetime.fromisoformat(ts_str)
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         delta = abs((now - ts.replace(tzinfo=None)).total_seconds())
         return delta <= TX_TIME_WINDOW_SECONDS
     except Exception:
@@ -274,7 +309,8 @@ class ClientSession:
         self.is_authenticated = False
         self.is_connected = True
         self.db = MarketplaceDB()  # ORM: DB/marketplace.db (users + marketplace_items)
-        self.upload_sessions = {}
+        self.notifications_manager = server.notifications_manager
+        self.create_and_push_notification = server.create_and_push_notification
 
         # Ensure upload temp directory exists
         self.upload_tmp_dir = Path(UPLOAD_TMP_DIR)
@@ -285,6 +321,7 @@ class ClientSession:
         self.handlers = {
             "START": self.handle_start,
             "LOGIN": self.handle_login,
+            "LOGIN_GOOGLE": self.handle_login_google,
             "SIGNUP": self.handle_signup,
             "GET_USER_BY_EMAIL": self.handle_get_user_by_email,
             "SEND_CODE": self.handle_send_code,
@@ -293,9 +330,9 @@ class ClientSession:
             "LOGOUT": self.handle_logout,
             "UPLOAD": self.handle_log_asset,
             "UPLOAD_INIT": self.handle_upload_init,
-            "UPLOAD_CHUNK": self.handle_upload_chunk,
             "UPLOAD_FINISH": self.handle_upload_finish,
             "UPLOAD_ABORT": self.handle_upload_abort,
+            "GET_ASSET_BINARY": self.handle_get_asset_binary,
             "GET_ITEMS": self.handle_asset_list,
             "GET_ITEMS_PAGINATED": self.handle_get_items_paginated,
             "BUY": self.handle_buy_asset,
@@ -314,18 +351,9 @@ class ClientSession:
     def process_message(self, message):
         """Parse and handle incoming message"""
         try:
-            # UPLOAD_CHUNK payloads are base64; use a bounded split so accidental '|'
-            # in metadata never splits the binary payload (defense in depth).
-            if message.startswith("UPLOAD_CHUNK|"):
-                parts = message.split("|", 4)
-                if len(parts) < 5:
-                    return "ERR01|Invalid format: UPLOAD_CHUNK|upload_id|seq|total|data"
-                command = parts[0].strip()
-                tail = parts[1:]
-            else:
-                parts = message.split('|')
-                command = parts[0].strip()
-                tail = parts[1:]
+            parts = message.split('|')
+            command = parts[0].strip()
+            tail = parts[1:]
             
             if command not in self.handlers:
                 self.Print(f" Unknown command: {command}", 40)
@@ -423,6 +451,26 @@ class ClientSession:
         self.Print(f" Signup failed: {message}", 40)
         return f"ERR10|{message}"
 
+    def handle_login_google(self, params):
+        """LOGIN_GOOGLE - Authenticate via Google-verified email (no password required).
+        Format: LOGIN_GOOGLE|email
+        Returns: OK|username or ERR|error_message
+        """
+        if len(params) < 1:
+            return "ERR01|Invalid format: LOGIN_GOOGLE|email"
+        email = params[0].strip()
+        if not email or '|' in email or ' ' in email:
+            return "ERR01|Invalid email format"
+        user_obj = self.db.get_user_by_email(email)
+        if not user_obj:
+            self.Print(f" LOGIN_GOOGLE: no account for {email}", 40)
+            return "ERR02|No account found for this email. Please sign up first."
+        self.username = user_obj.username
+        self.is_authenticated = True
+        self.server.register_authenticated_session(self)
+        self.Print(f" LOGIN_GOOGLE: {user_obj.username} authenticated via Google", 20)
+        return f"OK|{user_obj.username}"
+
     def handle_get_user_by_email(self, params):
         """GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in).
         Format: GET_USER_BY_EMAIL|email
@@ -458,12 +506,21 @@ class ClientSession:
         if not user_obj:
             self.Print(f" Email {email} not registered", 40)
             return "ERR04|Email not found in system"
+        now = datetime.datetime.now()
+        if user_obj.verification_code and user_obj.reset_time:
+            try:
+                expiry = datetime.datetime.fromisoformat(user_obj.reset_time)
+                if now < expiry:
+                    self.Print(f" Reusing existing reset code for {email}", 20)
+                    return f"OK|otp_sent|{user_obj.verification_code}"
+            except Exception:
+                pass
         otp = str(random.randint(100000, 999999))
         user_obj.set_verification_code(otp)
         user_obj.set_reset_time((datetime.datetime.now() + datetime.timedelta(minutes=5)).isoformat())
         self.db.update_user(user_obj.username, user_obj)
-        self.Print(f" Generated OTP {otp} for {email}", 20)
-        self.Print(f" [DEV] OTP Code: {otp}", 30)
+        self.Print(f" Generated reset code for {email}", 20)
+        self.Print(f" [DEV] Reset Code: {otp}", 30)
         return f"OK|otp_sent|{otp}"
 
     def handle_verify_code(self, params):
@@ -549,9 +606,8 @@ class ClientSession:
 
     def _cleanup_upload(self, upload_id: str) -> None:
         """Remove temp file and session data for a given upload."""
-        session = self.upload_sessions.pop(upload_id, None)
         with self.server.upload_sessions_lock:
-            self.server.upload_sessions.pop(upload_id, None)
+            session = self.server.upload_sessions.pop(upload_id, None)
         if not session:
             return
         try:
@@ -666,8 +722,6 @@ class ClientSession:
         with self.server.tx_status_lock:
             if mint_tx_id in self.server.tx_status:
                 return "ERR02|Duplicate mint tx_id"
-        if not self.db.set_user_public_key(username, public_key):
-            return "ERR02|Public key mismatch"
         mint_payload = {
             "action": "asset_mint",
             "tx_id": mint_tx_id,
@@ -683,6 +737,8 @@ class ClientSession:
             mint_signature,
         ):
             return "ERR02|Invalid mint signature"
+        if not self.db.set_user_public_key(username, public_key, force_update=True):
+            return "ERR02|Failed to store public key"
 
         upload_id = uuid.uuid4().hex
         temp_path = str(self.upload_tmp_dir / f"upload_{upload_id}.bin")
@@ -709,85 +765,70 @@ class ClientSession:
             public_key=public_key,
             mint_signature=mint_signature,
         )
-        self.upload_sessions[upload_id] = session
         with self.server.upload_sessions_lock:
             self.server.upload_sessions[upload_id] = session
 
         return f"OK|{upload_id}|{UPLOAD_CHUNK_SIZE}"
 
-    def handle_upload_chunk(self, params):
+    def _handle_binary_chunk_inline(self, upload_id: str, seq: int, chunk_bytes: bytes) -> str:
         """
-        Protocol: UPLOAD_CHUNK - Send a file chunk.
-        Format: UPLOAD_CHUNK|upload_id|seq|total|base64(chunk)
-        Response: OK|seq or ERR|message
+        Internal handler for raw binary upload chunks.
+        Called directly from handle_client when a framed message starts with b"UPLOAD_CHUNK|".
+        Format (payload bytes): b"UPLOAD_CHUNK|" + upload_id + b"|" + 4-byte-seq-big-endian + raw-data
         """
         if not self.is_authenticated:
             return "ERR02|Not authenticated"
-        if len(params) < 4:
-            return "ERR01|Invalid format: UPLOAD_CHUNK|upload_id|seq|total|data"
-
-        upload_id = params[0].strip()
-        session = self.upload_sessions.get(upload_id)
+        if not upload_id or upload_id == "[]":
+            return "ERR|INVALID_ID"
+        with self.server.upload_sessions_lock:
+            session = self.server.upload_sessions.get(upload_id)
         if not session:
-            with self.server.upload_sessions_lock:
-                session = self.server.upload_sessions.get(upload_id)
-            if session and session.username == self.username:
-                self.upload_sessions[upload_id] = session
-            else:
-                return "ERR04|Upload session not found"
+            self.Print(f" ERR04: upload_id={upload_id!r} not found", 40)
+            return "ERR|INVALID_ID"
         if session.username != self.username:
             return "ERR02|Unauthorized"
-
-        try:
-            seq = int(params[1])
-            total = int(params[2])
-        except Exception:
-            return "ERR01|Invalid chunk metadata"
-
-        if total <= 0 or seq < 0:
-            return "ERR01|Invalid chunk indices"
-        if session.total_chunks and session.total_chunks != total:
-            return "ERR01|Total chunk mismatch"
-        session.total_chunks = total
-
-        expected_parts = (session.file_size + UPLOAD_CHUNK_SIZE - 1) // UPLOAD_CHUNK_SIZE
-        if expected_parts != total:
-            self._cleanup_upload(upload_id)
-            return f"ERR01|Chunk count mismatch (client {total} vs expected {expected_parts} for size {session.file_size})"
-
         if seq != session.next_seq:
-            return f"ERR05|Out of order chunk (expected {session.next_seq})"
-
-        try:
-            chunk_bytes = base64.b64decode(params[3].encode("utf-8"))
-        except Exception:
-            return "ERR01|Invalid chunk encoding"
-
+            return f"ERR05|Out of order chunk (expected {session.next_seq}, got {seq})"
         if seq == 0 and not self._validate_file_signature(session.file_type, chunk_bytes):
             self._cleanup_upload(upload_id)
             return "ERR06|Invalid file signature"
-
         session.bytes_received += len(chunk_bytes)
         if session.bytes_received > session.file_size:
             self._cleanup_upload(upload_id)
-            return "ERR06|File size mismatch"
-
+            return "ERR06|File size exceeded"
         try:
-            with open(session.temp_path, "ab") as handle:
-                handle.write(chunk_bytes)
+            with open(session.temp_path, "ab") as fh:
+                fh.write(chunk_bytes)
+                fh.flush()
         except Exception as e:
             self._cleanup_upload(upload_id)
-            return f"ERR99|Failed to write chunk: {e}"
-
+            return f"ERR99|Write failed: {e}"
         session.received_chunks += 1
         session.next_seq += 1
         return f"OK|{seq}"
 
+    def handle_get_asset_binary(self, params):
+        """
+        GET_ASSET_BINARY - Binary stream download of a stored asset image.
+        Format: GET_ASSET_BINARY|username/filename.jpg
+        Response: ASSET_START|size (text frame), then one raw binary frame of JPEG bytes.
+        Returns None so handle_client skips the default send.
+        """
+        if not params or not params[0].strip():
+            return "ERR01|Invalid format: GET_ASSET|relative/path.jpg"
+        rel_path = params[0].strip()
+        data = _read_image_bytes(rel_path)
+        if data is None:
+            return "ERR05|Asset not found or unreadable"
+        self.proto.send_one_message(f"ASSET_START|{len(data)}".encode())
+        self.proto.send_one_message(data)
+        return None  # handle_client must not send an additional response
+
     def handle_upload_finish(self, params):
         """
-        Protocol: UPLOAD_FINISH - Finalize upload, push to Drive, register asset.
+        Protocol: UPLOAD_FINISH - Finalize upload, move to user storage, register asset.
         Format: UPLOAD_FINISH|upload_id
-        Response: OK|asset_name|url or ERR|message
+        Response: OK|asset_name|relative_path or ERR|message
         """
         if not self.is_authenticated:
             return "ERR02|Not authenticated"
@@ -795,22 +836,16 @@ class ClientSession:
             return "ERR01|Invalid format: UPLOAD_FINISH|upload_id"
 
         upload_id = params[0].strip()
-        session = self.upload_sessions.get(upload_id)
+        with self.server.upload_sessions_lock:
+            session = self.server.upload_sessions.get(upload_id)
         if not session:
-            with self.server.upload_sessions_lock:
-                session = self.server.upload_sessions.get(upload_id)
-            if session and session.username == self.username:
-                self.upload_sessions[upload_id] = session
-            else:
-                return "ERR04|Upload session not found"
+            return "ERR04|Upload session not found"
         if session.username != self.username:
             return "ERR02|Unauthorized"
-        if session.total_chunks == 0 or session.received_chunks != session.total_chunks:
-            return "ERR06|Upload incomplete"
 
         try:
             actual_size = os.path.getsize(session.temp_path)
-        except Exception:
+        except OSError:
             actual_size = 0
         if actual_size != session.file_size:
             self._cleanup_upload(upload_id)
@@ -827,27 +862,23 @@ class ClientSession:
             self._cleanup_upload(upload_id)
             return "ERR06|Asset hash mismatch"
 
-        file_name = f"{session.asset_name}.{session.file_type}"
+        user_dir = _UPLOADS_DIR_PATH / session.username
+        user_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = _safe_asset_filename(
+            session.original_name or session.asset_name,
+            session.file_type,
+            fallback=session.asset_name or "asset",
+        )
+        local_filename = f"{upload_id[:8]}_{safe_name}"
+        dest_path = user_dir / local_filename
+        local_rel_path = f"{session.username}/{local_filename}"  # relative path stored in DB
         try:
-            if GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL:
-                self.Print(
-                    f"Drive upload account: {GOOGLE_DRIVE_UPLOAD_ACCOUNT_EMAIL}",
-                    10,
-                )
-            drive_url = upload_file_to_drive(
-                session.temp_path,
-                file_name,
-                session.description,
-                apps_script_url=GOOGLE_APPS_SCRIPT_URL,
-                parent_folder_id=GOOGLE_DRIVE_PARENT_FOLDER_ID,
-                service_account_file=GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE,
-                username=session.username,
-                asset_name=session.asset_name,
-                uploads_folder_name=GOOGLE_DRIVE_UPLOADS_FOLDER_NAME,
-            )
+            shutil.move(str(session.temp_path), str(dest_path))
         except Exception as e:
             self._cleanup_upload(upload_id)
-            return f"ERR03|Drive upload failed: {e}"
+            self.binary_upload_id = None
+            return f"ERR03|Local storage failed: {e}"
+        drive_url = local_rel_path  # stored in DB url column as username/filename
 
         try:
             marketplace_db = MarketplaceDB()
@@ -876,6 +907,7 @@ class ClientSession:
             asset_id=str(item_id) if item_id else None,
         )
         # Queue mint transaction to blockchain
+
         mint_job = {
             'tx_type': 'mint',
             'tx_id': session.mint_tx_id,
@@ -901,7 +933,7 @@ class ClientSession:
                     'owner': session.username,
                 }
                 self.server.tx_queue.put(mint_job)
-        return f"OK|{session.asset_name}|{drive_url}"
+        return f"OK|{session.asset_name}|{local_rel_path}"
 
     def handle_upload_abort(self, params):
         """
@@ -1305,12 +1337,12 @@ class ClientSession:
             return "ERR01|Invalid username"
         if username != self.username:
             return "ERR02|Unauthorized"
-        limit = 50
+        limit = 20
         if len(params) >= 2:
             try:
                 limit = int(params[1])
             except Exception:
-                limit = 50
+                limit = 20
         try:
             items = self.notifications_manager.get_notifications(username, limit=limit)
             unread_count = self.notifications_manager.get_unread_count(username)
@@ -1740,7 +1772,6 @@ class Server:
                 sock.bind(('0.0.0.0', BLOCK_CONFIRMATION_PORT))
                 sock.listen(5)
                 sock.settimeout(1.0)
-                server_logger.info("block_confirmation listener on port %s", BLOCK_CONFIRMATION_PORT)
                 self.Print(" Block confirmation listener on port %s" % BLOCK_CONFIRMATION_PORT, 20)
                 while self.is_running:
                     try:
@@ -2050,7 +2081,6 @@ class Server:
     def start(self):
         """Start the server"""
         self.Print(f" Server starting on {self.host}:{self.port}...", 20)
-        server_logger.info("server starting on %s:%s", self.host, self.port)
         
         try:
             self.is_running = True
@@ -2135,21 +2165,38 @@ class Server:
                         break
                     
                     try:
+                        # Inline binary upload chunk: UPLOAD_CHUNK|{upload_id}|{4-byte-seq}{raw-data}
+                        # Detected before UTF-8 decode to avoid failures on binary payload.
+                        if isinstance(message, bytes) and message.startswith(b"UPLOAD_CHUNK|"):
+                            try:
+                                parts = message.split(b"|", 2)
+                                if len(parts) != 3 or len(parts[2]) < 4:
+                                    response = "ERR|INVALID_ID"
+                                else:
+                                    upload_id = parts[1].decode('ascii').strip()
+                                    if not upload_id or upload_id == "[]":
+                                        response = "ERR|INVALID_ID"
+                                    else:
+                                        seq = struct.unpack('!I', parts[2][:4])[0]
+                                        chunk_data = parts[2][4:]
+                                        response = session._handle_binary_chunk_inline(upload_id, seq, chunk_data)
+                            except Exception as chunk_err:
+                                self.Print(f" Malformed binary chunk from {addr[0]}:{addr[1]}: {chunk_err}", 40)
+                                response = "ERR|INVALID_ID"
+                            self.Print(f" {addr[0]}:{addr[1]} -> {response[:80]}", 10)
+                            session.proto.send_one_message(response.encode())
+                            continue
+
                         msg_str = message.decode() if isinstance(message, bytes) else message
-                        log_msg = msg_str
-                        if isinstance(msg_str, str) and msg_str.startswith("UPLOAD_CHUNK|"):
-                            parts = msg_str.split("|", 4)
-                            if len(parts) >= 4:
-                                log_msg = f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|<chunk>"
-                        elif isinstance(msg_str, str) and msg_str.startswith("UPLOAD_INIT|"):
-                            log_msg = "UPLOAD_INIT|<payload>"
+                        log_msg = "UPLOAD_INIT|<payload>" if msg_str.startswith("UPLOAD_INIT|") else msg_str
                         self.Print(f" {addr[0]}:{addr[1]} <- {log_msg}", 20)
-                        
+
                         response = session.process_message(msg_str)
-                        
-                        resp_preview = response if len(response) < 200 else f"{response[:197]}..."
-                        self.Print(f" {addr[0]}:{addr[1]} -> {resp_preview}", 20)
-                        session.proto.send_one_message(response.encode())
+
+                        if response is not None:
+                            resp_preview = response if len(response) < 200 else f"{response[:197]}..."
+                            self.Print(f" {addr[0]}:{addr[1]} -> {resp_preview}", 20)
+                            session.proto.send_one_message(response.encode())
                     
                     except Exception as e:
                         self.Print(f" Error processing message from {addr[0]}:{addr[1]}: {e}", 40)
@@ -2177,7 +2224,10 @@ class Server:
             # Clean up
             try:
                 if session:
-                    for upload_id in list(session.upload_sessions.keys()):
+                    with self.upload_sessions_lock:
+                        stale = [uid for uid, s in self.upload_sessions.items()
+                                 if s.username == session.username]
+                    for upload_id in stale:
                         session._cleanup_upload(upload_id)
                     self.unregister_session(session)
                 with self.clients_lock:

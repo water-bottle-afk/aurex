@@ -72,6 +72,9 @@ MIN_NONCE = 0
 HASH_ALGORITHM = 'sha256'
 SIGNATURE_PREFIX = "SIG_"
 SIGNATURE_ALGORITHM = 'md5'
+TX_TIME_WINDOW_SECONDS = 300
+ENFORCE_MINER_ALLOWLIST = False
+ALLOWED_MINER_KEY_FINGERPRINTS = set()
 
 # ============================================================================
 # ERROR MESSAGES

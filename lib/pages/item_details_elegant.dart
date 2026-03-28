@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/item_offering.dart';
-import '../services/google_drive_image_loader.dart';
+import '../widgets/item_image.dart';
 
 /// Item Details Page - Elegant display
 class ItemDetailsElegantPage extends StatefulWidget {
@@ -30,10 +30,7 @@ class _ItemDetailsElegantPageState extends State<ItemDetailsElegantPage> {
             expandedHeight: 300,
             pinned: true,
             flexibleSpace: FlexibleSpaceBar(
-              background: GoogleDriveImageLoader.buildCachedImage(
-                imageUrl: item.imageUrl,
-                fit: BoxFit.cover,
-              ),
+              background: ItemImage(relPath: item.imageUrl, fit: BoxFit.cover),
             ),
             actions: [
               Container(

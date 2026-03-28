@@ -18,10 +18,47 @@ class UserProvider with ChangeNotifier {
   bool _isInitialized = false;
   final AppLogger _log = AppLogger.get('user_provider.dart');
 
+  double? _walletBalance;
+  String? _walletUpdatedAt;
+  bool _walletLoading = false;
+  String? _walletError;
+
   UserModel? get localUser => _localUser;
   bool get isInitialized => _isInitialized;
   String get username => _localUser?.username ?? 'Guest';
   String get email => _localUser?.email ?? '';
+
+  double? get walletBalance => _walletBalance;
+  String? get walletUpdatedAt => _walletUpdatedAt;
+  bool get walletLoading => _walletLoading;
+  String? get walletError => _walletError;
+
+  void setWalletBalance(double balance, {String? updatedAt}) {
+    _walletBalance = balance;
+    _walletUpdatedAt = updatedAt;
+    _walletLoading = false;
+    _walletError = null;
+    notifyListeners();
+  }
+
+  void setWalletLoading(bool loading) {
+    _walletLoading = loading;
+    notifyListeners();
+  }
+
+  void setWalletError(String error) {
+    _walletError = error;
+    _walletLoading = false;
+    notifyListeners();
+  }
+
+  void clearWallet() {
+    _walletBalance = null;
+    _walletUpdatedAt = null;
+    _walletLoading = false;
+    _walletError = null;
+    notifyListeners();
+  }
 
   /// Initialize SharedPreferences and load saved user data
   Future<void> initialize() async {
@@ -85,6 +122,7 @@ class UserProvider with ChangeNotifier {
       await _prefs.remove('username');
       await _prefs.remove('email');
       _localUser = null;
+      clearWallet();
       notifyListeners();
       _log.success('User data cleared');
     } catch (e) {

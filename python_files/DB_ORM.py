@@ -303,23 +303,33 @@ class MarketplaceDB:
             print(f"Error getting user public key: {e}")
             return None
 
-    def set_user_public_key(self, username, public_key):
-        """Set public key for a user if not already set. Returns True if set or matches."""
+    def set_user_public_key(self, username, public_key, force_update=False):
+        """Set public key for a user.
+
+        If no key is stored yet, stores it.
+        If a matching key is stored, returns True.
+        If a different key is stored:
+          - force_update=False (default): returns False (security block).
+          - force_update=True: updates the stored key (caller must have already
+            verified the new key's signature before setting this flag).
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute('SELECT wallet_public_key FROM users WHERE username = ?', (username,))
             row = cursor.fetchone()
             existing = row[0] if row else None
-            if existing and existing != public_key:
+            if existing and existing == public_key:
+                conn.close()
+                return True
+            if existing and not force_update:
                 conn.close()
                 return False
-            if not existing:
-                cursor.execute(
-                    'UPDATE users SET wallet_public_key = ? WHERE username = ?',
-                    (public_key, username)
-                )
-                conn.commit()
+            cursor.execute(
+                'UPDATE users SET wallet_public_key = ? WHERE username = ?',
+                (public_key, username)
+            )
+            conn.commit()
             conn.close()
             return True
         except Exception as e:
@@ -495,6 +505,10 @@ class MarketplaceDB:
                   user.reset_time, user.username))
             
             conn.commit()
+            if cursor.rowcount == 0:
+                conn.close()
+                print(f"Warning: update_user matched no rows for username='{user.username}'")
+                return False
             conn.close()
             return True
         except Exception as e:

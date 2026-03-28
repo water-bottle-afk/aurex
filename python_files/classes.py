@@ -26,9 +26,9 @@ class PROTO:
                 self.Print("the data received is in bytes", 50)
             data = data[:6].decode() + data[6:].hex()  # query| + data in hex
         if dirct == '1':
-            self.Print("got <<<<< " + data, 20)
+            self.Print("got <<<<< " + data, 10)
         else:
-            self.Print("sent >>>>> " + data, 20)
+            self.Print("sent >>>>> " + data, 10)
 
     def __init__(self, who_get, logging_level, tid=None, cln_sock=None):
         self.who_get = who_get
@@ -49,18 +49,18 @@ class PROTO:
         self.sock.connect((ip, port))
 
     def send_one_message(self, data: bytes, encryption=False):
-        """Send message with 2-byte length prefix (TLS handles encryption)"""
+        """Send message with 4-byte length prefix (TLS handles encryption)"""
         message = data
         with self.lock:
-            self.sock.send(struct.pack('!H', len(message)) + message)
+            self.sock.send(struct.pack('!I', len(message)) + message)
         self.log("2", data)
 
     def recv_one_message(self, encryption=False):
-        """Receive message with 2-byte length prefix (TLS handles decryption)"""
-        len_section = self.__recv_amount(2)
+        """Receive message with 4-byte length prefix (TLS handles decryption)"""
+        len_section = self.__recv_amount(4)
         if not len_section:
             return None
-        len_int, = struct.unpack('!H', len_section)
+        len_int, = struct.unpack('!I', len_section)
         data = self.__recv_amount(len_int)
 
         if len_int != len(data):

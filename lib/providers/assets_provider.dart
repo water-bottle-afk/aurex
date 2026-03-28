@@ -1,23 +1,30 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/item_offering.dart';
 import '../models/server_event.dart';
 import 'client_provider.dart';
-import '../utils/app_logger.dart';
-import '../services/google_drive_image_loader.dart';
 
 class AssetsProvider extends ChangeNotifier {
   final ClientProvider clientProvider;
-  final AppLogger _log = AppLogger.get('assets_provider.dart');
-  
+
   final List<ItemOffering> _assets = [];
   final Set<String> _pendingPurchases = {};
   bool _isLoading = false;
   bool _hasMoreAssets = true;
-  String? _lastTimestamp; // Use timestamp-based pagination
+  String? _lastTimestamp;
   final int _itemsPerPage = 10;
   String? _error;
   StreamSubscription? _eventSub;
+
+  // --- Image cache & download queue ---
+  /// Reactive image cache: relPath → raw JPEG bytes.
+  /// [ItemImage] widgets read from this map via context.select.
+  final Map<String, Uint8List> imageCache = {};
+
+  final List<String> _downloadQueue = [];
+  bool _isProcessingQueue = false;
+  bool _disposed = false;
 
   List<ItemOffering> get assets => List.unmodifiable(_assets);
   bool get isLoading => _isLoading;
@@ -61,34 +68,27 @@ class AssetsProvider extends ChangeNotifier {
       if (items.isEmpty) {
         _hasMoreAssets = false;
       } else {
-        // Convert items to ItemOffering objects
+        final newItems = <ItemOffering>[];
         for (int i = 0; i < items.length; i++) {
-          final item = items[i];
-          
-          final asset = ItemOffering(
-            id: item['id']?.toString() ?? 'unknown_${_assets.length}',
-            title: item['asset_name'] ?? 'Asset #${_assets.length + 1}',
-            description: item['description'] ??
-                item['file_type'] ??
-                'No description provided.',
-            imageUrl: item['url'] ?? 'assets/images/leather_jacket.png',
-            author: item['username'] ?? 'Unknown',
-            price: double.tryParse(item['cost']?.toString() ?? '0') ?? 0.0,
-            isListed: (item['is_listed']?.toString() ?? '1') == '1',
-            token: item['id']?.toString() ?? '',
-            assetHash: item['asset_hash']?.toString(),
-          );
+          final raw = items[i];
+          if (raw is! Map<String, dynamic>) continue;
+          try {
+            final asset = ItemOffering.fromJson(raw);
+            _assets.add(asset);
+            newItems.add(asset);
+          } catch (_) {
+            continue;
+          }
 
-          _assets.add(asset);
-          
           // Update last timestamp for next page - created_at is the server cursor
-          final ts = item['created_at'] ?? item['timestamp'];
+          final ts = raw['created_at'] ?? raw['timestamp'];
           if (ts != null) {
             _lastTimestamp = ts.toString();
           }
         }
 
         notifyListeners();
+        _enqueueItems(newItems);
 
         // Check if we got fewer items than requested = last page
         if (items.length < _itemsPerPage) {
@@ -139,6 +139,41 @@ class AssetsProvider extends ChangeNotifier {
     }
   }
 
+  /// Upload an asset file using the binary streaming protocol.
+  /// Delegates entirely to [client.uploadMarketplaceItemBinary]; returns "success" or throws.
+  Future<String> streamUpload({
+    required File file,
+    required String assetName,
+    required String description,
+    required String username,
+    required String fileType,
+    required double cost,
+    required String assetHash,
+    required String mintTxId,
+    required String mintTimestamp,
+    required String publicKey,
+    required String mintSignature,
+  }) async {
+    final client = clientProvider.client;
+    final result = await client.uploadMarketplaceItemBinary(
+      file: file,
+      assetName: assetName,
+      description: description,
+      username: username,
+      fileType: fileType,
+      cost: cost,
+      assetHash: assetHash,
+      mintTxId: mintTxId,
+      mintTimestamp: mintTimestamp,
+      publicKey: publicKey,
+      mintSignature: mintSignature,
+    );
+    if (result == "success") {
+      scheduleMicrotask(refreshAssets);
+    }
+    return result;
+  }
+
   /// Get asset by ID
   ItemOffering? getAssetById(String id) {
     try {
@@ -146,20 +181,6 @@ class AssetsProvider extends ChangeNotifier {
     } catch (e) {
       return null;
     }
-  }
-
-  /// Resolve a Drive share URL or raw file id to a view URL usable by [Image.network].
-  Future<String> downloadAssetImage(String urlOrFileId) async {
-    final t = urlOrFileId.trim();
-    if (t.isEmpty) {
-      throw ArgumentError('downloadAssetImage: empty input');
-    }
-    if (t.startsWith('http')) {
-      return GoogleDriveImageLoader.convertShareUrl(t);
-    }
-    return GoogleDriveImageLoader.convertShareUrl(
-      'https://drive.google.com/uc?export=view&id=$t',
-    );
   }
 
   void _handleServerEvent(ServerEvent event) {
@@ -191,8 +212,61 @@ class AssetsProvider extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Image queue helpers
+  // ---------------------------------------------------------------------------
+
+  /// Public entry point: enqueue a single URL for background download.
+  /// Safe to call from [ItemImage] for URLs not yet queued by [loadNextPage].
+  void enqueueUrl(String url) {
+    if (url.isEmpty || imageCache.containsKey(url)) return;
+    if (!_downloadQueue.contains(url)) _downloadQueue.add(url);
+    if (!_isProcessingQueue) _processQueue();
+  }
+
+  void _enqueueItems(List<ItemOffering> items) {
+    bool added = false;
+    for (final item in items) {
+      final url = item.imageUrl;
+      if (url.isEmpty || imageCache.containsKey(url)) continue;
+      if (!_downloadQueue.contains(url)) {
+        _downloadQueue.add(url);
+        added = true;
+      }
+    }
+    if (added && !_isProcessingQueue) _processQueue();
+  }
+
+  Future<void> _processQueue() async {
+    if (_isProcessingQueue || _disposed) return;
+    _isProcessingQueue = true;
+    final client = clientProvider.client;
+    while (_downloadQueue.isNotEmpty && !_disposed) {
+      final path = _downloadQueue.removeAt(0);
+      if (imageCache.containsKey(path)) continue;
+      try {
+        final bytes = await client.downloadAsset(path);
+        if (_disposed) break;
+        // Uint8List(0) acts as a "failed" sentinel so ItemImage shows a
+        // broken-image placeholder instead of spinning indefinitely.
+        imageCache[path] = (bytes != null && bytes.isNotEmpty) ? bytes : Uint8List(0);
+        notifyListeners();
+      } catch (_) {
+        if (!_disposed) {
+          imageCache[path] = Uint8List(0); // sentinel: failed, stop spinner
+          notifyListeners();
+        }
+      }
+    }
+    _isProcessingQueue = false;
+  }
+
+  // ---------------------------------------------------------------------------
+
   @override
   void dispose() {
+    _disposed = true;
+    _downloadQueue.clear();
     _eventSub?.cancel();
     super.dispose();
   }
