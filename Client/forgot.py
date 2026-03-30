@@ -5,31 +5,33 @@ from typing import TYPE_CHECKING
 
 import flet as ft
 
+from .theme import AUREX_BG, AUREX_CARD, AUREX_GOLD, AUREX_MUTED, AUREX_SLATE
+
 if TYPE_CHECKING:
     from .app import AurexFletApp
 
 
-_CARD_WIDTH = 460
+_CARD_WIDTH = 480
 
 
 def build_forgot_view(app: "AurexFletApp") -> ft.View:
     page = app.page
-    email_field = ft.TextField(label="Email", keyboard_type=ft.KeyboardType.EMAIL, border_radius=12)
-    code_field = ft.TextField(label="Verification Code", max_length=6, border_radius=12)
+    email_field = ft.TextField(label="Email", keyboard_type=ft.KeyboardType.EMAIL, border_radius=16)
+    code_field = ft.TextField(label="Verification Code", max_length=6, border_radius=16)
     new_password_field = ft.TextField(
         label="New Password",
         password=True,
         can_reveal_password=True,
-        border_radius=12,
+        border_radius=16,
     )
     confirm_password_field = ft.TextField(
         label="Confirm Password",
         password=True,
         can_reveal_password=True,
-        border_radius=12,
+        border_radius=16,
     )
-    dev_code_text = ft.Text(color="#fbbf24", visible=False)
-    status_text = ft.Text(color="#cbd5e1", size=12, visible=False)
+    dev_code_text = ft.Text(color=AUREX_GOLD, visible=False)
+    status_text = ft.Text(color=AUREX_MUTED, size=12, visible=False)
     progress = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
 
     email_step = ft.Column(visible=True, tight=True)
@@ -117,7 +119,7 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
                 app.connect_if_needed(discover_first=False)
                 app.client.update_password(email_field.value.strip(), password)
                 app.show_message("Password updated successfully")
-                page.go("/login")
+                page.run_task(page.push_route, "/login")
             except Exception as exc:
                 app.show_message(f"Password reset failed: {exc}", error=True)
             finally:
@@ -125,35 +127,35 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    send_code_button = ft.ElevatedButton(
-        text="Send Code",
+    send_code_button = ft.FilledButton(
+        content="Send Code",
         on_click=handle_send_code,
-        bgcolor="#2563eb",
-        color="white",
+        bgcolor=AUREX_GOLD,
+        color="#1A1A1B",
         width=_CARD_WIDTH,
-        height=48,
+        height=46,
     )
-    verify_code_button = ft.ElevatedButton(
-        text="Verify Code",
+    verify_code_button = ft.FilledButton(
+        content="Verify Code",
         on_click=handle_verify_code,
-        bgcolor="#2563eb",
-        color="white",
+        bgcolor=AUREX_GOLD,
+        color="#1A1A1B",
         width=_CARD_WIDTH,
-        height=48,
+        height=46,
     )
-    reset_password_button = ft.ElevatedButton(
-        text="Reset Password",
+    reset_password_button = ft.FilledButton(
+        content="Reset Password",
         on_click=handle_reset_password,
-        bgcolor="#16a34a",
-        color="white",
+        bgcolor=AUREX_GOLD,
+        color="#1A1A1B",
         width=_CARD_WIDTH,
-        height=48,
+        height=46,
     )
-    back_button = ft.TextButton(text="Back to login", on_click=lambda _: page.go("/login"))
+    back_button = ft.TextButton(content="Back to login", on_click=lambda _: page.run_task(page.push_route, "/login"))
 
     email_step.controls = [
-        ft.Text("Enter your email", size=24, weight=ft.FontWeight.BOLD),
-        ft.Text("We\'ll send a reset code to your email", color="#94a3b8"),
+        ft.Text("Reset your password", size=24, weight=ft.FontWeight.BOLD),
+        ft.Text("We will email you a verification code", color=AUREX_MUTED),
         email_field,
         send_code_button,
     ]
@@ -162,7 +164,7 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
         dev_code_text,
         code_field,
         verify_code_button,
-        ft.OutlinedButton(text="Back", on_click=lambda _: show_step("email"), width=_CARD_WIDTH),
+        ft.OutlinedButton(content="Back", on_click=lambda _: show_step("email"), width=_CARD_WIDTH),
     ]
     password_step.controls = [
         ft.Text("Create new password", size=24, weight=ft.FontWeight.BOLD),
@@ -173,42 +175,32 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
 
     return ft.View(
         route="/forgot",
-        bgcolor="#0f172a",
+        bgcolor=AUREX_BG,
         controls=[
             ft.Container(
                 expand=True,
                 padding=32,
-                gradient=ft.LinearGradient(
-                    begin=ft.alignment.top_center,
-                    end=ft.alignment.bottom_center,
-                    colors=["#1d4ed8", "#0f172a"],
-                ),
-                content=ft.Column(
-                    expand=True,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    controls=[
-                        ft.Container(
-                            width=_CARD_WIDTH,
-                            padding=32,
-                            bgcolor="#111827dd",
-                            border_radius=24,
-                            content=ft.Column(
-                                tight=True,
-                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                controls=[
-                                    email_step,
-                                    code_step,
-                                    password_step,
-                                    ft.Row(
-                                        alignment=ft.MainAxisAlignment.CENTER,
-                                        controls=[progress, status_text],
-                                    ),
-                                    back_button,
-                                ],
+                content=ft.Container(
+                    width=_CARD_WIDTH,
+                    padding=30,
+                    bgcolor=AUREX_CARD,
+                    border_radius=20,
+                    border=ft.border.all(1, AUREX_SLATE),
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Column(
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            email_step,
+                            code_step,
+                            password_step,
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                controls=[progress, status_text],
                             ),
-                        )
-                    ],
+                            back_button,
+                        ],
+                    ),
                 ),
             )
         ],

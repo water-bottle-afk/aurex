@@ -61,3 +61,4 @@ blockchain/node_*.sqlite3
 
 # Generated keys
 blockchain/keys/
+Server/credentials.json
