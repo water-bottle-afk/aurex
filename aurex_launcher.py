@@ -7,7 +7,7 @@ import sys
 # Adjust these paths if your folder structure differs
 PYTHON_EXEC = "python"  # Uses your current python environment
 BLOCKCHAIN_DIR = "blockchain"
-MARKETPLACE_DIR = "python_files"
+MARKETPLACE_DIR = "Server"
 FLUTTER_DIR = "." # Root where pubspec.yaml lives
 
 def launch_task(name, command, cwd):
@@ -35,11 +35,6 @@ def main():
     # Note: Using the renamed 'server_module.py'
     launch_task("Aurex-Marketplace", f"{PYTHON_EXEC} server_module.py", MARKETPLACE_DIR)
     time.sleep(2)
-
-    # 4. Launch Flutter App
-    print("[+] Launching Flutter Mobile App...")
-    # 'flutter run' will target the connected device/emulator
-    launch_task("Aurex-Flutter", "flutter run", FLUTTER_DIR)
 
     print("\n[SUCCESS] All systems dispatched.")
     print("Monitor the individual CMD windows for 'UPLOAD_INIT' or 'BLOCK_CONFIRMED' logs.")
