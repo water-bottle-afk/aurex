@@ -98,10 +98,11 @@ class PoWNode:
         self.mempool = []
         self.mempool_lock = threading.Lock()
 
-        # Ledger (per-node JSON)
-        ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB"
-        ledger_dir.mkdir(exist_ok=True)
-        ledger_path = ledger_dir / f"ledger_node_{self.port}.json"
+        # Ledger — each node has its own subfolder BLOCKCHAIN_DB/node_{port}/
+        ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB" / f"node_{self.port}"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        ledger_path = ledger_dir / "ledger.json"
+        self.ledger_dir = ledger_dir
         self.ledger = Ledger(ledger_path=str(ledger_path))
         self.seen_tx_ids = set()
         for block in self.ledger.blocks:

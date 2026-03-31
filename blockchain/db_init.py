@@ -8,16 +8,16 @@ import sqlite3
 import os
 from pathlib import Path
 
-# Shared database in parent DB folder
+# Shared database in parent DB folder (marketplace.db is the live DB)
 DB_FOLDER = Path(__file__).parent.parent / "DB"
 DB_FOLDER.mkdir(exist_ok=True)
-DB_PATH = str(DB_FOLDER / "database.sqlite3")
+DB_PATH = str(DB_FOLDER / "marketplace.db")
 
-# Per-node ledger directory (blockchain folder)
+# Per-node ledger directory (blockchain folder); each node gets its own subfolder
 BLOCKCHAIN_DIR = Path(__file__).parent
 BLOCKCHAIN_DB_DIR = BLOCKCHAIN_DIR / "BLOCKCHAIN_DB"
 BLOCKCHAIN_DB_DIR.mkdir(exist_ok=True)
-BLOCKCHAIN_DB_PATH = str(BLOCKCHAIN_DB_DIR / "database.sqlite3")
+BLOCKCHAIN_DB_PATH = str(BLOCKCHAIN_DB_DIR / "gateway_ledger.json")
 
 
 def get_node_db_path(port):
