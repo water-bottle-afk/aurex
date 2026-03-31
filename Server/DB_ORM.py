@@ -204,23 +204,18 @@ class MarketplaceDB:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(is_read)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at)')
 
-        # Device tokens for push notifications
+        # Dedicated wallets table — stores only public identity, never private key.
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS device_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                token TEXT NOT NULL UNIQUE,
-                platform TEXT,
-                updated_at TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS wallets (
+                username TEXT PRIMARY KEY NOT NULL,
+                public_key_hex TEXT NOT NULL,
+                key_type TEXT NOT NULL DEFAULT 'ED25519',
+                registered_at TEXT NOT NULL,
                 FOREIGN KEY (username) REFERENCES users (username)
             )
         ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(username)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_device_tokens_platform ON device_tokens(platform)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_wallets_pubkey ON wallets(public_key_hex)')
 
-        # Wallet data is now stored in users table columns: wallet_balance, wallet_updated_at
-        # No migration needed from separate wallets table
-        
         conn.commit()
         conn.close()
     
@@ -336,6 +331,46 @@ class MarketplaceDB:
             print(f"Error setting user public key: {e}")
             return False
     
+    def register_wallet(self, username: str, public_key_b64: str, key_type: str = "ED25519") -> bool:
+        """Register or update a wallet entry in the dedicated wallets table.
+
+        Stores only the public key — private key is never accepted or stored.
+        Returns True on success, False on error.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute(
+                '''
+                INSERT INTO wallets (username, public_key_hex, key_type, registered_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    public_key_hex = excluded.public_key_hex,
+                    key_type = excluded.key_type
+                ''',
+                (username, public_key_b64, key_type, now),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error registering wallet: {e}")
+            return False
+
+    def get_wallet_pubkey(self, username: str) -> str | None:
+        """Return the public key for a username from the wallets table, or None."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT public_key_hex FROM wallets WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row else None
+        except Exception as e:
+            print(f"Error getting wallet pubkey: {e}")
+            return None
+
     def get_user_by_email(self, email):
         """Get user by email"""
         try:

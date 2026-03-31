@@ -8,9 +8,9 @@ import sys
 PYTHON_EXEC = "python"  # Uses your current python environment
 BLOCKCHAIN_DIR = "blockchain"
 MARKETPLACE_DIR = "Server"
-FLUTTER_DIR = "." # Root where pubspec.yaml lives
+CLIENT_DIR = "."  # Root where main.py lives
 
-def launch_task(name, command, cwd):
+def launch_task(name, command, cwd=""):
     print(f"[+] Starting {name}...")
     # opens a new terminal window for each service so you can see logs
     return subprocess.Popen(["start", "cmd", "/k", f"title {name} && {command}"], 
@@ -36,8 +36,16 @@ def main():
     launch_task("Aurex-Marketplace", f"{PYTHON_EXEC} server_module.py", MARKETPLACE_DIR)
     time.sleep(2)
 
+    # 4. Start Flet Client
+    launch_task("Aurex-Client", f"{PYTHON_EXEC} main.py", CLIENT_DIR)
+
     print("\n[SUCCESS] All systems dispatched.")
-    print("Monitor the individual CMD windows for 'UPLOAD_INIT' or 'BLOCK_CONFIRMED' logs.")
+    print("  • Aurex-Nodes     — blockchain PoW nodes (per-node ledger in blockchain/BLOCKCHAIN_DB/node_*/)")
+    print("  • Aurex-Gateway   — signature verify + broadcast (port 5000)")
+    print("  • Aurex-Marketplace — TCP marketplace server (port 23456)")
+    print("  • Aurex-Client    — Flet desktop app")
+    print("\nFirst time? Go to Settings → Wallet & Identity → Generate My Keys before uploading.")
 
 if __name__ == "__main__":
     main()
+    sys.exit(0)

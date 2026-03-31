@@ -1,102 +1,232 @@
-﻿# Aurex - Blockchain Image Ownership Marketplace
+﻿# Aurex — Blockchain Image Ownership Marketplace
 
-Aurex is a Flutter marketplace where users upload images, sell them, and transfer ownership. Ownership is anchored to a PoW blockchain using content hashes and client-signed transactions.
+Aurex is a Python-native marketplace where users upload images, sell them, and cryptographically prove ownership. Every upload and purchase is signed with an Ed25519 private key (stored only on the user's device) and anchored to a local Proof-of-Work blockchain.
 
-## What You Can Do
-- Run the blockchain network (nodes + gateway)
-- Run the marketplace server
-- Run the Flutter app
-- Upload an asset (mint on-chain)
-- Purchase an asset (on-chain transfer)
+---
+
+## Architecture Overview
+
+```
+┌──────────────────────────────────────────────┐
+│               Flet Desktop Client            │
+│  login / signup / marketplace / upload /     │
+│  settings (wallet key gen & backup)          │
+└──────────────┬───────────────────────────────┘
+               │ TLS TCP (binary framed, 4-byte prefix)
+               ▼
+┌──────────────────────────────────────────────┐
+│           Marketplace Server                 │
+│  Server/server_module.py                     │
+│  • Auth, upload, buy, asset listing          │
+│  • Verifies Ed25519 signature on every write │
+│  • Stores assets under assets/uploads/       │
+│  • SQLite: DB/marketplace.db                 │
+└──────────────┬───────────────────────────────┘
+               │ TCP JSON (submit_transaction / block_confirmation)
+               ▼
+┌──────────────────────────────────────────────┐
+│           Blockchain Gateway                 │
+│  blockchain/gateway_server.py  (port 5000)   │
+│  • Re-verifies Ed25519 signature             │
+│  • Broadcasts NEW_TRANSACTION to all nodes   │
+│  • Receives block_confirmation from winner   │
+│  • Writes confirmed blocks/txs/assets to DB  │
+└──────────────┬───────────────────────────────┘
+               │ raw JSON TCP
+     ┌─────────┼─────────┐
+     ▼         ▼         ▼
+  Node       Node      Node   ...
+ 13245      13246     13247
+  PoW        PoW       PoW
+  Race       Race      Race
+  └─ BLOCKCHAIN_DB/node_13245/ledger.json
+             └─ BLOCKCHAIN_DB/node_13246/ledger.json
+                        └─ BLOCKCHAIN_DB/node_13247/ledger.json
+```
+
+---
+
+## Key Design Decisions
+
+- **No Google Drive.** Assets are stored locally under `assets/uploads/{username}/{filename}` on the server machine.
+- **No private keys on the server.** The server stores only the user's Ed25519 **public key** (in `DB/marketplace.db → wallets` table). The private key lives exclusively in `~/.aurex_wallet/aurex_private_key.pem` on the user's device.
+- **Sign-and-verify on every write.** Uploads, purchases, and transfers include a signature over a canonical JSON payload. Both the marketplace server and the blockchain gateway independently verify the signature before committing anything.
+- **Per-node JSON ledgers.** Each PoW node maintains its own ledger at `blockchain/BLOCKCHAIN_DB/node_{port}/ledger.json`. There is no shared ledger file between nodes.
+- **SQLite only.** One database file: `DB/marketplace.db`. No external databases.
+
+---
+
+## Database Schema (`DB/marketplace.db`)
+
+| Table | Purpose |
+|---|---|
+| `users` | Auth, email verification, wallet balance, cached public key |
+| `wallets` | Ed25519 public keys — one row per user, `key_type = 'ED25519'` |
+| `marketplace_items` | Asset metadata: name, owner, relative file path, price, hash |
+| `notifications` | In-app notifications (e.g. "your asset was purchased") |
+
+---
+
+## Wallet & Ownership System
+
+Every user needs a local Ed25519 key pair before they can upload.
+
+**Generate keys** → Settings page → *Wallet & Identity* → **Generate My Keys**
+
+- Private key: saved to `~/.aurex_wallet/aurex_private_key.pem` (chmod 600 on Unix)
+- Public key: cached at `~/.aurex_wallet/aurex_public_key.txt`
+- Both are shown in a backup overlay with a copyable JSON export — **save this file; loss of private key means loss of asset ownership**
+
+**To encrypt the private key at rest**, set the environment variable before launching:
+```powershell
+$env:AUREX_WALLET_PASSWORD = "your-passphrase"
+python main.py
+```
+
+---
 
 ## Prerequisites
+
 - Python 3.10+
-- Flutter SDK (stable channel)
-- Android SDK / emulator or iOS Simulator (for mobile testing)
-- Google Drive setup for uploads (see below)
+- Dependencies (marketplace server + Flet client + blockchain):
 
-## Install
-### Python deps
+```powershell
+pip install flet cryptography
+```
+
+Full list (add as needed):
+```
+flet
+cryptography
+```
+
+---
+
+## Running the Project
+
+### One-command launch (all components)
 ```powershell
 cd c:\dev\aurex
-python -m pip install -r python_files\requirements.txt
+python aurex_launcher.py
 ```
+This starts: blockchain nodes → gateway → marketplace server → Flet client, with staggered delays.
 
-### Flutter deps
-```powershell
-cd c:\dev\aurex
-flutter pub get
-```
+### Manual launch (component by component)
 
-## Configuration
-### Server discovery IP
-- The server binds to `SERVER_HOST` in `python_files/config.py` (default `0.0.0.0`).
-- The broadcast reply IP is auto-detected at runtime. If auto-detect is wrong, set it explicitly:
-
-```powershell
-$env:AUREX_SERVER_IP = "192.168.1.50"
-```
-
-### Mobile connection notes
-- Android emulator: use `10.0.2.2` as the host.
-- iOS simulator: use `127.0.0.1` as the host.
-- Real device: use your machine LAN IP and allow TCP `23456` and UDP `12345` through the firewall.
-
-The app tries broadcast discovery first. If that fails, it lets you enter the IP/port manually.
-
-You can also hardcode a default host/port at build time:
-```powershell
-flutter run --dart-define=AUREX_SERVER_HOST=10.0.2.2 --dart-define=AUREX_SERVER_PORT=23456
-```
-
-### Google Drive upload
-Uploads require one of the following:
-
-1. Service account (recommended)
-- Create a service account in Google Cloud and download the JSON key file.
-- Set `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` in `python_files/config.py` to that JSON path.
-- Create a Drive folder and set `GOOGLE_DRIVE_PARENT_FOLDER_ID` in `python_files/config.py`.
-- Share the folder with the service account email.
-
-2. Apps Script endpoint (legacy)
-- Set `GOOGLE_APPS_SCRIPT_URL` in `python_files/config.py`.
-- Leave `GOOGLE_DRIVE_PARENT_FOLDER_ID` and `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` empty.
-
-## Run
-1. Start nodes
+**1. Blockchain nodes**
 ```powershell
 cd c:\dev\aurex\blockchain
 python launcher.py --nodes 3 --difficulty 2
 ```
 
-2. Start gateway
+**2. Blockchain gateway**
 ```powershell
 cd c:\dev\aurex\blockchain
 python gateway_server.py
 ```
 
-3. Start marketplace server
+**3. Marketplace server**
 ```powershell
-cd c:\dev\aurex
-python python_files\server_module.py
+cd c:\dev\aurex\Server
+python server_module.py
 ```
 
-4. Run Flutter app
+**4. Flet client**
 ```powershell
 cd c:\dev\aurex
-flutter run
+python main.py
 ```
 
-## Upload And Purchase Walkthrough
-1. Launch the app and connect to the server (broadcast discovery or manual IP).
-2. Sign up two users: a seller and a buyer.
-3. Seller uploads an asset with a price.
-4. Buyer purchases the asset from the marketplace.
-5. Wait for the blockchain confirmation; the app will show a notification when the purchase is confirmed.
+---
 
-## Notes
-- Starting wallet balance is `100` by default. Change it in `python_files/config.py`.
-- TLS certs are loaded from `python_files/cert.pem` and `python_files/key.pem` by default.
+## Network Ports
+
+| Component | Port | Protocol |
+|---|---|---|
+| Marketplace server | 23456 | TLS TCP (binary framed) |
+| Server discovery | 12345 | UDP broadcast |
+| Blockchain gateway | 5000 | TCP JSON |
+| PoW nodes | 13245–13249 | TCP JSON (P2P gossip) |
+| Server notify (from gateway) | 23457 | TCP JSON |
+
+---
+
+## Upload & Purchase Flow
+
+1. Open the Flet client and log in (or sign up).
+2. Go to **Settings → Wallet & Identity** and generate your Ed25519 key pair. Save the backup JSON.
+3. Go to **Upload Asset** — fill in name, description, price, and pick a JPG/PNG.
+4. Click **Upload Asset**:
+   - Client signs the asset hash + metadata with your private key.
+   - Server verifies the signature, stores the file under `assets/uploads/{username}/`, and records metadata in `marketplace_items`.
+   - Server queues a `mint` transaction to the blockchain gateway.
+   - Gateway re-verifies the signature and broadcasts `NEW_TRANSACTION` to all PoW nodes.
+   - The winning node mines a block and sends `block_confirmation` to the gateway.
+   - Gateway writes the confirmed block to `marketplace.db` (blocks/transactions/assets tables).
+   - Each node saves the block to its own `BLOCKCHAIN_DB/node_{port}/ledger.json`.
+5. Other users see the asset in the **Marketplace**.
+6. A buyer clicks **View → Buy** — same sign-and-verify cycle runs for the purchase transaction.
+7. The seller receives an in-app notification when their asset is purchased.
+
+---
+
+## Configuration
+
+### Server IP (if not on localhost)
+```powershell
+$env:AUREX_SERVER_IP = "192.168.1.50"
+```
+Or set it in-app via **Settings → Server Connection**.
+
+### Wallet directory (optional override)
+```powershell
+$env:AUREX_WALLET_DIR = "D:\my_keys"
+```
+
+### TLS certificates
+Certs are loaded from `Server/cert.pem` and `Server/key.pem`. Replace these with your own for production.
+
+---
+
+## Project Structure
+
+```
+aurex/
+├── Client/               # Flet desktop client
+│   ├── app.py            # App entry, routing, session management
+│   ├── marketplace.py    # Marketplace view + full-screen asset detail
+│   ├── upload.py         # Upload view (gated: requires wallet keys)
+│   ├── settings.py       # Settings: wallet keygen, server config, logout
+│   ├── login.py / signup.py / forgot.py
+│   ├── wallet.py         # Ed25519 keygen, PEM storage, sign/verify
+│   ├── protocol_client.py# Binary-framed TLS TCP client
+│   ├── session.py        # UserSession, UserData
+│   ├── models.py         # MarketplaceItem, ItemOffering, etc.
+│   └── theme.py          # Color constants
+├── Server/
+│   ├── server_module.py  # Marketplace TCP server (auth, upload, buy)
+│   └── DB_ORM.py         # SQLite ORM (users, wallets, items, notifications)
+├── blockchain/
+│   ├── gateway_server.py # Gateway: signature verify + node broadcast
+│   ├── pow_node.py       # PoW node: mining, P2P gossip, per-node ledger
+│   ├── launcher.py       # Spawns N PoW nodes
+│   ├── classes.py        # Block, Transaction, Ledger (JSON), Notification
+│   ├── config.py         # Ports, difficulty, timeouts
+│   ├── key_manager.py    # Node Ed25519 key management
+│   └── BLOCKCHAIN_DB/
+│       ├── node_13245/ledger.json
+│       ├── node_13246/ledger.json
+│       └── ...
+├── DB/
+│   └── marketplace.db    # Single SQLite database
+├── assets/
+│   └── uploads/          # Uploaded files: {username}/{filename}
+├── main.py               # Flet app entry point
+└── aurex_launcher.py     # One-command orchestrator
+```
+
+---
 
 ## License
+
 Private/internal project. All rights reserved.

@@ -77,11 +77,83 @@ def upload_marketplace_item_binary(
 
 def build_upload_view(app: "AurexFletApp") -> ft.View:
     page = app.page
+
+    from . import wallet as _wallet
+    if not _wallet._KEY_FILE.exists():
+        return ft.View(
+            route="/upload",
+            bgcolor=AUREX_BG,
+            controls=[
+                ft.Container(
+                    expand=True,
+                    padding=40,
+                    alignment=ft.Alignment(0, 0),
+                    content=ft.Column(
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=20,
+                        controls=[
+                            ft.Icon(ft.Icons.KEY_OFF_OUTLINED, size=64, color=AUREX_GOLD_SOFT),
+                            ft.Text(
+                                "No Wallet Keys Found",
+                                size=24,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Container(
+                                padding=20,
+                                border_radius=16,
+                                bgcolor=AUREX_CARD,
+                                border=ft.border.all(1, AUREX_SLATE),
+                                content=ft.Column(
+                                    spacing=10,
+                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                    controls=[
+                                        ft.Text(
+                                            "To upload assets on Aurex you need a local Ed25519 key pair.",
+                                            text_align=ft.TextAlign.CENTER,
+                                            color=AUREX_MUTED,
+                                        ),
+                                        ft.Text(
+                                            "How it works:",
+                                            weight=ft.FontWeight.BOLD,
+                                        ),
+                                        ft.Text(
+                                            "1. Go to Settings → Wallet & Identity\n"
+                                            "2. Click \"Generate My Keys\"\n"
+                                            "3. Save the backup JSON somewhere safe\n"
+                                            "4. Your Private Key stays on your device only\n"
+                                            "5. The server stores only your Public Key\n"
+                                            "6. Every upload is signed — verified by the blockchain nodes",
+                                            color=AUREX_MUTED,
+                                            size=13,
+                                        ),
+                                    ],
+                                ),
+                            ),
+                            ft.FilledButton(
+                                content="Go to Settings to Generate Keys",
+                                bgcolor=AUREX_GOLD,
+                                color="#1A1A1B",
+                                icon=ft.Icons.SETTINGS,
+                                on_click=lambda _: page.run_task(page.push_route, "/settings"),
+                            ),
+                            ft.TextButton(
+                                content="Back to Marketplace",
+                                on_click=lambda _: page.run_task(page.push_route, "/marketplace"),
+                            ),
+                        ],
+                    ),
+                )
+            ],
+        )
+
     selected_path: str | None = None
     selected_ext: str | None = None
 
-    picker = ft.FilePicker()
-    page.overlay.append(picker)
+    picker = next((c for c in page.overlay if isinstance(c, ft.FilePicker)), None)
+    if picker is None:
+        picker = ft.FilePicker()
+        page.overlay.append(picker)
+        page.update()
 
     file_name_text = ft.Text("No file selected", color=AUREX_MUTED, size=12)
     name_field = ft.TextField(label="Asset Name", border_radius=16)

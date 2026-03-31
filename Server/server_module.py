@@ -739,6 +739,7 @@ class ClientSession:
             return "ERR02|Invalid mint signature"
         if not self.db.set_user_public_key(username, public_key, force_update=True):
             return "ERR02|Failed to store public key"
+        self.db.register_wallet(username, public_key)
 
         upload_id = uuid.uuid4().hex
         temp_path = str(self.upload_tmp_dir / f"upload_{upload_id}.bin")
