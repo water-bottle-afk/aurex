@@ -83,19 +83,26 @@ def build_login_view(app: "AurexFletApp") -> ft.View:
     def handle_google(_: ft.ControlEvent) -> None:
         app.show_message("Google sign-in is not configured yet", error=True)
 
-    brand = ft.ShaderMask(
-        blend_mode=ft.BlendMode.SRC_IN,
-        shader=ft.LinearGradient(
-            begin=ft.Alignment(-1, -1),
-            end=ft.Alignment(1, 1),
-            colors=[AUREX_GOLD, AUREX_GOLD_SOFT, "#C0841B"],
-        ),
-        content=ft.Text(
-            "AUREX",
-            size=36,
-            weight=ft.FontWeight.BOLD,
-            style=ft.TextStyle(letter_spacing=4),
-        ),
+    brand = ft.Column(
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=6,
+        controls=[
+            ft.Image(src="images/gold_icon.png", width=64, height=64, fit=ft.BoxFit.CONTAIN),
+            ft.ShaderMask(
+                blend_mode=ft.BlendMode.SRC_IN,
+                shader=ft.LinearGradient(
+                    begin=ft.Alignment(-1, -1),
+                    end=ft.Alignment(1, 1),
+                    colors=[AUREX_GOLD, AUREX_GOLD_SOFT, "#C0841B"],
+                ),
+                content=ft.Text(
+                    "AUREX",
+                    size=32,
+                    weight=ft.FontWeight.BOLD,
+                    style=ft.TextStyle(letter_spacing=5),
+                ),
+            ),
+        ],
     )
 
     google_button = ft.OutlinedButton(
@@ -138,56 +145,69 @@ def build_login_view(app: "AurexFletApp") -> ft.View:
         route="/login",
         bgcolor=AUREX_BG,
         scroll=ft.ScrollMode.AUTO,
+        padding=0,
         controls=[
-            ft.Container(
+            ft.Stack(
                 expand=True,
-                padding=32,
-                alignment=ft.Alignment(0, 0),
-                gradient=ft.LinearGradient(
-                    begin=ft.Alignment(-1, -1),
-                    end=ft.Alignment(1, 1),
-                    colors=["#0D0E12", "#1A1A1B", "#0D0F14"],
-                ),
-                content=ft.Container(
-                    width=_CARD_WIDTH,
-                    padding=30,
-                    bgcolor=AUREX_CARD,
-                    border_radius=20,
-                    border=ft.border.all(1, AUREX_SLATE),
-                    content=ft.Column(
-                        tight=True,
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                        controls=[
-                            brand,
-                            ft.Text("Welcome back", color=AUREX_MUTED),
-                            ft.Divider(color=AUREX_SLATE, height=24),
-                            google_button,
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[
-                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                    ft.Text("or", color=AUREX_MUTED, size=12),
-                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                ],
-                            ),
-                            username_field,
-                            password_field,
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[progress, status_text],
-                            ),
-                            login_button,
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[
-                                    ft.Text("New to Aurex?", color=AUREX_MUTED),
-                                    signup_button,
-                                ],
-                            ),
-                            forgot_button,
-                        ],
+                controls=[
+                    # ── gold_bg.png fills the full screen ──────────────────────
+                    ft.Image(
+                        src="images/gold_bg.png",
+                        expand=True,
+                        fit=ft.BoxFit.COVER,
                     ),
-                ),
+                    # ── dark scrim so the bg doesn't compete with the form ──────
+                    ft.Container(
+                        expand=True,
+                        bgcolor="#CC0A0B0F",  # ~80 % opaque near-black
+                    ),
+                    # ── centred form card ───────────────────────────────────────
+                    ft.Container(
+                        expand=True,
+                        padding=32,
+                        alignment=ft.Alignment(0, 0),
+                        content=ft.Container(
+                            width=_CARD_WIDTH,
+                            padding=30,
+                            bgcolor="#E6101215",  # semi-transparent card
+                            border_radius=20,
+                            border=ft.border.all(1, AUREX_SLATE),
+                            content=ft.Column(
+                                tight=True,
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                controls=[
+                                    brand,
+                                    ft.Text("Welcome back", color=AUREX_MUTED),
+                                    ft.Divider(color=AUREX_SLATE, height=24),
+                                    google_button,
+                                    ft.Row(
+                                        alignment=ft.MainAxisAlignment.CENTER,
+                                        controls=[
+                                            ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
+                                            ft.Text("or", color=AUREX_MUTED, size=12),
+                                            ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
+                                        ],
+                                    ),
+                                    username_field,
+                                    password_field,
+                                    ft.Row(
+                                        alignment=ft.MainAxisAlignment.CENTER,
+                                        controls=[progress, status_text],
+                                    ),
+                                    login_button,
+                                    ft.Row(
+                                        alignment=ft.MainAxisAlignment.CENTER,
+                                        controls=[
+                                            ft.Text("New to Aurex?", color=AUREX_MUTED),
+                                            signup_button,
+                                        ],
+                                    ),
+                                    forgot_button,
+                                ],
+                            ),
+                        ),
+                    ),
+                ],
             )
         ],
     )

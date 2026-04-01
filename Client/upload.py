@@ -173,74 +173,75 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
     progress = ft.ProgressBar(value=0, visible=False, color=AUREX_GOLD)
 
     def set_status(message: str, *, error: bool = False, show: bool = True) -> None:
-        status_text.value = message
-        status_text.color = "#EF4444" if error else AUREX_MUTED
-        status_text.visible = show
-        page.update()
+        # Safe to call from any thread — schedules on the event loop.
+        async def _apply() -> None:
+            status_text.value = message
+            status_text.color = "#EF4444" if error else AUREX_MUTED
+            status_text.visible = show
+            page.update()
+        page.run_task(_apply)
 
     def set_busy(is_busy: bool) -> None:
-        for control in (name_field, description_field, price_field, pick_button, upload_button):
-            control.disabled = is_busy
-        progress.visible = is_busy
-        page.update()
+        # Safe to call from any thread — schedules on the event loop.
+        async def _apply() -> None:
+            for control in (name_field, description_field, price_field, pick_button, upload_button):
+                control.disabled = is_busy
+            progress.visible = is_busy
+            page.update()
+        page.run_task(_apply)
 
-    def on_file_picked(e: ft.FilePickerResultEvent) -> None:
-        if not e.files:
-            return
-        f = e.files[0]
-        name = f.name or ""
-        extension = os.path.splitext(name)[1].lower().lstrip(".")
-        if extension not in {"jpg", "jpeg", "png"}:
-            app.show_message("Only JPG and PNG images are supported", error=True)
-            return
+    import base64 as _b64
 
-        # Web mode: f.path is empty; bytes come via f.bytes (base64 str in Flet web)
-        raw: bytes | None = None
-        if f.path and os.path.isfile(f.path):
-            with open(f.path, "rb") as fh:
-                raw = fh.read()
-        elif hasattr(f, "bytes") and f.bytes:
-            import base64 as _b64
-            try:
-                raw = _b64.b64decode(f.bytes) if isinstance(f.bytes, str) else bytes(f.bytes)
-            except Exception:
-                raw = bytes(f.bytes) if f.bytes else None
-
-        if not raw:
-            app.show_message("Could not read file data — try a different browser", error=True)
-            return
-
-        ext = "jpg" if extension == "jpeg" else extension
-        selected_bytes.clear(); selected_bytes.append(raw)
-        selected_name.clear();  selected_name.append(name)
-        selected_ext.clear();   selected_ext.append(ext)
-
-        file_name_text.value = name
-        file_name_text.color = AUREX_TEXT
-
-        # Show inline preview
-        import base64 as _b64
-        mime = "image/png" if ext == "png" else "image/jpeg"
-        preview_image.src = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
-        preview_image.visible = True
-        page.update()
-
-    # Create picker but do NOT add to overlay yet — only add right before use
-    # so it never appears as a stray "unknown control" on other pages.
-    # NOTE: on_result must be set as attribute, not constructor kwarg (Flet compat).
+    # This Flet version: pick_files() is a coroutine that RETURNS the file list
+    # directly — no on_result callback exists.  with_data=True tells Flet to
+    # populate FilePickerFile.bytes so web mode works without a file path.
     picker = ft.FilePicker()
-    picker.on_result = on_file_picked
+    page.overlay.append(picker)   # register before first update
+    page.update()
 
     def pick_file(_: ft.ControlEvent) -> None:
-        # Add picker to overlay only if not already present
-        if picker not in page.overlay:
-            page.overlay.append(picker)
+        async def _open() -> None:
+            files = await picker.pick_files(
+                dialog_title="Choose image to upload",
+                allow_multiple=False,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["jpg", "jpeg", "png"],
+                with_data=True,   # populate .bytes for web mode
+            )
+            if not files:
+                return
+            f = files[0]
+            name = f.name or ""
+            extension = os.path.splitext(name)[1].lower().lstrip(".")
+            if extension not in {"jpg", "jpeg", "png"}:
+                app.show_message("Only JPG and PNG images are supported", error=True)
+                return
+
+            # Desktop: f.path is populated.  Web: use f.bytes (raw bytes object).
+            raw: bytes | None = None
+            if getattr(f, "path", None) and os.path.isfile(f.path):
+                with open(f.path, "rb") as fh:
+                    raw = fh.read()
+            elif getattr(f, "bytes", None):
+                raw = bytes(f.bytes)
+
+            if not raw:
+                app.show_message("Could not read file — try again", error=True)
+                return
+
+            ext = "jpg" if extension == "jpeg" else extension
+            selected_bytes.clear(); selected_bytes.append(raw)
+            selected_name.clear();  selected_name.append(name)
+            selected_ext.clear();   selected_ext.append(ext)
+
+            file_name_text.value = name
+            file_name_text.color = AUREX_TEXT
+            mime = "image/png" if ext == "png" else "image/jpeg"
+            preview_image.src = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
+            preview_image.visible = True
             page.update()
-        picker.pick_files(
-            dialog_title="Choose image to upload",
-            allow_multiple=False,
-            allowed_extensions=["jpg", "jpeg", "png"],
-        )
+
+        page.run_task(_open)
 
     def handle_upload(_: ft.ControlEvent) -> None:
         if not app.session.is_authenticated:
