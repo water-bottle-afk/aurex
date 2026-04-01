@@ -24,7 +24,28 @@ def main(page: ft.Page) -> None:
         page.update()
 
 
+def _suppress_disconnect_noise() -> None:
+    """Silence the benign ClientDisconnected / InvalidState tracebacks that
+    uvicorn/starlette print every time a browser tab closes normally."""
+    import logging
+    for name in ("uvicorn.error", "uvicorn.access", "uvicorn.protocols.websockets"):
+        log = logging.getLogger(name)
+        log.addFilter(
+            type(
+                "_DisconnectFilter",
+                (logging.Filter,),
+                {
+                    "filter": staticmethod(
+                        lambda r: "ClientDisconnected" not in r.getMessage()
+                        and "InvalidState" not in r.getMessage()
+                    )
+                },
+            )()
+        )
+
+
 if __name__ == "__main__":
+    _suppress_disconnect_noise()
     print("[aurex] launching Flet web app...")
     ft.run(
         main,

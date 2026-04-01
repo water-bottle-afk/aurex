@@ -13,6 +13,7 @@ import struct
 import logging
 import hashlib
 from datetime import datetime
+from pathlib import Path
 import base64
 import time
 
@@ -275,6 +276,7 @@ def notify_server(confirmation):
 def _record_block_confirmation(confirmation):
     try:
         block_hash = confirmation.get('block_hash') or ''
+        block_index = confirmation.get('block_index')
         miner_id = confirmation.get('miner_id') or ''
         timestamp = confirmation.get('timestamp') or datetime.utcnow().isoformat()
         tx_list = confirmation.get('transactions') or []
@@ -293,7 +295,7 @@ def _record_block_confirmation(confirmation):
                 miner_id,
                 DEFAULT_POW_DIFFICULTY,
                 len(tx_list),
-                json.dumps({'block_index': confirmation.get('block_index'), 'transactions': tx_list}),
+                json.dumps({'block_index': block_index, 'transactions': tx_list}),
             ),
         )
         cursor.execute('SELECT id FROM blocks WHERE block_hash = ?', (block_hash,))
@@ -302,10 +304,102 @@ def _record_block_confirmation(confirmation):
 
         for tx in tx_list:
             data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
-            from_user = data.get('from') or tx.get('sender') or ''
-            to_user = data.get('to') or data.get('seller')
-            amount = data.get('amount') if data.get('amount') is not None else data.get('price') or 0
+            action = data.get('action', '')
             tx_id = data.get('tx_id', '')
+
+            # ── MINT: new asset registered on-chain ───────────────────────────
+            if action == 'asset_mint':
+                asset_hash = data.get('asset_hash', '')
+                asset_name = data.get('asset_name', '')
+                initial_owner = data.get('owner') or tx.get('sender', '')
+                initial_owner_pk = data.get('owner_pub', '')
+                tx_hash_src = f"MINT|{block_hash}|{asset_hash}|{initial_owner}|{tx_id}"
+                tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
+                cursor.execute(
+                    '''INSERT OR IGNORE INTO transactions
+                       (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (tx_hash, initial_owner, initial_owner, 0.0, timestamp, block_id, 'confirmed'),
+                )
+                if asset_hash and asset_name and initial_owner:
+                    cursor.execute(
+                        '''INSERT OR IGNORE INTO assets
+                           (asset_id, asset_name, owner, block_hash, timestamp)
+                           VALUES (?, ?, ?, ?, ?)''',
+                        (asset_hash, asset_name, initial_owner, block_hash, timestamp),
+                    )
+                logger.info(
+                    "MINT confirmed: asset_hash=%s owner=%s pk=%s...",
+                    asset_hash[:16] if asset_hash else '?',
+                    initial_owner,
+                    initial_owner_pk[:16] if initial_owner_pk else '?',
+                )
+                continue
+
+            # ── PURCHASE: buyer pays seller, buyer gets asset ownership ────────
+            if action == 'purchase':
+                buyer = data.get('from') or tx.get('sender', '')  # buyer pays
+                seller = data.get('to') or ''                      # seller receives money
+                amount = float(data.get('amount') or data.get('price') or 0)
+                asset_id = data.get('asset_id', '')
+                asset_hash = data.get('asset_hash', '')
+                asset_name = data.get('asset_name', '')
+                tx_hash_src = f"PURCHASE|{block_hash}|{buyer}|{seller}|{amount}|{tx_id}"
+                tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
+                cursor.execute(
+                    '''INSERT OR IGNORE INTO transactions
+                       (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (tx_hash, buyer, seller, amount, timestamp, block_id, 'confirmed'),
+                )
+                # buyer becomes the new asset owner
+                if buyer and (asset_id or asset_hash):
+                    ref = asset_hash or asset_id
+                    cursor.execute(
+                        '''UPDATE assets SET owner = ?, block_hash = ?, timestamp = ?
+                           WHERE asset_id = ?''',
+                        (buyer, block_hash, timestamp, ref),
+                    )
+                logger.info(
+                    "PURCHASE confirmed: buyer=%s seller=%s asset=%s amount=%.2f",
+                    buyer, seller, asset_id or asset_hash, amount,
+                )
+                continue
+
+            # ── ASSET_TRANSFER: non-monetary ownership transfer ────────────────
+            if action == 'asset_transfer':
+                from_user = data.get('from') or tx.get('sender', '')
+                to_user = data.get('to') or ''
+                amount = float(data.get('amount') or data.get('price') or 0)
+                asset_id = data.get('asset_id', '')
+                asset_hash = data.get('asset_hash', '')
+                asset_name = data.get('asset_name', '')
+                tx_hash_src = f"TRANSFER|{block_hash}|{from_user}|{to_user}|{amount}|{tx_id}"
+                tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
+                cursor.execute(
+                    '''INSERT OR IGNORE INTO transactions
+                       (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (tx_hash, from_user, to_user, amount, timestamp, block_id, 'confirmed'),
+                )
+                # to_user becomes new owner
+                if to_user and (asset_id or asset_hash):
+                    ref = asset_hash or asset_id
+                    cursor.execute(
+                        '''UPDATE assets SET owner = ?, block_hash = ?, timestamp = ?
+                           WHERE asset_id = ?''',
+                        (to_user, block_hash, timestamp, ref),
+                    )
+                logger.info(
+                    "ASSET_TRANSFER confirmed: from=%s to=%s asset=%s",
+                    from_user, to_user, asset_id or asset_hash,
+                )
+                continue
+
+            # ── Generic fallback ──────────────────────────────────────────────
+            from_user = data.get('from') or tx.get('sender') or ''
+            to_user = data.get('to') or data.get('seller') or ''
+            amount = data.get('amount') if data.get('amount') is not None else data.get('price') or 0
             tx_hash_src = f"{block_hash}|{from_user}|{to_user}|{amount}|{tx_id}"
             tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
             cursor.execute(
@@ -315,23 +409,51 @@ def _record_block_confirmation(confirmation):
                 (tx_hash, from_user, to_user, float(amount), timestamp, block_id, 'confirmed'),
             )
 
-            asset_id = data.get('asset_id')
-            asset_name = data.get('asset_name')
-            if asset_id and asset_name and to_user:
-                cursor.execute(
-                    '''INSERT OR REPLACE INTO assets
-                       (asset_id, asset_name, owner, block_hash, timestamp)
-                       VALUES (?, ?, ?, ?, ?)''',
-                    (str(asset_id), asset_name, to_user, block_hash, timestamp),
-                )
-
         conn.commit()
         conn.close()
+
+        # ── Write a human-readable snapshot to gateway_ledger.json ───────────
+        _append_gateway_ledger({
+            'block_index': block_index,
+            'block_hash': block_hash,
+            'miner_id': miner_id,
+            'timestamp': timestamp,
+            'transactions': tx_list,
+        })
+
     except Exception as e:
         logger.warning("record block_confirmation failed: %s", e)
 
 
+def _append_gateway_ledger(block_entry):
+    """Append a confirmed block summary to BLOCKCHAIN_DB/gateway/gateway_ledger.json."""
+    try:
+        ledger_path = Path(__file__).parent / "BLOCKCHAIN_DB" / "gateway" / "gateway_ledger.json"
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = json.loads(ledger_path.read_text(encoding='utf-8'))
+            if not isinstance(existing, list):
+                existing = []
+        except Exception:
+            existing = []
+        existing.append(block_entry)
+        ledger_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding='utf-8')
+    except Exception as e:
+        logger.warning("_append_gateway_ledger failed: %s", e)
+
+
+def _ensure_gateway_ledger_dir():
+    """Create BLOCKCHAIN_DB/gateway/ and an empty gateway_ledger.json if missing."""
+    base = Path(__file__).parent / "BLOCKCHAIN_DB" / "gateway"
+    base.mkdir(parents=True, exist_ok=True)
+    ledger = base / "gateway_ledger.json"
+    if not ledger.exists():
+        ledger.write_text("[]", encoding="utf-8")
+    logger.info("Gateway ledger dir: %s", base)
+
+
 def main():
+    _ensure_gateway_ledger_dir()
     init_database()
     logger.info(
         "Gateway starting; NODE_PORTS fallback=%s (used until peers register)",

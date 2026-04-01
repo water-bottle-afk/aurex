@@ -316,36 +316,86 @@ class AurexProtocolClient:
                 return "success"
             raise ProtocolError(self._extract_error_message(finish))
 
-    def upload_asset_chunked(
+    def upload_marketplace_item_from_bytes(
         self,
         *,
-        file_path: str,
+        file_bytes: bytes,
+        file_name: str,
+        asset_name: str,
+        description: str,
+        username: str,
+        file_type: str,
+        cost: float,
+        asset_hash: str,
+        mint_tx_id: str,
+        mint_timestamp: str,
+        public_key: str,
+        mint_signature: str,
         on_progress: Callable[[float], None] | None = None,
-        chunk_size: int = 4096,
+        preferred_chunk_size: int = 32768,
     ) -> str:
-        file_size = os.path.getsize(file_path)
-        total_chunks = (file_size + chunk_size - 1) // chunk_size
+        """Upload from raw bytes (web mode where file.path is unavailable)."""
+        import io
+        file_type = file_type.lower().replace("jpeg", "jpg")
+        file_size = len(file_bytes)
+        total_chunks = (file_size + preferred_chunk_size - 1) // preferred_chunk_size
         with self.session.socket_lock:
             self._ensure_connected_unlocked()
-            self._send_frame_unlocked(f"UPLOAD_START|{file_size}".encode("utf-8"))
-            start_reply = self._recv_text_frame_unlocked()
-            if self._is_error_response(start_reply):
-                raise ProtocolError(self._extract_error_message(start_reply))
+            init_payload = {
+                "asset_name": asset_name,
+                "username": username,
+                "description": description,
+                "file_type": file_type,
+                "cost": cost,
+                "file_size": file_size,
+                "original_name": file_name,
+                "total_chunks": total_chunks,
+                "asset_hash": asset_hash,
+                "mint_tx_id": mint_tx_id,
+                "mint_timestamp": mint_timestamp,
+                "public_key": public_key,
+                "mint_signature": mint_signature,
+            }
+            init_message = "UPLOAD_INIT|" + base64.b64encode(
+                json.dumps(init_payload).encode("utf-8")
+            ).decode("ascii")
+            self._send_frame_unlocked(init_message.encode("utf-8"))
+            init_response = self._recv_text_frame_unlocked()
+            init_parts = init_response.split("|")
+            if not init_parts or init_parts[0] != "OK":
+                raise ProtocolError(self._extract_error_message(init_response))
+            upload_id = init_parts[1] if len(init_parts) > 1 else None
+            if not upload_id or upload_id == "[]":
+                raise ProtocolError("Invalid upload_id from server")
+            server_chunk_size = int(init_parts[2]) if len(init_parts) > 2 else preferred_chunk_size
+            chunk_size = server_chunk_size if server_chunk_size > 0 else preferred_chunk_size
 
+            handle = io.BytesIO(file_bytes)
             sent_chunks = 0
-            with open(file_path, "rb") as handle:
-                while True:
-                    chunk = handle.read(chunk_size)
-                    if not chunk:
-                        break
-                    self._send_frame_unlocked(chunk)
-                    ack = self._recv_text_frame_unlocked()
-                    if not (ack.startswith("GOTPRT") or ack.startswith("OK")):
-                        raise ProtocolError(self._extract_error_message(ack))
-                    sent_chunks += 1
-                    if on_progress:
-                        on_progress(min(1.0, sent_chunks / max(total_chunks, 1)))
-        return "success"
+            seq = 0
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                payload = b"UPLOAD_CHUNK|" + upload_id.encode("utf-8") + b"|" + struct.pack(">I", seq) + chunk
+                self._send_frame_unlocked(payload)
+                ack = self._recv_text_frame_unlocked()
+                if not (ack == f"OK|{seq}" or ack.startswith("GOTPRT")):
+                    raise ProtocolError(f"Chunk {seq} rejected: {self._extract_error_message(ack)}")
+                seq += 1
+                sent_chunks += 1
+                if on_progress:
+                    on_progress(min(1.0, sent_chunks / max(total_chunks, 1)))
+
+            self._send_frame_unlocked(f"UPLOAD_FINISH|{upload_id}".encode("utf-8"))
+            finish = self._recv_text_frame_unlocked()
+            if finish.startswith("OK"):
+                return "success"
+            raise ProtocolError(self._extract_error_message(finish))
+
+    # NOTE: upload_asset_chunked was removed — it sent UPLOAD_START which has no
+    # server handler. All uploads must go through upload_marketplace_item_binary
+    # or upload_marketplace_item_from_bytes (UPLOAD_INIT -> UPLOAD_CHUNK -> UPLOAD_FINISH).
 
     def buy_asset(
         self,
@@ -414,8 +464,11 @@ class AurexProtocolClient:
             f"SEND|{asset_id}|{sender_username}|{receiver_username}|{tx_id}|{timestamp}|{public_key}|{signature}"
         )
         response = self._request_text(message)
-        if response.startswith("OK"):
-            return "success"
+        parts = response.split("|")
+        if parts[0] == "OK":
+            # Server returns OK|PENDING|tx_id — capture tx_id so caller can poll GET_TX_STATUS.
+            returned_tx_id = parts[2] if len(parts) > 2 else tx_id
+            return returned_tx_id
         raise ProtocolError(self._extract_error_message(response))
 
     def get_transaction_status(self, tx_id: str) -> dict[str, str]:
@@ -486,6 +539,15 @@ class AurexProtocolClient:
         if not token or "|" in token:
             raise ProtocolError("Invalid token")
         response = self._request_text(f"REGISTER_DEVICE|{username}|{platform}|{token}")
+        return response.startswith("OK")
+
+    def update_public_key(self, username: str, public_key_b64: str) -> bool:
+        """Notify server of a new public key after key regeneration."""
+        if not username or "|" in username:
+            raise ProtocolError("Invalid username")
+        if not public_key_b64:
+            raise ProtocolError("Missing public key")
+        response = self._request_text(f"UPDATE_PUBLIC_KEY|{username}|{public_key_b64}")
         return response.startswith("OK")
 
     def list_asset_for_sale(self, *, asset_id: str, username: str, price: float) -> str:
@@ -634,15 +696,10 @@ class AurexProtocolClient:
         if not raw:
             return None
 
+        # NOTE: ASSET_START header strip was removed — server now sends two separate
+        # framed messages (text header + raw binary), so the binary frame never
+        # contains an ASSET_START prefix. The strip was dead code from an old protocol.
         data = raw
-        if data.startswith(b"ASSET_START"):
-            newline_index = data.find(b"\n")
-            pipe_index = data.find(b"|")
-            if newline_index >= 0 and newline_index + 1 < len(data):
-                data = data[newline_index + 1 :]
-            elif pipe_index >= 0 and pipe_index + 1 < len(data):
-                data = data[pipe_index + 1 :]
-
         if not self._has_supported_image_signature(data):
             jpeg_index = self._index_of_signature(data, b"\xff\xd8")
             png_index = self._index_of_signature(data, b"\x89P")

@@ -11,6 +11,12 @@ import logging
 
 
 class PROTO:
+    # Known binary prefixes — logged as <binary N bytes> without crashing.
+    _BINARY_PREFIXES = (
+        b"\xff\xd8",   # JPEG
+        b"\x89PNG",   # PNG
+    )
+
     def log(self, dirct, data):
         try:
             decoded = data.decode()
@@ -21,10 +27,17 @@ class PROTO:
             elif decoded.startswith("UPLOAD_INIT|"):
                 decoded = "UPLOAD_INIT|<payload>"
             data = decoded
-        except Exception as e:
-            if data[:5] != b'GETKY':  # raise exception but only if received bytes after the encryption stage
-                self.Print("the data received is in bytes", 50)
-            data = data[:6].decode() + data[6:].hex()  # query| + data in hex
+        except Exception:
+            # Binary frame — check for known image signatures first so we
+            # don't try to decode raw JPEG/PNG bytes (0xff / 0x89 are not
+            # valid UTF-8 start bytes and would raise a UnicodeDecodeError).
+            if any(data.startswith(sig) for sig in self._BINARY_PREFIXES):
+                data = f"<binary image {len(data)} bytes>"
+            elif data[:5] == b'GETKY':
+                data = data[:6].hex() + data[6:].hex()
+            else:
+                # Safe hex fallback — never call .decode() on unknown binary.
+                data = f"<binary {len(data)} bytes> [{data[:8].hex()}...]"
         if dirct == '1':
             self.Print("got <<<<< " + data, 10)
         else:

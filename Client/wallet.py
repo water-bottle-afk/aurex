@@ -29,7 +29,20 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 
-_WALLET_DIR = Path(os.getenv("AUREX_WALLET_DIR", Path.home() / ".aurex_wallet"))
+def _default_wallet_dir() -> Path:
+    """Resolve wallet dir: env override → ~/Downloads/aurex_wallet → ~/.aurex_wallet fallback."""
+    env = os.getenv("AUREX_WALLET_DIR")
+    if env:
+        return Path(env)
+    downloads = Path.home() / "Downloads" / "aurex_wallet"
+    try:
+        downloads.mkdir(parents=True, exist_ok=True)
+        return downloads
+    except Exception:
+        return Path.home() / ".aurex_wallet"
+
+
+_WALLET_DIR = _default_wallet_dir()
 _KEY_FILE = _WALLET_DIR / "aurex_private_key.pem"
 _PUB_FILE = _WALLET_DIR / "aurex_public_key.txt"
 

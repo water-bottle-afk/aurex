@@ -402,6 +402,7 @@ class PoWNode:
             signature = message.get('signature', '')
             public_key = message.get('public_key', '')
             start_timestamp = datetime.utcnow().isoformat()
+            tx_type = tx_data.get('action', 'unknown') if isinstance(tx_data, dict) else 'unknown'
 
             ack = {'type': 'MINING_STARTED', 'miner': self.node_id, 'message': 'Mining started'}
             client_socket.send(json.dumps(ack).encode())
@@ -409,13 +410,13 @@ class PoWNode:
 
             ok, reason = self._validate_incoming_tx(sender, tx_data, signature, public_key)
             if not ok:
-                logger.warning("tx rejected: %s", reason)
+                logger.warning("tx rejected (%s): %s", tx_type, reason)
                 return
 
             with self.mempool_lock:
-                tx_id = tx_data.get('tx_id')
+                tx_id = tx_data.get('tx_id') if isinstance(tx_data, dict) else None
                 if tx_id in self.seen_tx_ids:
-                    logger.warning("tx rejected: duplicate tx_id")
+                    logger.warning("tx rejected: duplicate tx_id (%s)", tx_type)
                     return
                 self.mempool.append({
                     'sender': sender,
@@ -425,7 +426,7 @@ class PoWNode:
                     'start_timestamp': start_timestamp,
                 })
 
-            logger.info("gossip: NEW_TRANSACTION received sender=%s", sender)
+            logger.info("NEW_TRANSACTION queued: type=%s sender=%s tx_id=%s", tx_type, sender, tx_id)
             self._start_mining_if_needed()
         except Exception as e:
             try:
@@ -516,8 +517,9 @@ class PoWNode:
 
         self.last_block_index = block_index
         self.last_block_hash = block_hash
-        logger.info("block mined index=%s hash=%s...", block_index, block_hash[:16])
+        tx_type = tx.get('data', {}).get('action', 'unknown') if isinstance(tx, dict) else 'unknown'
         tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+        logger.info("block mined index=%s hash=%s... type=%s tx_id=%s", block_index, block_hash[:16], tx_type, tx_id)
         if tx_id:
             self.seen_tx_ids.add(tx_id)
 

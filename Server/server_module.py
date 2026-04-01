@@ -4,9 +4,9 @@ One persistent connection per client, event-based processing
 
 PROTOCOL SPECIFICATION
 ======================
-All client-server communication uses TLS on port 23456 with 2-byte length prefix.
+All client-server communication uses TLS on port 23456 with 4-byte big-endian length prefix.
 
-Message Format: [2-byte length][protocol command]
+Message Format: [4-byte unsigned int, big-endian][protocol command payload]
 
 Supported Commands:
   1. START - Connection initialization
@@ -346,6 +346,7 @@ class ClientSession:
             "REGISTER_DEVICE": self.handle_register_device,
             "LIST_ITEM": self.handle_list_item,
             "UNLIST_ITEM": self.handle_unlist_item,
+            "UPDATE_PUBLIC_KEY": self.handle_update_public_key,
         }
     
     def process_message(self, message):
@@ -578,14 +579,16 @@ class ClientSession:
         return "OK|Password updated successfully"
 
     def handle_logout(self, params):
-        """Protocol Message 7: LGOUT - Logout
-        Format: LGOUT|
+        """Protocol Message: LOGOUT - End authenticated session.
+        Format: LOGOUT|username
+        Returns: OK|logged_out
+        NOTE: Was returning EXTLG (inconsistent). Fixed to OK for protocol uniformity.
         """
         self.is_authenticated = False
         username = self.username
         self.username = None
         self.Print(f" User {username} logged out", 20)
-        return "EXTLG|Logout successful"
+        return "OK|logged_out"
 
     def _normalize_file_type(self, file_type: str) -> str:
         """Normalize file type to a supported extension."""
@@ -891,6 +894,7 @@ class ClientSession:
                 session.cost,
                 session.description,
                 actual_hash,
+                session.public_key,
             )
         except Exception as e:
             self._cleanup_upload(upload_id)
@@ -915,6 +919,7 @@ class ClientSession:
             'owner': session.username,
             'asset_hash': actual_hash,
             'asset_name': session.asset_name,
+            'metadata_link': local_rel_path,
             'timestamp': session.mint_timestamp,
             'public_key': session.public_key,
             'signature': session.mint_signature,
@@ -925,10 +930,10 @@ class ClientSession:
                 self.server.tx_status[session.mint_tx_id]['message'] = 'Duplicate mint tx_id'
             else:
                 self.server.tx_status[session.mint_tx_id] = {
+                    'tx_type': 'mint',
                     'status': 'queued',
                     'message': 'Queued for PoW mint',
                     'created_at': time.time(),
-                    'tx_type': 'mint',
                     'asset_hash': actual_hash,
                     'asset_name': session.asset_name,
                     'owner': session.username,
@@ -1083,6 +1088,7 @@ class ClientSession:
                 return "ERR02|Invalid signature"
 
             purchase = {
+                'tx_type': 'purchase',
                 'tx_id': tx_id,
                 'buyer': username,
                 'seller': seller,
@@ -1406,6 +1412,31 @@ class ClientSession:
             return "ERR03|Failed to register device"
         return "OK|registered"
 
+    def handle_update_public_key(self, params):
+        """
+        UPDATE_PUBLIC_KEY - Replace stored public key after client key regeneration.
+        Format: UPDATE_PUBLIC_KEY|username|new_public_key_b64
+        Returns: OK|updated or ERR|error_message
+        """
+        if not self.is_authenticated:
+            return "ERR02|Not authenticated"
+        if len(params) < 2:
+            return "ERR01|Invalid format: UPDATE_PUBLIC_KEY|username|public_key_b64"
+        username = params[0].strip()
+        new_pk = params[1].strip()
+        if not username or not new_pk or '|' in username:
+            return "ERR01|Invalid parameters"
+        if username != self.username:
+            return "ERR02|Unauthorized"
+        try:
+            ok = self.db.set_user_public_key_force(username, new_pk)
+            if ok:
+                self.Print(f" Public key updated for {username}", 20)
+                return "OK|updated"
+            return "ERR03|Failed to update public key"
+        except Exception as e:
+            return f"ERR99|{str(e)}"
+
     def handle_list_item(self, params):
         """
         LIST_ITEM - List an owned asset for sale
@@ -1659,6 +1690,31 @@ class Server:
         asset_id = info.get('asset_id')
         asset_name = info.get('asset_name') or (f"asset {asset_id}" if asset_id else "asset")
         message = info.get('message') or ''
+
+        if tx_type == 'mint':
+            owner = info.get('owner')
+            if status == 'confirmed':
+                if owner:
+                    self.create_and_push_notification(
+                        username=owner,
+                        title="Asset authenticated on blockchain",
+                        body=f'"{asset_name}" has been confirmed on the blockchain. It is now live on the marketplace.',
+                        notif_type="mint_confirmed",
+                        asset_id=asset_id,
+                        tx_id=tx_id,
+                    )
+            elif status in ('failed', 'timeout'):
+                if owner:
+                    detail = message if message else f'Blockchain authentication of "{asset_name}" failed.'
+                    self.create_and_push_notification(
+                        username=owner,
+                        title="Asset authentication failed",
+                        body=detail,
+                        notif_type="mint_failed",
+                        asset_id=asset_id,
+                        tx_id=tx_id,
+                    )
+            return
 
         if tx_type == 'transfer':
             sender = info.get('sender')
@@ -2041,6 +2097,7 @@ class Server:
             'asset_name': mint.get('asset_name'),
             'owner': mint.get('owner'),
             'owner_pub': mint.get('public_key'),
+            'metadata_link': mint.get('metadata_link', ''),
             'timestamp': mint.get('timestamp'),
         }
         payload = {
@@ -2166,7 +2223,8 @@ class Server:
                         break
                     
                     try:
-                        # Inline binary upload chunk: UPLOAD_CHUNK|{upload_id}|{4-byte-seq}{raw-data}
+                        # ── Inline binary upload chunk ────────────────────────────────
+                        # UPLOAD_CHUNK|{upload_id}|{4-byte-seq}{raw-data}
                         # Detected before UTF-8 decode to avoid failures on binary payload.
                         if isinstance(message, bytes) and message.startswith(b"UPLOAD_CHUNK|"):
                             try:
@@ -2186,6 +2244,29 @@ class Server:
                                 response = "ERR|INVALID_ID"
                             self.Print(f" {addr[0]}:{addr[1]} -> {response[:80]}", 10)
                             session.proto.send_one_message(response.encode())
+                            continue
+
+                        # ── Inline GET_ASSET_BINARY ───────────────────────────────────
+                        # Handle before UTF-8 decode; sends two frames (text + raw binary)
+                        # and must NOT go through process_message to avoid the binary
+                        # frame being read back as the next command.
+                        if isinstance(message, bytes) and message.startswith(b"GET_ASSET_BINARY|"):
+                            try:
+                                rel_path = message.split(b"|", 1)[1].decode('utf-8').strip()
+                                self.Print(f" {addr[0]}:{addr[1]} <- GET_ASSET_BINARY|{rel_path}", 20)
+                                self.Print(f" Processing command: GET_ASSET_BINARY", 10)
+                                image_data = _read_image_bytes(rel_path)
+                                if image_data is None:
+                                    session.proto.send_one_message(b"ERR05|Asset not found or unreadable")
+                                else:
+                                    session.proto.send_one_message(f"ASSET_START|{len(image_data)}".encode())
+                                    session.proto.send_one_message(image_data)
+                            except Exception as asset_err:
+                                self.Print(f" GET_ASSET_BINARY error from {addr[0]}:{addr[1]}: {asset_err}", 40)
+                                try:
+                                    session.proto.send_one_message(f"ERR99|{asset_err}".encode())
+                                except Exception:
+                                    pass
                             continue
 
                         msg_str = message.decode() if isinstance(message, bytes) else message
