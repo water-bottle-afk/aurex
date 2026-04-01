@@ -12,6 +12,9 @@ from .marketplace import build_marketplace_view
 from .signup import build_signup_view
 from .settings import build_settings_view
 from .upload import build_upload_view
+from .notifications import build_notifications_view
+from .my_assets import build_my_assets_view
+import Client.notifications as _notif_store
 
 
 class AurexFletApp:
@@ -46,12 +49,22 @@ class AurexFletApp:
         print(f"[aurex] start() -> initial render done")
 
     def show_message(self, message: str, *, error: bool = False) -> None:
-        self.page.snack_bar = ft.SnackBar(
-            content=ft.Text(message, color="white"),
-            bgcolor=AUREX_ERROR if error else AUREX_SUCCESS,
-        )
-        self.page.snack_bar.open = True
-        self.page.update()
+        """Show a snackbar message from any thread (UI or background worker).
+
+        Direct page.update() from a background thread is silently ignored by
+        Flet, so protocol errors (ERR02|Cannot buy your own asset, etc.) never
+        appeared in the UI.  page.run_task schedules the update on the event
+        loop so it always fires correctly.
+        """
+        async def _show() -> None:
+            self.page.snack_bar = ft.SnackBar(
+                content=ft.Text(message, color="white"),
+                bgcolor=AUREX_ERROR if error else AUREX_SUCCESS,
+                open=True,
+            )
+            self.page.update()
+
+        self.page.run_task(_show)
 
     def connect_if_needed(self, *, discover_first: bool = True) -> None:
         self.client.connect(discover_first=discover_first)
@@ -153,10 +166,24 @@ class AurexFletApp:
         else:
             self.page.run_task(self.page.push_route, "/login")
 
+    def _purge_overlay_filepickers(self) -> None:
+        """Remove any FilePicker controls left in page.overlay from a previous route.
+
+        FilePickers are added dynamically (e.g. in upload.py) right before use and
+        must be removed on navigation.  If they remain in the overlay while on another
+        page, Flet renders them as a big red rectangle labelled 'unknown control'.
+        """
+        stale = [c for c in list(self.page.overlay) if isinstance(c, ft.FilePicker)]
+        for c in stale:
+            try:
+                self.page.overlay.remove(c)
+            except ValueError:
+                pass
+
     def _render_current_route(self) -> None:
         route = self.page.route or "/login"
         print(f"[aurex] _render_current_route: {route!r}")
-        protected = {"/marketplace", "/settings", "/upload"}
+        protected = {"/marketplace", "/settings", "/upload", "/my_assets"}
         if route in protected and not self.session.is_authenticated:
             route = "/login"
             self.page.route = route
@@ -168,6 +195,8 @@ class AurexFletApp:
             "/marketplace": build_marketplace_view,
             "/settings": build_settings_view,
             "/upload": build_upload_view,
+            "/notifications": build_notifications_view,
+            "/my_assets": build_my_assets_view,
         }
         builder = builders.get(route, build_login_view)
         try:
@@ -181,10 +210,19 @@ class AurexFletApp:
                 controls=[ft.Text(f"Error loading page: {exc}", color="red", size=14)],
             )
         with self._render_lock:
+            # Purge stale FilePickers BEFORE clearing views to avoid the red
+            # 'unknown control' rectangle that appears when a picker from /upload
+            # survives into other pages.
+            self._purge_overlay_filepickers()
             self.page.views.clear()
             self.page.views.append(view)
             self.page.update()
 
-    def _on_server_event(self, event: ServerEvent) -> None:
+    def push_notification(self, title: str, body: str, notif_type: str = "info") -> None:
+        """Add a notification and refresh the bell badge if on marketplace."""
+        _notif_store.push_notification(title, body, notif_type)
+        self.page.run_task(self._noop_update_async)
+
+    def _on_server_event(self, event) -> None:
         pass  # pubsub not used in Flet 0.83
 

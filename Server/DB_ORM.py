@@ -168,6 +168,7 @@ class MarketplaceDB:
                 file_type TEXT NOT NULL,
                 cost REAL NOT NULL,
                 asset_hash TEXT,
+                owner_public_key TEXT,
                 timestamp TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 is_listed INTEGER NOT NULL DEFAULT 1,
@@ -175,7 +176,7 @@ class MarketplaceDB:
             )
         ''')
 
-        # Ensure description column exists for older DBs
+        # Ensure columns exist for older DBs
         cursor.execute("PRAGMA table_info(marketplace_items)")
         item_cols = {row[1] for row in cursor.fetchall()}
         if "description" not in item_cols:
@@ -184,6 +185,8 @@ class MarketplaceDB:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN asset_hash TEXT")
         if "is_listed" not in item_cols:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN is_listed INTEGER NOT NULL DEFAULT 1")
+        if "owner_public_key" not in item_cols:
+            cursor.execute("ALTER TABLE marketplace_items ADD COLUMN owner_public_key TEXT")
 
         # Notifications table
         cursor.execute('''
@@ -331,6 +334,10 @@ class MarketplaceDB:
             print(f"Error setting user public key: {e}")
             return False
     
+    def set_user_public_key_force(self, username, public_key):
+        """Unconditionally overwrite the stored public key (for key regeneration)."""
+        return self.set_user_public_key(username, public_key, force_update=True)
+
     def register_wallet(self, username: str, public_key_b64: str, key_type: str = "ED25519") -> bool:
         """Register or update a wallet entry in the dedicated wallets table.
 
@@ -550,20 +557,19 @@ class MarketplaceDB:
             print(f"Error updating user: {e}")
             return False
     
-    def add_marketplace_item(self, asset_name, username, url, file_type, cost, description="", asset_hash=None):
+    def add_marketplace_item(self, asset_name, username, url, file_type, cost, description="", asset_hash=None, owner_public_key=None):
         """Add item to marketplace"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
-            # Convert Google Drive URL to direct view URL
+
             direct_url = convert_drive_url(url)
-            
+
             cursor.execute('''
                 INSERT INTO marketplace_items (
-                    asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
+                    asset_name, description, username, url, file_type, cost, asset_hash, owner_public_key, timestamp, created_at, is_listed
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 asset_name,
                 description,
@@ -572,6 +578,7 @@ class MarketplaceDB:
                 file_type,
                 cost,
                 asset_hash,
+                owner_public_key,
                 datetime.now().isoformat(),
                 datetime.now().isoformat(),
                 1,
@@ -620,6 +627,54 @@ class MarketplaceDB:
             print(f"Error getting items: {e}")
             return []
     
+    def get_latest_items(self, limit=12):
+        """Get latest marketplace items ordered by created_at DESC (used by GET_ITEMS_PAGINATED)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
+                FROM marketplace_items
+                WHERE is_listed = 1
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [
+                {'id': r[0], 'asset_name': r[1], 'description': r[2], 'username': r[3],
+                 'url': r[4], 'file_type': r[5], 'cost': r[6], 'asset_hash': r[7],
+                 'timestamp': r[8], 'created_at': r[9], 'is_listed': r[10]}
+                for r in rows
+            ]
+        except Exception as e:
+            print(f"Error in get_latest_items: {e}")
+            return []
+
+    def get_items_before_timestamp(self, last_timestamp, limit=12):
+        """Get marketplace items created before last_timestamp (cursor-based pagination)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
+                FROM marketplace_items
+                WHERE is_listed = 1 AND created_at < ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (last_timestamp, limit))
+            rows = cursor.fetchall()
+            conn.close()
+            return [
+                {'id': r[0], 'asset_name': r[1], 'description': r[2], 'username': r[3],
+                 'url': r[4], 'file_type': r[5], 'cost': r[6], 'asset_hash': r[7],
+                 'timestamp': r[8], 'created_at': r[9], 'is_listed': r[10]}
+                for r in rows
+            ]
+        except Exception as e:
+            print(f"Error in get_items_before_timestamp: {e}")
+            return []
+
     def get_item_by_id(self, item_id):
         """Get marketplace item by ID"""
         try:
