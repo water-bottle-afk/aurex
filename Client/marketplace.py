@@ -353,6 +353,8 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
 
     username = app.session.user_data.username if app.session.user_data else "Guest"
     item_count = len(app.session.market_items)
+    _bal = app.session.wallet_balance
+    _balance_text = f"${_bal:.2f}" if isinstance(_bal, (int, float)) else "—"
 
     # ── grid / state area ─────────────────────────────────────────────────────
     if app.market_error and not app.session.market_items:
@@ -532,6 +534,29 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
                         height=36,
                         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
                         on_click=lambda _: page.run_task(page.push_route, "/my_assets"),
+                    ),
+                    # ── wallet balance chip ───────────────────────────────────
+                    ft.Container(
+                        height=36,
+                        padding=ft.padding.symmetric(horizontal=12, vertical=0),
+                        border_radius=10,
+                        bgcolor="#FFD70018",
+                        border=ft.border.all(1, "#FFD70055"),
+                        tooltip="Your wallet balance",
+                        alignment=ft.Alignment(0, 0),
+                        content=ft.Row(
+                            spacing=6,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            controls=[
+                                ft.Icon(ft.Icons.TOLL_OUTLINED, size=15, color=AUREX_GOLD),
+                                ft.Text(
+                                    _balance_text,
+                                    size=13,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=AUREX_GOLD,
+                                ),
+                            ],
+                        ),
                     ),
                     notif_bell,
                     ft.IconButton(

@@ -122,64 +122,56 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
 
     return ft.View(
         route="/signup",
-        bgcolor=AUREX_BG,
+        bgcolor="#080A0E",  # matches scrim so any gap is invisible
         padding=0,
         controls=[
-            ft.Stack(
+            ft.Container(
                 expand=True,
-                controls=[
-                    # ── gold_bg.png fills the full screen ──────────────────────
-                    ft.Image(
-                        src="images/gold_bg.png",
-                        expand=True,
-                        fit=ft.BoxFit.COVER,
-                    ),
-                    # ── dark scrim so the bg doesn't compete with the form ──────
-                    ft.Container(
-                        expand=True,
-                        bgcolor="#CC0A0B0F",  # ~80 % opaque near-black
-                    ),
-                    # ── centred form card ───────────────────────────────────────
-                    ft.Container(
-                        expand=True,
-                        padding=32,
-                        alignment=ft.Alignment(0, 0),
-                        content=ft.Container(
-                            width=_CARD_WIDTH,
-                            padding=30,
-                            bgcolor="#E6101215",  # semi-transparent card
-                            border_radius=20,
-                            border=ft.border.all(1, AUREX_SLATE),
-                            content=ft.Column(
-                                tight=True,
-                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                image=ft.DecorationImage(
+                    src="images/gold_bg.png",
+                    fit=ft.BoxFit.COVER,
+                ),
+                gradient=ft.LinearGradient(
+                    begin=ft.Alignment(0, 0),
+                    end=ft.Alignment(0, 0),
+                    colors=["#CC080A0E", "#CC080A0E"],
+                ),
+                alignment=ft.Alignment(0, 0),
+                padding=ft.padding.symmetric(vertical=32, horizontal=32),
+                content=ft.Container(
+                    width=_CARD_WIDTH,
+                    padding=30,
+                    bgcolor="#EE0D0F13",
+                    border_radius=20,
+                    border=ft.border.all(1, AUREX_SLATE),
+                    content=ft.Column(
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            brand,
+                            ft.Text("Create your account", color=AUREX_MUTED),
+                            ft.Divider(color=AUREX_SLATE, height=24),
+                            google_button,
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.CENTER,
                                 controls=[
-                                    brand,
-                                    ft.Text("Create your account", color=AUREX_MUTED),
-                                    ft.Divider(color=AUREX_SLATE, height=24),
-                                    google_button,
-                                    ft.Row(
-                                        alignment=ft.MainAxisAlignment.CENTER,
-                                        controls=[
-                                            ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                            ft.Text("or", color=AUREX_MUTED, size=12),
-                                            ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                        ],
-                                    ),
-                                    username_field,
-                                    email_field,
-                                    password_field,
-                                    ft.Row(
-                                        alignment=ft.MainAxisAlignment.CENTER,
-                                        controls=[progress, status_text],
-                                    ),
-                                    sign_up_button,
-                                    back_button,
+                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
+                                    ft.Text("or", color=AUREX_MUTED, size=12),
+                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
                                 ],
                             ),
-                        ),
+                            username_field,
+                            email_field,
+                            password_field,
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                controls=[progress, status_text],
+                            ),
+                            sign_up_button,
+                            back_button,
+                        ],
                     ),
-                ],
+                ),
             )
         ],
     )

@@ -147,14 +147,13 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
             ],
         )
 
-    # ── state held in closures ────────────────────────────────────────────────
-    selected_bytes: list[bytes] = []     # [0] = raw file bytes when chosen
-    selected_name: list[str]  = []       # [0] = original filename
-    selected_ext:  list[str]  = []       # [0] = 'jpg' or 'png'
+    # ── file state (dict so closures share one mutable object) ─────────────────
+    selected: dict = {"bytes": None, "name": "", "ext": ""}
+    max_upload_bytes = 10 * 1024 * 1024  # 10MB safety cap for web + mobile
 
     file_name_text = ft.Text("No file selected", color=AUREX_MUTED, size=12)
     preview_image = ft.Image(
-        src="",          # required by Flet; set to data URI in on_file_picked
+        src="",
         visible=False,
         width=200, height=140,
         fit=ft.BoxFit.COVER,
@@ -192,62 +191,87 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
 
     import base64 as _b64
 
-    # This Flet version: pick_files() is a coroutine that RETURNS the file list
-    # directly — no on_result callback exists.  with_data=True tells Flet to
-    # populate FilePickerFile.bytes so web mode works without a file path.
-    picker = ft.FilePicker()
-    page.overlay.append(picker)   # register before first update
+    # ── FilePicker: pick → upload → on_upload reads bytes from temp file ─────
+    # Avoids await pick_files(with_data=True) which times out in Flet web.
+    # Flow: pick_files() opens dialog (no await hang) → result fires on_result
+    # callback → upload() pushes file to Flet's local upload server →
+    # on_upload fires with temp path → we read raw bytes from disk.
+
+    def _on_pick_result(e: ft.FilePickerResultEvent) -> None:
+        if not e.files:
+            return
+        f = e.files[0]
+        name = f.name or ""
+        extension = os.path.splitext(name)[1].lower().lstrip(".")
+        if extension not in {"jpg", "jpeg", "png"}:
+            set_status("Only JPG and PNG images are supported", error=True)
+            return
+        if getattr(f, "size", None) and f.size > max_upload_bytes:
+            set_status("File too large (max 10MB)", error=True)
+            return
+        # Kick off upload to Flet's local server so on_upload fires with path.
+        upload_url = page.get_upload_url(name, 60)
+        picker.upload([ft.FilePickerUploadFile(name=name, upload_url=upload_url)])
+
+    def _on_upload(e: ft.FilePickerUploadEvent) -> None:
+        if e.error:
+            set_status(f"Upload error: {e.error}", error=True)
+            return
+        if e.progress is not None and e.progress < 1.0:
+            return  # still uploading
+        # File is fully uploaded — read from project-root/uploads/ which
+        # matches the upload_dir passed to ft.run() in main.py.
+        upload_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "uploads"
+        )
+        file_path = os.path.join(upload_dir, e.file_name)
+        if not os.path.isfile(file_path):
+            set_status("Could not find uploaded file", error=True)
+            return
+        with open(file_path, "rb") as fh:
+            raw = fh.read()
+        if not raw:
+            set_status("Could not read file — try again", error=True)
+            return
+        if len(raw) > max_upload_bytes:
+            set_status("File too large (max 10MB)", error=True)
+            return
+        name = e.file_name
+        extension = os.path.splitext(name)[1].lower().lstrip(".")
+        ext = "jpg" if extension == "jpeg" else extension
+        selected["bytes"] = raw
+        selected["name"]  = name
+        selected["ext"]   = ext
+        mime = "image/png" if ext == "png" else "image/jpeg"
+        preview_image.src     = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
+        preview_image.visible = True
+        file_name_text.value  = name
+        file_name_text.color  = AUREX_TEXT
+        set_status("", show=False)
+        page.update()
+
+    # Keep a single FilePicker instance per Page to avoid duplicate overlays.
+    picker: ft.FilePicker | None = getattr(page, "_aurex_file_picker", None)
+    if picker is None:
+        picker = ft.FilePicker(on_result=_on_pick_result, on_upload=_on_upload)
+        page.overlay.append(picker)
+        setattr(page, "_aurex_file_picker", picker)
+    else:
+        picker.on_result = _on_pick_result
+        picker.on_upload = _on_upload
     page.update()
 
     def pick_file(_: ft.ControlEvent) -> None:
-        async def _open() -> None:
-            files = await picker.pick_files(
-                dialog_title="Choose image to upload",
-                allow_multiple=False,
-                file_type=ft.FilePickerFileType.CUSTOM,
-                allowed_extensions=["jpg", "jpeg", "png"],
-                with_data=True,   # populate .bytes for web mode
-            )
-            if not files:
-                return
-            f = files[0]
-            name = f.name or ""
-            extension = os.path.splitext(name)[1].lower().lstrip(".")
-            if extension not in {"jpg", "jpeg", "png"}:
-                app.show_message("Only JPG and PNG images are supported", error=True)
-                return
-
-            # Desktop: f.path is populated.  Web: use f.bytes (raw bytes object).
-            raw: bytes | None = None
-            if getattr(f, "path", None) and os.path.isfile(f.path):
-                with open(f.path, "rb") as fh:
-                    raw = fh.read()
-            elif getattr(f, "bytes", None):
-                raw = bytes(f.bytes)
-
-            if not raw:
-                app.show_message("Could not read file — try again", error=True)
-                return
-
-            ext = "jpg" if extension == "jpeg" else extension
-            selected_bytes.clear(); selected_bytes.append(raw)
-            selected_name.clear();  selected_name.append(name)
-            selected_ext.clear();   selected_ext.append(ext)
-
-            file_name_text.value = name
-            file_name_text.color = AUREX_TEXT
-            mime = "image/png" if ext == "png" else "image/jpeg"
-            preview_image.src = f"data:{mime};base64,{_b64.b64encode(raw).decode()}"
-            preview_image.visible = True
-            page.update()
-
-        page.run_task(_open)
+        picker.pick_files(
+            allow_multiple=False,
+            file_type=ft.FilePickerFileType.IMAGE,
+        )
 
     def handle_upload(_: ft.ControlEvent) -> None:
         if not app.session.is_authenticated:
             app.show_message("Please log in before uploading", error=True)
             return
-        if not selected_bytes:
+        if not selected["bytes"]:
             app.show_message("Select an image first", error=True)
             return
         asset_name = name_field.value.strip()
@@ -263,9 +287,9 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
             return
         username = app.session.user_data.username if app.session.user_data else ""
         description = description_field.value.strip()
-        file_bytes_snap = selected_bytes[0]
-        file_name_snap  = selected_name[0] if selected_name else "asset.jpg"
-        file_ext_snap   = selected_ext[0]  if selected_ext  else "jpg"
+        file_bytes_snap = selected["bytes"]
+        file_name_snap  = selected["name"] or "asset.jpg"
+        file_ext_snap   = selected["ext"]  or "jpg"
 
         def worker() -> None:
             try:
@@ -557,7 +581,8 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
                         ft.Icon(ft.Icons.INFO_OUTLINE, color=AUREX_GOLD_SOFT, size=16),
                         ft.Text(
                             "JPG and PNG only. Metadata is signed using your wallet keys and "
-                            "submitted to the blockchain for authentication (MINT).",
+                            "submitted to the blockchain for authentication (MINT). If the picker "
+                            "doesn't open, update the client app to the same Flet version.",
                             color=AUREX_MUTED,
                             size=12,
                         ),

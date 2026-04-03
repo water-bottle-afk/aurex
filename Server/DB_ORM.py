@@ -22,9 +22,34 @@ DB_FOLDER = Path(__file__).parent.parent / "DB"
 DB_FOLDER.mkdir(exist_ok=True)
 DB_PATH = str(DB_FOLDER / "marketplace.db")
 
-# Email configuration (use environment variables in production)
-EMAIL_SENDER = os.getenv("EMAIL_SENDER", "your-email@gmail.com")
-EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD", "your-app-password")
+_EMAIL_SENDER = "aurex.main.service@gmail.com"
+_EMAIL_APP_PASSWORD = "sshb anri wzom zybg"
+
+
+def send_reset_email(recipient: str, otp: str) -> bool:
+    """Send a password-reset OTP to *recipient* via Gmail SMTP SSL."""
+    import datetime as _dt
+    expiry = _dt.datetime.now() + _dt.timedelta(minutes=5)
+
+    em = EmailMessage()
+    em["From"] = _EMAIL_SENDER
+    em["To"] = recipient
+    em["Subject"] = "Your Aurex password reset code"
+    em.set_content(
+        f"Your Code is: {otp}. "
+        f"Available until {expiry.strftime('%d/%m/%Y %H:%M:%S')}."
+    )
+
+    ctx = ssl.create_default_context()
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as smtp:
+            smtp.login(_EMAIL_SENDER, _EMAIL_APP_PASSWORD)
+            smtp.sendmail(_EMAIL_SENDER, recipient, em.as_string())
+        print(f"[email] Reset code sent to {recipient}")
+        return True
+    except Exception as exc:
+        print(f"[email] Failed to send to {recipient}: {exc}")
+        return False
 
 
 def convert_drive_url(drive_url):

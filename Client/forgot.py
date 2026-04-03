@@ -30,7 +30,6 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
         can_reveal_password=True,
         border_radius=16,
     )
-    dev_code_text = ft.Text(color=AUREX_GOLD, visible=False)
     status_text = ft.Text(color=AUREX_MUTED, size=12, visible=False)
     progress = ft.ProgressRing(width=18, height=18, stroke_width=2, visible=False)
 
@@ -66,11 +65,7 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
             try:
                 set_busy(True, "Requesting reset code...")
                 app.connect_if_needed(discover_first=True)
-                maybe_dev_code = app.client.request_password_reset(email)
-                if maybe_dev_code:
-                    dev_code_text.value = f"Dev OTP: {maybe_dev_code}"
-                    dev_code_text.visible = True
-                    code_field.value = maybe_dev_code
+                app.client.request_password_reset(email)
                 app.show_message("Reset code sent")
                 show_step("code")
             except Exception as exc:
@@ -161,7 +156,6 @@ def build_forgot_view(app: "AurexFletApp") -> ft.View:
     ]
     code_step.controls = [
         ft.Text("Enter verification code", size=24, weight=ft.FontWeight.BOLD),
-        dev_code_text,
         code_field,
         verify_code_button,
         ft.OutlinedButton(content="Back", on_click=lambda _: show_step("email"), width=_CARD_WIDTH),
