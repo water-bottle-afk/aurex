@@ -146,7 +146,7 @@ from config import (
     FCM_ENABLED, FCM_SERVER_KEY,
 )
 from classes import PROTO, CustomLogger
-from DB_ORM import MarketplaceDB
+from DB_ORM import MarketplaceDB, send_reset_email
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 _UPLOADS_DIR_PATH = (Path(__file__).parent / UPLOADS_DIR).resolve()
@@ -513,7 +513,15 @@ class ClientSession:
                 expiry = datetime.datetime.fromisoformat(user_obj.reset_time)
                 if now < expiry:
                     self.Print(f" Reusing existing reset code for {email}", 20)
-                    return f"OK|otp_sent|{user_obj.verification_code}"
+                    # Re-send the existing OTP via email (don't expose it in the response)
+                    otp_to_send = user_obj.verification_code
+                    import threading as _t
+                    _t.Thread(
+                        target=send_reset_email,
+                        args=(email, otp_to_send),
+                        daemon=True,
+                    ).start()
+                    return "OK|otp_sent"
             except Exception:
                 pass
         otp = str(random.randint(100000, 999999))
@@ -521,8 +529,10 @@ class ClientSession:
         user_obj.set_reset_time((datetime.datetime.now() + datetime.timedelta(minutes=5)).isoformat())
         self.db.update_user(user_obj.username, user_obj)
         self.Print(f" Generated reset code for {email}", 20)
-        self.Print(f" [DEV] Reset Code: {otp}", 30)
-        return f"OK|otp_sent|{otp}"
+        # Send OTP via email in background thread — never expose it in the protocol response.
+        import threading as _t
+        _t.Thread(target=send_reset_email, args=(email, otp), daemon=True).start()
+        return "OK|otp_sent"
 
     def handle_verify_code(self, params):
         """Protocol Message: VERIFY_CODE - Verify OTP code

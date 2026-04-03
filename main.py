@@ -47,10 +47,13 @@ def _suppress_disconnect_noise() -> None:
 if __name__ == "__main__":
     _suppress_disconnect_noise()
     print("[aurex] launching Flet web app...")
+    _upload_dir = Path(__file__).resolve().parent / "uploads"
+    _upload_dir.mkdir(exist_ok=True)
     ft.run(
         main,
         view=ft.AppView.WEB_BROWSER,
         host=os.getenv("AUREX_FLET_HOST", "10.100.102.58"),
         port=int(os.getenv("AUREX_FLET_PORT", "8555")),
         assets_dir="assets",
+        upload_dir=str(_upload_dir),
     )

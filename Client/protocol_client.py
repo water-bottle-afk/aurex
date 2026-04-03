@@ -172,6 +172,17 @@ class AurexProtocolClient:
         finally:
             self.close()
 
+    def get_wallet(self, username: str) -> float | None:
+        """Send GET_WALLET|username, return balance as float or None on error."""
+        response = self._request_text(f"GET_WALLET|{username}")
+        parts = response.split("|")
+        if parts[0] == "OK" and len(parts) >= 2:
+            try:
+                return float(parts[1])
+            except ValueError:
+                return None
+        return None
+
     def get_market_data(
         self,
         limit: int = 10,
@@ -493,18 +504,7 @@ class AurexProtocolClient:
                     assets.append(ItemOffering.from_json(entry))
         return assets
 
-    def get_wallet(self, username: str) -> dict[str, Any] | None:
-        if not username or "|" in username:
-            raise ProtocolError("Invalid username")
-        response = self._request_text(f"GET_WALLET|{username}")
-        parts = response.split("|")
-        if parts[0] == "OK" and len(parts) >= 2:
-            balance = float(parts[1]) if parts[1] else 0.0
-            updated_at = parts[2] if len(parts) > 2 else ""
-            return {"balance": balance, "updated_at": updated_at}
-        if parts[0] == "ERR02":
-            return None
-        raise ProtocolError(self._extract_error_message(response))
+    # get_wallet is defined earlier in this class (returns float | None)
 
     def get_notifications(self, *, username: str, limit: int = 20) -> tuple[list[NotificationItem], int]:
         if not username or "|" in username:

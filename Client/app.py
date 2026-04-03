@@ -40,6 +40,7 @@ class AurexFletApp:
         self.page.scroll = ft.ScrollMode.AUTO
         self.page.on_route_change = self._on_route_change
         self.page.on_view_pop = self._on_view_pop
+
         print("[aurex] AurexFletApp.__init__ done")
 
     def start(self) -> None:
@@ -57,12 +58,12 @@ class AurexFletApp:
         loop so it always fires correctly.
         """
         async def _show() -> None:
-            self.page.snack_bar = ft.SnackBar(
-                content=ft.Text(message, color="white"),
-                bgcolor=AUREX_ERROR if error else AUREX_SUCCESS,
-                open=True,
+            self.page.open(
+                ft.SnackBar(
+                    content=ft.Text(message, color="white"),
+                    bgcolor=AUREX_ERROR if error else AUREX_SUCCESS,
+                )
             )
-            self.page.update()
 
         self.page.run_task(_show)
 
@@ -110,7 +111,20 @@ class AurexFletApp:
             self.market_error = str(exc)
         finally:
             self.market_loading = False
-            self.refresh_marketplace_view()
+
+        # Fetch wallet AFTER market items, BEFORE image prefetch threads.
+        # Must be sequential — prefetch threads share the same socket and
+        # will corrupt interleaved reads if wallet fetch overlaps them.
+        if self.session.user_data:
+            try:
+                balance = self.client.get_wallet(self.session.user_data.username)
+                print(f"[aurex] wallet fetch -> {balance!r}")
+                if balance is not None:
+                    self.session.wallet_balance = balance
+            except Exception as exc:
+                print(f"[aurex] wallet fetch failed: {exc}")
+
+        self.refresh_marketplace_view()
 
         for item in list(self.session.market_items):
             self.prefetch_image_async(item.image_url)
@@ -166,20 +180,6 @@ class AurexFletApp:
         else:
             self.page.run_task(self.page.push_route, "/login")
 
-    def _purge_overlay_filepickers(self) -> None:
-        """Remove any FilePicker controls left in page.overlay from a previous route.
-
-        FilePickers are added dynamically (e.g. in upload.py) right before use and
-        must be removed on navigation.  If they remain in the overlay while on another
-        page, Flet renders them as a big red rectangle labelled 'unknown control'.
-        """
-        stale = [c for c in list(self.page.overlay) if isinstance(c, ft.FilePicker)]
-        for c in stale:
-            try:
-                self.page.overlay.remove(c)
-            except ValueError:
-                pass
-
     def _render_current_route(self) -> None:
         route = self.page.route or "/login"
         print(f"[aurex] _render_current_route: {route!r}")
@@ -210,10 +210,6 @@ class AurexFletApp:
                 controls=[ft.Text(f"Error loading page: {exc}", color="red", size=14)],
             )
         with self._render_lock:
-            # Purge stale FilePickers BEFORE clearing views to avoid the red
-            # 'unknown control' rectangle that appears when a picker from /upload
-            # survives into other pages.
-            self._purge_overlay_filepickers()
             self.page.views.clear()
             self.page.views.append(view)
             self.page.update()
