@@ -56,6 +56,7 @@ def upload_marketplace_item_from_bytes(
         "asset_name": asset_name,
         "owner": username,
         "owner_pub": public_key,
+        "cost": cost,
         "timestamp": mint_timestamp,
     }
     mint_signature = sign_message(canonical_tx_message(username, mint_payload))
@@ -193,25 +194,8 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
 
     # ── FilePicker: pick → upload → on_upload reads bytes from temp file ─────
     # Avoids await pick_files(with_data=True) which times out in Flet web.
-    # Flow: pick_files() opens dialog (no await hang) → result fires on_result
-    # callback → upload() pushes file to Flet's local upload server →
-    # on_upload fires with temp path → we read raw bytes from disk.
-
-    def _on_pick_result(e: ft.FilePickerResultEvent) -> None:
-        if not e.files:
-            return
-        f = e.files[0]
-        name = f.name or ""
-        extension = os.path.splitext(name)[1].lower().lstrip(".")
-        if extension not in {"jpg", "jpeg", "png"}:
-            set_status("Only JPG and PNG images are supported", error=True)
-            return
-        if getattr(f, "size", None) and f.size > max_upload_bytes:
-            set_status("File too large (max 10MB)", error=True)
-            return
-        # Kick off upload to Flet's local server so on_upload fires with path.
-        upload_url = page.get_upload_url(name, 60)
-        picker.upload([ft.FilePickerUploadFile(name=name, upload_url=upload_url)])
+    # Flow: pick_files() opens dialog → we validate and upload() to Flet's
+    # local upload server → on_upload fires with temp path → we read raw bytes.
 
     def _on_upload(e: ft.FilePickerUploadEvent) -> None:
         if e.error:
@@ -250,22 +234,34 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
         set_status("", show=False)
         page.update()
 
-    # Keep a single FilePicker instance per Page to avoid duplicate overlays.
+    # Keep a single FilePicker service per Page to avoid duplicates.
     picker: ft.FilePicker | None = getattr(page, "_aurex_file_picker", None)
     if picker is None:
-        picker = ft.FilePicker(on_result=_on_pick_result, on_upload=_on_upload)
-        page.overlay.append(picker)
+        picker = ft.FilePicker(on_upload=_on_upload)
+        page.services.append(picker)
         setattr(page, "_aurex_file_picker", picker)
     else:
-        picker.on_result = _on_pick_result
         picker.on_upload = _on_upload
     page.update()
 
-    def pick_file(_: ft.ControlEvent) -> None:
-        picker.pick_files(
+    async def pick_file(_: ft.ControlEvent) -> None:
+        files = await picker.pick_files(
             allow_multiple=False,
             file_type=ft.FilePickerFileType.IMAGE,
         )
+        if not files:
+            return
+        f = files[0]
+        name = f.name or ""
+        extension = os.path.splitext(name)[1].lower().lstrip(".")
+        if extension not in {"jpg", "jpeg", "png"}:
+            set_status("Only JPG and PNG images are supported", error=True)
+            return
+        if getattr(f, "size", None) and f.size > max_upload_bytes:
+            set_status("File too large (max 10MB)", error=True)
+            return
+        upload_url = page.get_upload_url(name, 60)
+        await picker.upload([ft.FilePickerUploadFile(name=name, upload_url=upload_url)])
 
     def handle_upload(_: ft.ControlEvent) -> None:
         if not app.session.is_authenticated:
@@ -488,7 +484,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
         content="Choose Image",
         icon=ft.Icons.IMAGE_OUTLINED,
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12)),
-        on_click=pick_file,
+        on_click=lambda e: page.run_task(pick_file, e),
     )
     upload_button = ft.FilledButton(
         content="Upload to Blockchain",

@@ -238,8 +238,13 @@ class NotificationsManager:
 
     def load(self):
         if self.pickle_path.exists():
-            with open(self.pickle_path, 'rb') as f:
-                self.notifications, self.next_id = pickle.load(f)
-        else:
-            self.notifications = []
-            self.next_id = 1
+            try:
+                with open(self.pickle_path, 'rb') as f:
+                    self.notifications, self.next_id = pickle.load(f)
+                return
+            except Exception:
+                self.notifications = []
+                self.next_id = 1
+                return
+        self.notifications = []
+        self.next_id = 1
