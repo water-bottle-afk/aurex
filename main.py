@@ -47,6 +47,8 @@ def _suppress_disconnect_noise() -> None:
 if __name__ == "__main__":
     _suppress_disconnect_noise()
     print("[aurex] launching Flet web app...")
+    if not os.getenv("FLET_SECRET_KEY"):
+        os.environ["FLET_SECRET_KEY"] = "dev-secret-change-me"
     _upload_dir = Path(__file__).resolve().parent / "uploads"
     _upload_dir.mkdir(exist_ok=True)
     ft.run(

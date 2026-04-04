@@ -742,8 +742,12 @@ class ClientSession:
             "asset_name": asset_name,
             "owner": username,
             "owner_pub": public_key,
+            "cost": cost,
             "timestamp": mint_timestamp,
         }
+        wallet = self.db.get_wallet(username)
+        if wallet and float(wallet.get('balance', 0)) < cost:
+            return "ERR02|Insufficient wallet balance"
         if not _verify_ed25519_signature(
             public_key,
             _canonical_tx_message(username, mint_payload),
@@ -914,13 +918,6 @@ class ClientSession:
         if not success:
             return f"ERR03|{message}"
         self.Print(f" Asset uploaded: {session.asset_name} by {session.username} - ${session.cost}", 20)
-        self.create_and_push_notification(
-            username=session.username,
-            title="Asset uploaded",
-            body=f"Your asset {session.asset_name} is now in the marketplace.",
-            notif_type="asset_uploaded",
-            asset_id=str(item_id) if item_id else None,
-        )
         # Queue mint transaction to blockchain
 
         mint_job = {
@@ -929,10 +926,12 @@ class ClientSession:
             'owner': session.username,
             'asset_hash': actual_hash,
             'asset_name': session.asset_name,
+            'asset_id': str(item_id) if item_id else None,
             'metadata_link': local_rel_path,
             'timestamp': session.mint_timestamp,
             'public_key': session.public_key,
             'signature': session.mint_signature,
+            'cost': session.cost,
         }
         with self.server.tx_status_lock:
             if session.mint_tx_id in self.server.tx_status:
@@ -946,7 +945,9 @@ class ClientSession:
                     'created_at': time.time(),
                     'asset_hash': actual_hash,
                     'asset_name': session.asset_name,
+                    'asset_id': str(item_id) if item_id else None,
                     'owner': session.username,
+                    'cost': session.cost,
                 }
                 self.server.tx_queue.put(mint_job)
         return f"OK|{session.asset_name}|{local_rel_path}"
@@ -1361,12 +1362,9 @@ class ClientSession:
             except Exception:
                 limit = 20
         try:
-            items = self.notifications_manager.get_notifications(username, limit=limit)
-            unread_count = self.notifications_manager.get_unread_count(username)
-            payload = [
-                n.to_dict() if hasattr(n, "to_dict") else n
-                for n in items
-            ]
+            items = self.db.get_notifications(username, limit=limit)
+            unread_count = self.db.get_unread_notifications_count(username)
+            payload = items or []
             return f"OK|{json.dumps(payload)}|{unread_count}"
         except Exception as e:
             return f"ERR03|Error getting notifications: {str(e)}"
@@ -1387,8 +1385,8 @@ class ClientSession:
         if username != self.username:
             return "ERR02|Unauthorized"
         try:
-            self.notifications_manager.mark_read(username)
-            return "OK|read"
+            ok = self.db.mark_all_notifications_read(username)
+            return "OK|read" if ok else "ERR03|Failed to mark notifications read"
         except Exception as e:
             return f"ERR03|Error marking notifications: {str(e)}"
 
@@ -1606,7 +1604,7 @@ class Server:
         self.broadcast_event(payload)
 
     def create_and_push_notification(self, username, title, body, notif_type="system", asset_id=None, tx_id=None):
-        notif = self.notifications_manager.create_notification(
+        notif = self.db.create_notification(
             username=username,
             title=title,
             body=body,
@@ -1614,6 +1612,15 @@ class Server:
             asset_id=asset_id,
             tx_id=tx_id,
         )
+        if not notif and self.notifications_manager:
+            notif = self.notifications_manager.create_notification(
+                username=username,
+                title=title,
+                body=body,
+                notif_type=notif_type,
+                asset_id=asset_id,
+                tx_id=tx_id,
+            )
         if notif:
             payload_notif = notif.to_dict() if hasattr(notif, "to_dict") else notif
             payload = {
@@ -1873,6 +1880,24 @@ class Server:
                                         asset_hash = data.get('asset_hash')
                                         tx_id = data.get('tx_id')
                                         if action == 'asset_mint':
+                                            owner = data.get('owner') or tx.get('sender')
+                                            cost = data.get('cost')
+                                            if cost is None:
+                                                cost = data.get('amount') if data.get('amount') is not None else data.get('price')
+                                            if owner and cost is not None:
+                                                try:
+                                                    cost_val = float(cost)
+                                                    wallet = self.db.get_wallet(owner)
+                                                    if wallet:
+                                                        balance = float(wallet.get('balance', 0))
+                                                        new_balance = balance - cost_val
+                                                        self.db.update_balance(owner, new_balance)
+                                                        server_logger.info(
+                                                            "mint: deducted %.2f from %s wallet (%.2f -> %.2f)",
+                                                            cost_val, owner, balance, new_balance,
+                                                        )
+                                                except (ValueError, TypeError) as e:
+                                                    server_logger.warning("mint: invalid cost for wallet update: %s", e)
                                             if tx_id:
                                                 self._set_tx_status(tx_id, "confirmed", "Mint confirmed")
                                             continue
@@ -2036,6 +2061,19 @@ class Server:
                     response = self._submit_purchase_to_gateway(tx_job)
                 if response and response.get('status') == 'submitted':
                     self._set_tx_status(tx_id, "submitted", response.get('message', 'Submitted to gateway'))
+                    if tx_type == 'mint':
+                        owner = tx_job.get('owner')
+                        asset_name = tx_job.get('asset_name') or 'asset'
+                        asset_id = tx_job.get('asset_id')
+                        if owner:
+                            self.create_and_push_notification(
+                                username=owner,
+                                title="Asset uploaded",
+                                body=f"Your asset {asset_name} has been uploaded.",
+                                notif_type="asset_uploaded",
+                                asset_id=asset_id,
+                                tx_id=tx_id,
+                            )
                 else:
                     msg = response.get('message') if response else "Gateway did not respond"
                     self._set_tx_status(tx_id, "failed", msg)
@@ -2107,6 +2145,7 @@ class Server:
             'asset_name': mint.get('asset_name'),
             'owner': mint.get('owner'),
             'owner_pub': mint.get('public_key'),
+            'cost': mint.get('cost'),
             'metadata_link': mint.get('metadata_link', ''),
             'timestamp': mint.get('timestamp'),
         }
