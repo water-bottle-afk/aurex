@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 import flet as ft
 from .protocol_client import AurexProtocolClient
 from .session import UserSession
@@ -31,6 +32,9 @@ class AurexFletApp:
         self.market_error: str | None = None
         self._market_bootstrap_requested = False
         self._render_lock = threading.RLock()
+        self._market_refresh_lock = threading.Lock()
+        self._market_refresh_timer: threading.Timer | None = None
+        self._last_market_refresh = 0.0
 
         self.page.title = "Aurex Marketplace"
         self.page.theme_mode = ft.ThemeMode.DARK
@@ -58,12 +62,12 @@ class AurexFletApp:
         loop so it always fires correctly.
         """
         async def _show() -> None:
-            self.page.open(
-                ft.SnackBar(
-                    content=ft.Text(message, color="white"),
-                    bgcolor=AUREX_ERROR if error else AUREX_SUCCESS,
-                )
+            self.page.snack_bar = ft.SnackBar(
+                content=ft.Text(message, color="white"),
+                bgcolor=AUREX_ERROR if error else AUREX_SUCCESS,
             )
+            self.page.snack_bar.open = True
+            self.page.update()
 
         self.page.run_task(_show)
 
@@ -160,9 +164,29 @@ class AurexFletApp:
 
     def refresh_marketplace_view(self) -> None:
         if self.page.route == "/marketplace":
-            self.page.run_task(self._render_current_route_async)
+            self._schedule_marketplace_refresh()
         else:
             self.page.run_task(self._noop_update_async)
+
+    def _schedule_marketplace_refresh(self, min_interval: float = 0.25) -> None:
+        """Coalesce rapid refresh calls to avoid UI thrash on initial load."""
+        now = time.monotonic()
+        with self._market_refresh_lock:
+            if now - self._last_market_refresh >= min_interval:
+                self._last_market_refresh = now
+                self.page.run_task(self._render_current_route_async)
+                return
+            if self._market_refresh_timer and self._market_refresh_timer.is_alive():
+                return
+            delay = max(0.01, min_interval - (now - self._last_market_refresh))
+            self._market_refresh_timer = threading.Timer(delay, self._trigger_marketplace_refresh)
+            self._market_refresh_timer.daemon = True
+            self._market_refresh_timer.start()
+
+    def _trigger_marketplace_refresh(self) -> None:
+        with self._market_refresh_lock:
+            self._last_market_refresh = time.monotonic()
+        self.page.run_task(self._render_current_route_async)
 
     async def _render_current_route_async(self) -> None:
         self._render_current_route()
@@ -221,4 +245,3 @@ class AurexFletApp:
 
     def _on_server_event(self, event) -> None:
         pass  # pubsub not used in Flet 0.83
-

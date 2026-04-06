@@ -740,6 +740,7 @@ class ClientSession:
             "tx_id": mint_tx_id,
             "asset_hash": asset_hash,
             "asset_name": asset_name,
+            "file_name": original_name or f"{asset_name}.{file_type}",
             "owner": username,
             "owner_pub": public_key,
             "cost": cost,
@@ -900,7 +901,7 @@ class ClientSession:
 
         try:
             marketplace_db = MarketplaceDB()
-            success, message, item_id = marketplace_db.add_marketplace_item(
+            success, message, item_id = marketplace_db.add_pending_asset(
                 session.asset_name,
                 session.username,
                 drive_url,
@@ -928,6 +929,7 @@ class ClientSession:
             'asset_name': session.asset_name,
             'asset_id': str(item_id) if item_id else None,
             'metadata_link': local_rel_path,
+            'file_name': session.original_name or f"{session.asset_name}.{session.file_type}",
             'timestamp': session.mint_timestamp,
             'public_key': session.public_key,
             'signature': session.mint_signature,
@@ -948,9 +950,11 @@ class ClientSession:
                     'asset_id': str(item_id) if item_id else None,
                     'owner': session.username,
                     'cost': session.cost,
+                    'metadata_link': local_rel_path,
+                    'file_name': session.original_name or f"{session.asset_name}.{session.file_type}",
                 }
                 self.server.tx_queue.put(mint_job)
-        return f"OK|{session.asset_name}|{local_rel_path}"
+        return f"OK|{session.asset_name}|{local_rel_path}|{session.mint_tx_id}"
 
     def handle_upload_abort(self, params):
         """
@@ -1898,6 +1902,28 @@ class Server:
                                                         )
                                                 except (ValueError, TypeError) as e:
                                                     server_logger.warning("mint: invalid cost for wallet update: %s", e)
+                                            # Move asset from pending -> marketplace on confirmation
+                                            asset_hash = data.get('asset_hash')
+                                            approved_id = None
+                                            if asset_hash:
+                                                ok, _, new_id = self.db.approve_pending_asset_by_hash(asset_hash)
+                                                if ok:
+                                                    approved_id = new_id
+                                                    server_logger.info(
+                                                        "mint: approved pending asset hash=%s id=%s",
+                                                        asset_hash[:16],
+                                                        new_id,
+                                                    )
+                                                else:
+                                                    server_logger.warning(
+                                                        "mint: pending asset not found for hash=%s",
+                                                        asset_hash[:16] if asset_hash else '?',
+                                                    )
+                                            if tx_id and approved_id is not None:
+                                                with self.tx_status_lock:
+                                                    info = self.tx_status.get(tx_id)
+                                                    if info is not None:
+                                                        info['asset_id'] = str(approved_id)
                                             if tx_id:
                                                 self._set_tx_status(tx_id, "confirmed", "Mint confirmed")
                                             continue
@@ -2022,8 +2048,28 @@ class Server:
             if status in ('confirmed', 'failed', 'timeout') and not info.get('notified'):
                 info['notified'] = True
                 emit_info = dict(info)
+        if status in ('failed', 'timeout') and emit_info and emit_info.get('tx_type') == 'mint':
+            self._cleanup_failed_mint(emit_info)
         if emit_info:
             self._emit_tx_notifications(tx_id, emit_info)
+
+    def _cleanup_failed_mint(self, info):
+        """Remove unconfirmed mint assets from pending table + storage."""
+        asset_id = info.get('asset_id')
+        asset_hash = info.get('asset_hash')
+        metadata_link = info.get('metadata_link') or ''
+        deleted = False
+        if asset_hash:
+            deleted = self.db.delete_pending_asset_by_hash(asset_hash)
+        if deleted:
+            self.Print(f" Mint failed; removed pending asset {asset_id or asset_hash}", 30)
+        if metadata_link:
+            try:
+                path = _resolve_upload_file(metadata_link)
+                if path and path.exists():
+                    path.unlink()
+            except Exception as e:
+                server_logger.warning("mint cleanup: failed to remove asset file: %s", e)
 
     def _get_tx_info(self, tx_id):
         with self.tx_status_lock:
@@ -2143,10 +2189,10 @@ class Server:
             'tx_id': mint.get('tx_id'),
             'asset_hash': mint.get('asset_hash'),
             'asset_name': mint.get('asset_name'),
+            'file_name': mint.get('file_name'),
             'owner': mint.get('owner'),
             'owner_pub': mint.get('public_key'),
             'cost': mint.get('cost'),
-            'metadata_link': mint.get('metadata_link', ''),
             'timestamp': mint.get('timestamp'),
         }
         payload = {

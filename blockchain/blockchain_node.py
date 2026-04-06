@@ -10,6 +10,7 @@ import socket
 import struct
 from pow_node import PoWNode
 from db_init import init_database
+from protocol import Protocol
 
 
 class BlockchainNode:
@@ -86,24 +87,12 @@ class BlockchainNode:
         """
         gw_host = self.gateway_host or '127.0.0.1'
         gw_port = int(self.gateway_port or 5000)
-        raw = json.dumps(payload).encode()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         try:
             sock.connect((gw_host, gw_port))
-            sock.send(struct.pack('>H', len(raw)) + raw)
-            # read response
-            len_buf = sock.recv(2)
-            if len(len_buf) < 2:
-                return None
-            (size,) = struct.unpack('>H', len_buf)
-            data = b''
-            while len(data) < size:
-                chunk = sock.recv(min(size - len(data), 4096))
-                if not chunk:
-                    break
-                data += chunk
-            return json.loads(data.decode())
+            Protocol.send_lp_json(sock, payload)
+            return Protocol.recv_lp_json(sock)
         except Exception as e:
             print(f" [{self.node_name}] gateway send error: {e}")
             return None

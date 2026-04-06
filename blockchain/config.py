@@ -25,6 +25,9 @@ SOCKET_BUFFER_SIZE = 4096
 NODE_REGISTRY_STALE_SECONDS = 120
 # Background thread: reap stale registry entries
 NODE_REGISTRY_REAP_INTERVAL_SECONDS = 30
+GOSSIP_FANOUT = 3  # max peers a sender contacts per tx (gateway + nodes)
+MAX_NEIGHBORS = 3  # per-node outgoing neighbor limit
+ENABLE_MINING_SPINNER = False
 
 # ============================================================================
 # CONSENSUS CONFIGURATION

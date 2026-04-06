@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 import base64
 import time
+import random
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -32,10 +33,12 @@ from config import (
     TX_TIME_WINDOW_SECONDS,
     NODE_REGISTRY_STALE_SECONDS,
     NODE_REGISTRY_REAP_INTERVAL_SECONDS,
+    GOSSIP_FANOUT,
 )
 from models import Transaction
 from db_init import get_db_connection, init_database
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from protocol import Protocol
 
 # Logging
 logging.basicConfig(
@@ -108,6 +111,14 @@ def get_broadcast_targets():
     return [(RPC_HOST, p) for p in NODE_PORTS], 'config_fallback'
 
 
+
+
+def _select_fanout(endpoints):
+    if not endpoints:
+        return []
+    if GOSSIP_FANOUT and len(endpoints) > GOSSIP_FANOUT:
+        return random.sample(endpoints, GOSSIP_FANOUT)
+    return endpoints
 def _canonical_tx_message(sender, data):
     payload = {"sender": sender, "data": data}
     return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
@@ -166,27 +177,11 @@ def _cleanup_seen_tx_ids():
 
 
 def _send_json(sock, obj):
-    raw = json.dumps(obj).encode()
-    sock.send(struct.pack('>H', len(raw)) + raw)
+    Protocol.send_lp_json(sock, obj)
 
 
 def _recv_json(sock, max_size=65536):
-    try:
-        len_buf = sock.recv(2)
-        if len(len_buf) < 2:
-            return None
-        (size,) = struct.unpack('>H', len_buf)
-        if size > max_size:
-            return None
-        data = b''
-        while len(data) < size:
-            chunk = sock.recv(min(size - len(data), 4096))
-            if not chunk:
-                return None
-            data += chunk
-        return json.loads(data.decode())
-    except Exception:
-        return None
+    return Protocol.recv_lp_json(sock, max_size=max_size)
 
 
 def broadcast_transaction(transaction_data):
@@ -197,9 +192,11 @@ def broadcast_transaction(transaction_data):
         'data': transaction_data.get('data', transaction_data),
         'signature': transaction_data.get('signature', ''),
         'public_key': transaction_data.get('public_key', ''),
+        'relay': 'gateway',
     }
     raw = json.dumps(message).encode()
-    endpoints, source = get_broadcast_targets()
+    endpoints_all, source = get_broadcast_targets()
+    endpoints = _select_fanout(endpoints_all)
     success = 0
     failures = []
     for host, port in endpoints:
@@ -213,9 +210,10 @@ def broadcast_transaction(transaction_data):
         except Exception as e:
             failures.append((host, port, str(e)))
     logger.info(
-        "broadcast tx: %s/%s peer(s) ok source=%s",
+        "broadcast tx: %s/%s peer(s) ok active=%s source=%s",
         success,
         len(endpoints),
+        len(endpoints_all),
         source,
     )
     for host, port, err in failures[:5]:
@@ -233,8 +231,8 @@ def broadcast_stop_mining(block_index=None, block_hash=None):
         'block_hash': block_hash,
     }
     raw = json.dumps(message).encode()
-    endpoints, _ = get_broadcast_targets()
-    for host, port in endpoints:
+    endpoints_all, _ = get_broadcast_targets()
+    for host, port in endpoints_all:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(SOCKET_TIMEOUT)
