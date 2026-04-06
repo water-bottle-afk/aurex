@@ -32,7 +32,11 @@ from config import (
     TX_TIME_WINDOW_SECONDS,
     ENFORCE_MINER_ALLOWLIST,
     ALLOWED_MINER_KEY_FINGERPRINTS,
+    NODE_REGISTRY_STALE_SECONDS,
+    MAX_NEIGHBORS,
+    ENABLE_MINING_SPINNER,
 )
+from protocol import Protocol
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,11 +73,20 @@ def hashing_process(data, difficulty, stop_event, result_queue):
     """
     nonce = 0
     target = '0' * difficulty
+    last_dot = time.monotonic()
     while not stop_event.is_set():
         hash_attempt = hashlib.sha256(f"{data}{nonce}".encode()).hexdigest()
         if hash_attempt.startswith(target):
             result_queue.put((hash_attempt, nonce))
             return
+        now = time.monotonic()
+        if now - last_dot >= 0.25:
+            try:
+                sys.stdout.write(".")
+                sys.stdout.flush()
+            except Exception:
+                pass
+            last_dot = now
         nonce += 1
     # stopped by peer block (no log in subprocess to avoid cross-process logger issues)
 
@@ -104,13 +117,19 @@ class PoWNode:
         ledger_path = ledger_dir / "ledger.json"
         self.ledger_dir = ledger_dir
         self.ledger = Ledger(ledger_path=str(ledger_path))
+        if not ledger_path.exists():
+            self.ledger.save()
+        logger.info("ledger ready path=%s blocks=%s", ledger_path, len(self.ledger.blocks))
         self.seen_tx_ids = set()
+        self.seen_block_hashes = set()
         for block in self.ledger.blocks:
             for tx in getattr(block, 'transactions', []):
                 tx_data = getattr(tx, 'data', {}) if tx else {}
                 tx_id = tx_data.get('tx_id')
                 if tx_id:
                     self.seen_tx_ids.add(tx_id)
+            if getattr(block, 'current_hash', None):
+                self.seen_block_hashes.add(block.current_hash)
 
         # Last block on our chain
         self.last_block_index = self.ledger.get_last_block().index if self.ledger.blocks else -1
@@ -125,13 +144,13 @@ class PoWNode:
         self.mining_lock = threading.Lock()
         self._spinner_stop = threading.Event()
         self._spinner_thread = None
+        self._mining_heartbeat_stop = threading.Event()
+        self._mining_heartbeat_thread = None
 
         self._register_node()
-        # Seed peers from config so block broadcast reaches all nodes regardless of startup order
-        for p in NODE_PORTS:
-            if p != self.port:
-                self.known_nodes[f"node_{p}"] = (RPC_HOST, p)
-        logger.info("node started port=%s node_id=%s difficulty=%s", port, self.node_id[:8], difficulty)
+        self._select_neighbors()
+        logger.info("node started port=%s node_id=%s difficulty=%s neighbors=%s",
+                    port, self.node_id[:8], difficulty, list(self.known_nodes.keys()))
 
     def _register_node(self):
         pass  # No DB
@@ -140,20 +159,17 @@ class PoWNode:
         """Length-prefixed JSON handshake so the gateway adds this node to its broadcast set."""
         try:
             peer_host = '127.0.0.1' if self.host in ('0.0.0.0', '') else self.host
-            payload = json.dumps({
+            payload = {
                 'type': 'node_register',
                 'node_id': self.node_id,
                 'host': peer_host,
                 'port': self.port,
-            }).encode()
+            }
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(DEFAULT_SOCKET_TIMEOUT)
             sock.connect((self.gateway_host, self.gateway_port))
-            sock.send(struct.pack('>H', len(payload)) + payload)
-            try:
-                sock.recv(65536)
-            except Exception:
-                pass
+            Protocol.send_lp_json(sock, payload)
+            Protocol.recv_lp_json(sock)
             sock.close()
             if not self._gateway_handshake_logged:
                 logger.info(
@@ -190,11 +206,31 @@ class PoWNode:
         threading.Thread(target=loop, daemon=True).start()
 
     def discover_nodes(self):
-        """Discover peers from config; only add nodes whose port is in NODE_PORTS."""
-        for p in NODE_PORTS:
-            if p != self.port:
-                self.known_nodes[f"node_{p}"] = (RPC_HOST, p)
-        logger.info("discovered %s peers (ports in NODE_PORTS)", len(self.known_nodes))
+        """Discover peers from config; keep a bounded neighbor set."""
+        self._select_neighbors()
+        logger.info("discovered %s peers (neighbors=%s)", len(self.known_nodes), list(self.known_nodes.keys()))
+
+    def _select_neighbors(self):
+        """Select a bounded neighbor set to avoid full mesh."""
+        ports = list(NODE_PORTS)
+        if self.port not in ports:
+            return
+        if len(ports) <= 1:
+            return
+        idx = ports.index(self.port)
+        desired = min(MAX_NEIGHBORS, len(ports) - 1)
+        neighbors = []
+        step = 1
+        while len(neighbors) < desired and step < len(ports):
+            right = ports[(idx + step) % len(ports)]
+            left = ports[(idx - step) % len(ports)]
+            for p in (right, left):
+                if p != self.port and p not in neighbors:
+                    neighbors.append(p)
+                    if len(neighbors) >= desired:
+                        break
+            step += 1
+        self.known_nodes = {f"node_{p}": (RPC_HOST, p) for p in neighbors}
 
     def _is_allowed_miner(self, public_key_pem):
         if not ENFORCE_MINER_ALLOWLIST:
@@ -222,6 +258,8 @@ class PoWNode:
     def _validate_incoming_tx(self, sender, data, signature, public_key_b64):
         tx_id = data.get('tx_id') if isinstance(data, dict) else None
         timestamp = data.get('timestamp') if isinstance(data, dict) else None
+        if tx_id:
+            logger.info("tx validate start tx_id=%s sender=%s", tx_id, sender)
         if not tx_id or not timestamp:
             return False, "missing tx_id/timestamp"
         if tx_id in self.seen_tx_ids:
@@ -233,6 +271,8 @@ class PoWNode:
         message_bytes = _canonical_tx_message(sender, data)
         if not _verify_ed25519_signature(public_key_b64, message_bytes, signature):
             return False, "invalid signature"
+        if tx_id:
+            logger.info("tx validate ok tx_id=%s", tx_id)
         return True, "ok"
 
     def start_listening(self):
@@ -242,6 +282,9 @@ class PoWNode:
         server_socket.bind((self.host, self.port))
         server_socket.listen(5)
         logger.info("listening on %s:%s", self.host, self.port)
+        # Register with gateway and keep heartbeating so gateway uses live peers.
+        self._register_with_gateway_once()
+        self._start_gateway_heartbeat()
 
         # Thread that checks result_queue when we are mining
         def result_collector():
@@ -316,6 +359,10 @@ class PoWNode:
         signature = payload.get('signature')
         public_key_pem = payload.get('public_key_pem')
         tx_list = payload.get('transactions', [])
+        sender_node = message.get('node_id') or message.get('relay')
+        if current_hash and current_hash in self.seen_block_hashes:
+            logger.info("gossip: block already seen hash=%s...", current_hash[:16])
+            return
 
         if block_index is None or current_hash is None or nonce is None or miner_id is None or signature is None:
             logger.warning("validation failed: missing fields")
@@ -323,6 +370,7 @@ class PoWNode:
         if not public_key_pem:
             logger.warning("validation failed: missing public_key_pem")
             return
+        logger.info("block validate start index=%s hash=%s...", block_index, str(current_hash)[:16])
 
         # 1) PoW: hash starts with N zeros
         if not current_hash.startswith('0' * self.difficulty):
@@ -379,6 +427,7 @@ class PoWNode:
                 transactions=transactions
             )
             self.ledger.add_block(block)
+            logger.info("ledger saved block_index=%s txs=%s", block_index, len(transactions))
         except Exception as e:
             logger.error("Ledger write failed: %s", e)
             return
@@ -390,10 +439,15 @@ class PoWNode:
 
         self.last_block_index = block_index
         self.last_block_hash = current_hash
+        if current_hash:
+            self.seen_block_hashes.add(current_hash)
         logger.info("gossip: block accepted index=%s hash=%s...", block_index, current_hash[:16])
 
         # Stop our miner so we don't keep hashing
         self._stop_mining("new_block")
+        # Gossip onward to neighbors (exclude sender)
+        self._broadcast_block(payload, relay_from=sender_node)
+        logger.info("block validate done index=%s", block_index)
 
     def _handle_new_transaction(self, message, client_socket):
         try:
@@ -403,6 +457,11 @@ class PoWNode:
             public_key = message.get('public_key', '')
             start_timestamp = datetime.utcnow().isoformat()
             tx_type = tx_data.get('action', 'unknown') if isinstance(tx_data, dict) else 'unknown'
+            relay = message.get('relay') or message.get('node_id') or ''
+            if tx_type == 'asset_mint' and isinstance(tx_data, dict):
+                file_name = tx_data.get('file_name') or tx_data.get('metadata_link') or ''
+                if file_name:
+                    logger.info("mint file received: %s", file_name)
 
             ack = {'type': 'MINING_STARTED', 'miner': self.node_id, 'message': 'Mining started'}
             client_socket.send(json.dumps(ack).encode())
@@ -425,8 +484,11 @@ class PoWNode:
                     'public_key': public_key,
                     'start_timestamp': start_timestamp,
                 })
+                if tx_id:
+                    self.seen_tx_ids.add(tx_id)
 
             logger.info("NEW_TRANSACTION queued: type=%s sender=%s tx_id=%s", tx_type, sender, tx_id)
+            self._gossip_transaction(sender, tx_data, signature, public_key, relay_from=relay)
             self._start_mining_if_needed()
         except Exception as e:
             try:
@@ -464,12 +526,15 @@ class PoWNode:
         )
         self.miner_process.start()
         self._start_spinner()
-        logger.info("hashing: mining started difficulty=%s", self.difficulty)
+        self._start_mining_heartbeat()
+        tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+        logger.info("hashing: mining started difficulty=%s tx_id=%s", self.difficulty, tx_id)
 
     def _stop_mining(self, reason):
         """Stop miner process and clear stop event."""
         self.stop_mining_event.set()
         self._stop_spinner()
+        self._stop_mining_heartbeat()
         if self.miner_process and self.miner_process.is_alive():
             self.miner_process.join(timeout=2)
             if self.miner_process.is_alive():
@@ -479,6 +544,7 @@ class PoWNode:
     def _on_block_mined(self, block_hash, nonce):
         """We found a block: sign, write to ledger, broadcast, clear mempool for that tx."""
         self._stop_spinner()
+        self._stop_mining_heartbeat()
         with self.mempool_lock:
             if not self.mempool:
                 return
@@ -511,6 +577,8 @@ class PoWNode:
                 transactions=[transaction]
             )
             self.ledger.add_block(block)
+            tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+            logger.info("ledger saved block_index=%s tx_id=%s", block_index, tx_id)
         except Exception as e:
             logger.error("Ledger write failed: %s", e)
             return
@@ -536,17 +604,20 @@ class PoWNode:
         }
         self._broadcast_block(payload)
         self._send_block_confirmation(block_index, block_hash, timestamp, [tx])
+        logger.info("block broadcast+confirm sent index=%s tx_id=%s", block_index, tx_id)
 
         # Start mining next tx if any
         with self.mempool_lock:
             if self.mempool:
                 self._start_mining_if_needed()
 
-    def _broadcast_block(self, payload):
-        """Broadcast new_block to all known nodes."""
-        message = {'type': 'new_block', 'node_id': self.node_id, 'data': payload}
+    def _broadcast_block(self, payload, relay_from=None):
+        """Broadcast new_block to neighbor nodes (bounded fanout)."""
+        message = {'type': 'new_block', 'node_id': self.node_id, 'relay': self.node_id, 'data': payload}
         raw = json.dumps(message).encode()
         for node_id, (host, port) in list(self.known_nodes.items()):
+            if relay_from and node_id == relay_from:
+                continue
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(3)
@@ -556,6 +627,29 @@ class PoWNode:
             except Exception:
                 pass
         logger.info("gossip: block broadcast to %s peers", len(self.known_nodes))
+
+    def _gossip_transaction(self, sender, tx_data, signature, public_key, relay_from=None):
+        """Forward NEW_TRANSACTION to neighbors (dedup handled by tx_id)."""
+        message = {
+            'type': 'NEW_TRANSACTION',
+            'sender': sender,
+            'data': tx_data,
+            'signature': signature,
+            'public_key': public_key,
+            'relay': self.node_id,
+        }
+        raw = json.dumps(message).encode()
+        for node_id, (host, port) in list(self.known_nodes.items()):
+            if relay_from and node_id == relay_from:
+                continue
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3)
+                sock.connect((host, port))
+                sock.send(raw)
+                sock.close()
+            except Exception:
+                pass
 
     def _send_block_confirmation(self, block_index, block_hash, timestamp, transactions=None):
         """Notify RPC server so it can forward to main server (with tx list for wallet updates)."""
@@ -569,12 +663,10 @@ class PoWNode:
                 'timestamp': timestamp,
                 'transactions': transactions or [],
             }
-            raw = json.dumps(msg).encode()
-            length = struct.pack('>H', len(raw))
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(3)
             sock.connect((self.gateway_host, self.gateway_port))
-            sock.send(length + raw)
+            Protocol.send_lp_json(sock, msg)
             sock.close()
             logger.info("block_confirmation sent to RPC block_index=%s", block_index)
         except Exception as e:
@@ -603,6 +695,8 @@ class PoWNode:
             sys.stdout.flush()
 
     def _start_spinner(self):
+        if not ENABLE_MINING_SPINNER:
+            return
         if self._spinner_thread and self._spinner_thread.is_alive():
             return
         self._spinner_stop.clear()
@@ -611,3 +705,23 @@ class PoWNode:
 
     def _stop_spinner(self):
         self._spinner_stop.set()
+
+    def _start_mining_heartbeat(self):
+        if self._mining_heartbeat_thread and self._mining_heartbeat_thread.is_alive():
+            return
+        self._mining_heartbeat_stop.clear()
+
+        def loop():
+            while not self._mining_heartbeat_stop.is_set():
+                try:
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+
+        self._mining_heartbeat_thread = threading.Thread(target=loop, daemon=True)
+        self._mining_heartbeat_thread.start()
+
+    def _stop_mining_heartbeat(self):
+        self._mining_heartbeat_stop.set()

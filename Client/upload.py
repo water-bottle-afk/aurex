@@ -54,6 +54,7 @@ def upload_marketplace_item_from_bytes(
         "tx_id": mint_tx_id,
         "asset_hash": asset_hash,
         "asset_name": asset_name,
+        "file_name": file_name,
         "owner": username,
         "owner_pub": public_key,
         "cost": cost,

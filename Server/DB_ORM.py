@@ -201,6 +201,25 @@ class MarketplaceDB:
             )
         ''')
 
+        # Pending (not approved) assets table - same schema as marketplace_items
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS not_approved_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset_name TEXT NOT NULL,
+                description TEXT,
+                username TEXT NOT NULL,
+                url TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                cost REAL NOT NULL,
+                asset_hash TEXT,
+                owner_public_key TEXT,
+                timestamp TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                is_listed INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (username) REFERENCES users (username)
+            )
+        ''')
+
         # Ensure columns exist for older DBs
         cursor.execute("PRAGMA table_info(marketplace_items)")
         item_cols = {row[1] for row in cursor.fetchall()}
@@ -212,6 +231,18 @@ class MarketplaceDB:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN is_listed INTEGER NOT NULL DEFAULT 1")
         if "owner_public_key" not in item_cols:
             cursor.execute("ALTER TABLE marketplace_items ADD COLUMN owner_public_key TEXT")
+
+        # Ensure columns exist for not_approved_assets
+        cursor.execute("PRAGMA table_info(not_approved_assets)")
+        pending_cols = {row[1] for row in cursor.fetchall()}
+        if "description" not in pending_cols:
+            cursor.execute("ALTER TABLE not_approved_assets ADD COLUMN description TEXT")
+        if "asset_hash" not in pending_cols:
+            cursor.execute("ALTER TABLE not_approved_assets ADD COLUMN asset_hash TEXT")
+        if "is_listed" not in pending_cols:
+            cursor.execute("ALTER TABLE not_approved_assets ADD COLUMN is_listed INTEGER NOT NULL DEFAULT 0")
+        if "owner_public_key" not in pending_cols:
+            cursor.execute("ALTER TABLE not_approved_assets ADD COLUMN owner_public_key TEXT")
 
         # Notifications table
         cursor.execute('''
@@ -582,7 +613,18 @@ class MarketplaceDB:
             print(f"Error updating user: {e}")
             return False
     
-    def add_marketplace_item(self, asset_name, username, url, file_type, cost, description="", asset_hash=None, owner_public_key=None):
+    def add_marketplace_item(
+        self,
+        asset_name,
+        username,
+        url,
+        file_type,
+        cost,
+        description="",
+        asset_hash=None,
+        owner_public_key=None,
+        is_listed=1,
+    ):
         """Add item to marketplace"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -606,7 +648,7 @@ class MarketplaceDB:
                 owner_public_key,
                 datetime.now().isoformat(),
                 datetime.now().isoformat(),
-                1,
+                1 if is_listed else 0,
             ))
             
             item_id = cursor.lastrowid
@@ -615,6 +657,97 @@ class MarketplaceDB:
             return True, "Item added successfully", item_id
         except Exception as e:
             return False, f"Error adding item: {str(e)}", None
+
+    def add_pending_asset(
+        self,
+        asset_name,
+        username,
+        url,
+        file_type,
+        cost,
+        description="",
+        asset_hash=None,
+        owner_public_key=None,
+    ):
+        """Add asset to not_approved_assets (pending blockchain confirmation)."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            direct_url = convert_drive_url(url)
+            now = datetime.now().isoformat()
+
+            cursor.execute('''
+                INSERT INTO not_approved_assets (
+                    asset_name, description, username, url, file_type, cost, asset_hash, owner_public_key, timestamp, created_at, is_listed
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                asset_name,
+                description,
+                username,
+                direct_url,
+                file_type,
+                cost,
+                asset_hash,
+                owner_public_key,
+                now,
+                now,
+                0,
+            ))
+
+            item_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return True, "Pending asset added", item_id
+        except Exception as e:
+            return False, f"Error adding pending asset: {str(e)}", None
+
+    def approve_pending_asset_by_hash(self, asset_hash):
+        """Move a pending asset into marketplace_items using asset_hash."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT asset_name, description, username, url, file_type, cost, asset_hash, owner_public_key, timestamp, created_at
+                FROM not_approved_assets
+                WHERE asset_hash = ?
+                LIMIT 1
+            ''', (asset_hash,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False, "Pending asset not found", None
+
+            cursor.execute('''
+                INSERT INTO marketplace_items (
+                    asset_name, description, username, url, file_type, cost, asset_hash, owner_public_key, timestamp, created_at, is_listed
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], 1
+            ))
+            new_id = cursor.lastrowid
+            cursor.execute('DELETE FROM not_approved_assets WHERE asset_hash = ?', (asset_hash,))
+            conn.commit()
+            conn.close()
+            return True, "Pending asset approved", new_id
+        except Exception as e:
+            return False, f"Error approving pending asset: {str(e)}", None
+
+    def delete_pending_asset_by_hash(self, asset_hash):
+        """Delete pending asset by hash."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM not_approved_assets WHERE asset_hash = ?', (asset_hash,))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            conn.close()
+            return deleted
+        except Exception as e:
+            print(f"Error deleting pending asset: {e}")
+            return False
     
     def get_all_items(self):
         """Get all marketplace items"""
@@ -864,6 +997,51 @@ class MarketplaceDB:
             return updated
         except Exception as e:
             print(f"Error updating listing status: {e}")
+            return False
+
+    def set_item_listed_by_hash(self, asset_hash, is_listed):
+        """Update listing status for an item by asset hash. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE marketplace_items SET is_listed = ? WHERE asset_hash = ?',
+                (1 if is_listed else 0, asset_hash)
+            )
+            conn.commit()
+            updated = cursor.rowcount > 0
+            conn.close()
+            return updated
+        except Exception as e:
+            print(f"Error updating listing status by hash: {e}")
+            return False
+
+    def delete_marketplace_item(self, asset_id):
+        """Delete marketplace item by id. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM marketplace_items WHERE id = ?', (asset_id,))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            conn.close()
+            return deleted
+        except Exception as e:
+            print(f"Error deleting marketplace item: {e}")
+            return False
+
+    def delete_marketplace_item_by_hash(self, asset_hash):
+        """Delete marketplace item by asset hash. Returns True on success."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM marketplace_items WHERE asset_hash = ?', (asset_hash,))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            conn.close()
+            return deleted
+        except Exception as e:
+            print(f"Error deleting marketplace item by hash: {e}")
             return False
 
     def update_item_listing(self, asset_id, is_listed, new_cost=None):

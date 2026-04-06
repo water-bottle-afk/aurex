@@ -21,8 +21,8 @@ def main():
     
     # 1. Start Blockchain Nodes (PoW Launcher)
     # Assuming launcher.py handles starting multiple nodes
-    nodes_count = 3
-    difficulty = 2
+    nodes_count = 4
+    difficulty = 1
     launch_task("Aurex-Nodes", f"{PYTHON_EXEC} launcher.py --nodes {nodes_count} --difficulty {difficulty}", BLOCKCHAIN_DIR)
     time.sleep(2)
 
