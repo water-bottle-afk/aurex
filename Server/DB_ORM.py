@@ -275,6 +275,20 @@ class MarketplaceDB:
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_wallets_pubkey ON wallets(public_key_hex)')
 
+        # Device tokens table for push notifications
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'unknown',
+                updated_at TEXT,
+                FOREIGN KEY (username) REFERENCES users (username)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(username)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_device_tokens_token ON device_tokens(token)')
+
         conn.commit()
         conn.close()
     

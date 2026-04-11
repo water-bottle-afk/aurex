@@ -13,7 +13,7 @@ try:
         node_name="PoW_Node_2",
         host='127.0.0.1',
         port=13246,
-        difficulty=2,
+        difficulty=1,
         gateway_host=GATEWAY_HOST,
         gateway_port=GATEWAY_PORT,
     )

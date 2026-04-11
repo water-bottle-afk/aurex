@@ -34,7 +34,6 @@ from config import (
     ALLOWED_MINER_KEY_FINGERPRINTS,
     NODE_REGISTRY_STALE_SECONDS,
     MAX_NEIGHBORS,
-    ENABLE_MINING_SPINNER,
 )
 from protocol import Protocol
 
@@ -66,29 +65,31 @@ def _fingerprint_public_key(public_key_pem):
     return hashlib.sha256(public_key_pem.encode()).hexdigest()
 
 
-def hashing_process(data, difficulty, stop_event, result_queue):
+def hashing_process(data_hash, difficulty, stop_event, result_queue):
     """
     CPU-bound mining loop. Runs in a separate process.
+    data_hash is a pre-computed SHA-256 hex digest of the block header —
+    only a fixed 64-char string is concatenated per iteration.
     Exits when stop_event is set (peer found block) or when nonce is found.
     """
     nonce = 0
-    target = '0' * difficulty
-    last_dot = time.monotonic()
-    while not stop_event.is_set():
-        hash_attempt = hashlib.sha256(f"{data}{nonce}".encode()).hexdigest()
-        if hash_attempt.startswith(target):
-            result_queue.put((hash_attempt, nonce))
-            return
-        now = time.monotonic()
-        if now - last_dot >= 0.25:
+    target = '0' * int(difficulty)
+    try:
+        while not stop_event.is_set():
+            hash_attempt = hashlib.sha256(f"{data_hash}{nonce}".encode()).hexdigest()
             try:
-                sys.stdout.write(".")
+                sys.stdout.write(f"[nonce={nonce}] {hash_attempt[:16]}...\n")
                 sys.stdout.flush()
-            except Exception:
-                pass
-            last_dot = now
-        nonce += 1
-    # stopped by peer block (no log in subprocess to avoid cross-process logger issues)
+            except (BrokenPipeError, OSError, ValueError):
+                stop_event.set()
+                return
+            if hash_attempt.startswith(target):
+                result_queue.put((hash_attempt, nonce))
+                return
+            nonce += 1
+    except Exception:
+        stop_event.set()
+        return
 
 
 class PoWNode:
@@ -122,6 +123,7 @@ class PoWNode:
         logger.info("ledger ready path=%s blocks=%s", ledger_path, len(self.ledger.blocks))
         self.seen_tx_ids = set()
         self.seen_block_hashes = set()
+        self.inflight_tx_ids = set()
         for block in self.ledger.blocks:
             for tx in getattr(block, 'transactions', []):
                 tx_data = getattr(tx, 'data', {}) if tx else {}
@@ -142,11 +144,6 @@ class PoWNode:
         self.result_queue = multiprocessing.Queue()  # single queue for all miner runs
         self.miner_process = None
         self.mining_lock = threading.Lock()
-        self._spinner_stop = threading.Event()
-        self._spinner_thread = None
-        self._mining_heartbeat_stop = threading.Event()
-        self._mining_heartbeat_thread = None
-
         self._register_node()
         self._select_neighbors()
         logger.info("node started port=%s node_id=%s difficulty=%s neighbors=%s",
@@ -317,6 +314,7 @@ class PoWNode:
         try:
             data = client_socket.recv(4096)
             if not data:
+                self._stop_mining("peer_disconnect")
                 client_socket.close()
                 return
             message = json.loads(data.decode())
@@ -342,6 +340,7 @@ class PoWNode:
             else:
                 client_socket.close()
         except Exception as e:
+            self._stop_mining("peer_error")
             try:
                 client_socket.close()
             except Exception:
@@ -450,12 +449,29 @@ class PoWNode:
         logger.info("block validate done index=%s", block_index)
 
     def _handle_new_transaction(self, message, client_socket):
+        inflight_added = False
+        tx_id = None
         try:
             tx_data = message.get('data', {})
             sender = message.get('sender', '')
             signature = message.get('signature', '')
             public_key = message.get('public_key', '')
-            start_timestamp = datetime.utcnow().isoformat()
+            tx_id = tx_data.get('tx_id') if isinstance(tx_data, dict) else None
+            
+            # Early duplicate check to prevent double processing
+            if tx_id:
+                with self.mempool_lock:
+                    in_mempool = any(
+                        (item.get('data', {}).get('tx_id') == tx_id) for item in self.mempool
+                    )
+                    if tx_id in self.seen_tx_ids or tx_id in self.inflight_tx_ids or in_mempool:
+                        logger.warning("tx rejected: duplicate tx_id (%s)", tx_id)
+                        client_socket.close()
+                        return
+                    self.inflight_tx_ids.add(tx_id)
+                    inflight_added = True
+            
+            start_timestamp = datetime.now(timezone.utc).isoformat()
             tx_type = tx_data.get('action', 'unknown') if isinstance(tx_data, dict) else 'unknown'
             relay = message.get('relay') or message.get('node_id') or ''
             if tx_type == 'asset_mint' and isinstance(tx_data, dict):
@@ -473,10 +489,6 @@ class PoWNode:
                 return
 
             with self.mempool_lock:
-                tx_id = tx_data.get('tx_id') if isinstance(tx_data, dict) else None
-                if tx_id in self.seen_tx_ids:
-                    logger.warning("tx rejected: duplicate tx_id (%s)", tx_type)
-                    return
                 self.mempool.append({
                     'sender': sender,
                     'data': tx_data,
@@ -486,6 +498,8 @@ class PoWNode:
                 })
                 if tx_id:
                     self.seen_tx_ids.add(tx_id)
+                    if tx_id in self.inflight_tx_ids:
+                        self.inflight_tx_ids.remove(tx_id)
 
             logger.info("NEW_TRANSACTION queued: type=%s sender=%s tx_id=%s", tx_type, sender, tx_id)
             self._gossip_transaction(sender, tx_data, signature, public_key, relay_from=relay)
@@ -499,6 +513,11 @@ class PoWNode:
                 client_socket.close()
             except Exception:
                 pass
+        finally:
+            if inflight_added and tx_id:
+                with self.mempool_lock:
+                    if tx_id in self.inflight_tx_ids:
+                        self.inflight_tx_ids.remove(tx_id)
 
     def _start_mining_if_needed(self):
         """Start miner process if not already mining. Uses first tx in mempool."""
@@ -511,30 +530,33 @@ class PoWNode:
             tx = self.mempool[0]
 
         self.stop_mining_event.clear()
-        # Data to hash: prev_hash + timestamp + tx payload (deterministic)
-        ts = datetime.utcnow().isoformat()
-        data_to_hash = json.dumps({
+        # Build a compact block header and pre-hash it once.
+        # Only the 64-char hex digest is sent to the mining process,
+        # so each loop iteration concatenates a fixed-size string.
+        ts = datetime.now(timezone.utc).isoformat()
+        tx_data = tx.get('data', {})
+        header = json.dumps({
             'prev_hash': self.last_block_hash,
             'timestamp': ts,
             'index': self.last_block_index + 1,
-            'tx': tx
+            'sender': tx.get('sender', ''),
+            'tx_id': tx_data.get('tx_id', '') if isinstance(tx_data, dict) else '',
+            'action': tx_data.get('action', '') if isinstance(tx_data, dict) else '',
         }, sort_keys=True)
+        data_to_hash = hashlib.sha256(header.encode()).hexdigest()
 
         self.miner_process = multiprocessing.Process(
             target=hashing_process,
             args=(data_to_hash, self.difficulty, self.stop_mining_event, self.result_queue)
         )
+        self.miner_process.daemon = True
         self.miner_process.start()
-        self._start_spinner()
-        self._start_mining_heartbeat()
         tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
         logger.info("hashing: mining started difficulty=%s tx_id=%s", self.difficulty, tx_id)
 
     def _stop_mining(self, reason):
         """Stop miner process and clear stop event."""
         self.stop_mining_event.set()
-        self._stop_spinner()
-        self._stop_mining_heartbeat()
         if self.miner_process and self.miner_process.is_alive():
             self.miner_process.join(timeout=2)
             if self.miner_process.is_alive():
@@ -543,8 +565,6 @@ class PoWNode:
 
     def _on_block_mined(self, block_hash, nonce):
         """We found a block: sign, write to ledger, broadcast, clear mempool for that tx."""
-        self._stop_spinner()
-        self._stop_mining_heartbeat()
         with self.mempool_lock:
             if not self.mempool:
                 return
@@ -552,7 +572,7 @@ class PoWNode:
 
         block_index = self.last_block_index + 1
         prev_hash = self.last_block_hash
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         signature = self.key_manager.sign_data(block_hash)
         public_key_pem = self.key_manager.get_public_key_pem()
 
@@ -677,51 +697,3 @@ class PoWNode:
         self._stop_mining("shutdown")
         logger.info("node stopping")
 
-    def _spinner_loop(self):
-        symbols = ['\\', '|', '/', '-']
-        idx = 0
-        try:
-            sys.stdout.write("Processing... ")
-            sys.stdout.flush()
-            while not self._spinner_stop.is_set():
-                sys.stdout.write(f"\rProcessing... {symbols[idx % len(symbols)]}")
-                sys.stdout.flush()
-                time.sleep(0.1)
-                idx += 1
-        except Exception:
-            return
-        finally:
-            sys.stdout.write("\rProcessing... done\n")
-            sys.stdout.flush()
-
-    def _start_spinner(self):
-        if not ENABLE_MINING_SPINNER:
-            return
-        if self._spinner_thread and self._spinner_thread.is_alive():
-            return
-        self._spinner_stop.clear()
-        self._spinner_thread = threading.Thread(target=self._spinner_loop, daemon=True)
-        self._spinner_thread.start()
-
-    def _stop_spinner(self):
-        self._spinner_stop.set()
-
-    def _start_mining_heartbeat(self):
-        if self._mining_heartbeat_thread and self._mining_heartbeat_thread.is_alive():
-            return
-        self._mining_heartbeat_stop.clear()
-
-        def loop():
-            while not self._mining_heartbeat_stop.is_set():
-                try:
-                    sys.stdout.write(".")
-                    sys.stdout.flush()
-                except Exception:
-                    pass
-                time.sleep(0.5)
-
-        self._mining_heartbeat_thread = threading.Thread(target=loop, daemon=True)
-        self._mining_heartbeat_thread.start()
-
-    def _stop_mining_heartbeat(self):
-        self._mining_heartbeat_stop.set()

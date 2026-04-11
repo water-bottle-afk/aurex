@@ -1855,15 +1855,15 @@ class Server:
                     try:
                         client, addr = sock.accept()
                         client.settimeout(5)
-                        data = b''
-                        while b'\n' not in data and len(data) < 65536:
+                        raw_buf = b''
+                        while b'\n' not in raw_buf and len(raw_buf) < 65536:
                             chunk = client.recv(4096)
                             if not chunk:
                                 break
-                            data += chunk
+                            raw_buf += chunk
                         client.close()
-                        if data:
-                            line = data.decode('utf-8', errors='ignore').strip()
+                        if raw_buf:
+                            line = raw_buf.decode('utf-8', errors='ignore').strip()
                             if line:
                                 msg = json.loads(line)
                                 if msg.get('type') == 'block_confirmation':
@@ -1873,28 +1873,52 @@ class Server:
                                     )
                                     self.Print(" Block confirmed: index=%s hash=%s..." % (
                                         msg.get('block_index'), (msg.get('block_hash') or '')[:16]), 20)
-                                    # Apply wallet transfers from confirmed transactions
                                     for tx in msg.get('transactions', []):
-                                        data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
-                                        action = data.get('action')
-                                        from_user = data.get('from') or tx.get('sender')
-                                        to_user = data.get('to')
-                                        amount = data.get('amount') if data.get('amount') is not None else data.get('price')
-                                        asset_id = data.get('asset_id')
-                                        asset_hash = data.get('asset_hash')
-                                        tx_id = data.get('tx_id')
+                                        tx_data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
+                                        action = tx_data.get('action')
+                                        from_user = tx_data.get('from') or tx.get('sender')
+                                        to_user = tx_data.get('to')
+                                        amount = tx_data.get('amount') if tx_data.get('amount') is not None else tx_data.get('price')
+                                        asset_id = tx_data.get('asset_id')
+                                        asset_hash = tx_data.get('asset_hash')
+                                        tx_id = tx_data.get('tx_id')
+
                                         if action == 'asset_mint':
-                                            owner = data.get('owner') or tx.get('sender')
-                                            cost = data.get('cost')
+                                            owner = tx_data.get('owner') or tx.get('sender')
+                                            cost = tx_data.get('cost')
                                             if cost is None:
-                                                cost = data.get('amount') if data.get('amount') is not None else data.get('price')
+                                                cost = tx_data.get('amount') if tx_data.get('amount') is not None else tx_data.get('price')
+                                            # Move asset from pending -> marketplace FIRST
+                                            approved_id = None
+                                            mint_ok = False
+                                            if asset_hash:
+                                                ok, approve_msg, new_id = self.db.approve_pending_asset_by_hash(asset_hash)
+                                                if ok:
+                                                    approved_id = new_id
+                                                    mint_ok = True
+                                                    server_logger.info(
+                                                        "mint: approved pending asset hash=%s new_marketplace_id=%s",
+                                                        asset_hash[:16], new_id,
+                                                    )
+                                                else:
+                                                    server_logger.warning(
+                                                        "mint: pending asset not found hash=%s (%s)",
+                                                        asset_hash[:16] if asset_hash else '?', approve_msg,
+                                                    )
+                                            else:
+                                                server_logger.warning("mint: block_confirmation missing asset_hash")
+                                            if not mint_ok:
+                                                if tx_id:
+                                                    self._set_tx_status(tx_id, "failed", "Pending asset not found for mint hash")
+                                                continue
+                                            # Deduct minting cost after successful approval
                                             if owner and cost is not None:
                                                 try:
                                                     cost_val = float(cost)
                                                     wallet = self.db.get_wallet(owner)
                                                     if wallet:
                                                         balance = float(wallet.get('balance', 0))
-                                                        new_balance = balance - cost_val
+                                                        new_balance = max(0.0, balance - cost_val)
                                                         self.db.update_balance(owner, new_balance)
                                                         server_logger.info(
                                                             "mint: deducted %.2f from %s wallet (%.2f -> %.2f)",
@@ -1902,23 +1926,7 @@ class Server:
                                                         )
                                                 except (ValueError, TypeError) as e:
                                                     server_logger.warning("mint: invalid cost for wallet update: %s", e)
-                                            # Move asset from pending -> marketplace on confirmation
-                                            asset_hash = data.get('asset_hash')
-                                            approved_id = None
-                                            if asset_hash:
-                                                ok, _, new_id = self.db.approve_pending_asset_by_hash(asset_hash)
-                                                if ok:
-                                                    approved_id = new_id
-                                                    server_logger.info(
-                                                        "mint: approved pending asset hash=%s id=%s",
-                                                        asset_hash[:16],
-                                                        new_id,
-                                                    )
-                                                else:
-                                                    server_logger.warning(
-                                                        "mint: pending asset not found for hash=%s",
-                                                        asset_hash[:16] if asset_hash else '?',
-                                                    )
+                                            # Store the approved marketplace asset_id in tx_status
                                             if tx_id and approved_id is not None:
                                                 with self.tx_status_lock:
                                                     info = self.tx_status.get(tx_id)
@@ -1927,6 +1935,7 @@ class Server:
                                             if tx_id:
                                                 self._set_tx_status(tx_id, "confirmed", "Mint confirmed")
                                             continue
+
                                         if action == 'purchase':
                                             buyer = from_user
                                             seller = to_user
@@ -1946,9 +1955,13 @@ class Server:
                                                     updated = self.db.update_asset_owner(str(asset_id), new_owner)
                                                 if not updated and asset_hash:
                                                     updated = self.db.update_asset_owner_by_hash(asset_hash, new_owner)
+                                                # Always unlist the asset on successful purchase
+                                                if asset_id:
+                                                    self.db.set_item_listed(str(asset_id), False)
+                                                    self.broadcast_marketplace_remove(str(asset_id))
                                                 if updated:
                                                     server_logger.info(
-                                                        "purchase: asset_id=%s new_owner=%s", asset_id, new_owner
+                                                        "purchase: asset_id=%s transferred to buyer=%s", asset_id, new_owner
                                                     )
                                                     if tx_id:
                                                         self._set_tx_status(tx_id, "confirmed", "Transaction confirmed")
@@ -1957,27 +1970,26 @@ class Server:
                                                         "purchase: ownership update failed asset_id=%s", asset_id
                                                     )
                                                     if tx_id:
-                                                        self._set_tx_status(
-                                                            tx_id, "failed", "Asset ownership update failed"
-                                                        )
+                                                        self._set_tx_status(tx_id, "failed", "Asset ownership update failed")
                                             else:
                                                 server_logger.warning("purchase: wallet transfer failed: %s", res)
                                                 if tx_id:
                                                     self._set_tx_status(tx_id, "failed", res)
                                             continue
+
                                         if action == 'asset_transfer':
                                             if from_user and to_user and (asset_id or asset_hash):
                                                 updated = False
                                                 if asset_hash:
                                                     updated = self.db.update_asset_owner_by_hash(asset_hash, to_user)
                                                 if not updated and asset_id:
-                                                    updated = self.db.update_asset_owner(asset_id, to_user)
+                                                    updated = self.db.update_asset_owner(str(asset_id), to_user)
                                                 if updated:
                                                     if asset_id:
-                                                        self.db.set_item_listed(asset_id, False)
-                                                        self.broadcast_marketplace_remove(asset_id)
+                                                        self.db.set_item_listed(str(asset_id), False)
+                                                        self.broadcast_marketplace_remove(str(asset_id))
                                                     server_logger.info(
-                                                        "asset transfer updated: asset_id=%s owner=%s", asset_id, to_user
+                                                        "asset transfer updated: asset_id=%s new_owner=%s", asset_id, to_user
                                                     )
                                                 else:
                                                     server_logger.warning(
@@ -1989,12 +2001,14 @@ class Server:
                                                 if tx_id:
                                                     self._set_tx_status(tx_id, "failed", "Invalid transfer payload")
                                             continue
+
+                                        # Generic fallback: plain wallet transfer
                                         if from_user and to_user is not None and amount is not None:
                                             try:
-                                                amount = float(amount)
-                                                ok, res = self.db.transfer(from_user, to_user, amount)
+                                                amt_val = float(amount)
+                                                ok, res = self.db.transfer(from_user, to_user, amt_val)
                                                 if ok:
-                                                    server_logger.info("wallet transfer: %s -> %s amount=%s: %s", from_user, to_user, amount, res)
+                                                    server_logger.info("wallet transfer: %s -> %s amount=%s: %s", from_user, to_user, amt_val, res)
                                                     self.Print(" Saved: %s" % res, 20)
                                                     wa, wb = self.db.get_wallet(from_user), self.db.get_wallet(to_user)
                                                     if wa and wb:
@@ -2002,7 +2016,7 @@ class Server:
                                                     if asset_id or asset_hash:
                                                         updated = False
                                                         if asset_id:
-                                                            updated = self.db.update_asset_owner(asset_id, to_user)
+                                                            updated = self.db.update_asset_owner(str(asset_id), to_user)
                                                         if not updated and asset_hash:
                                                             updated = self.db.update_asset_owner_by_hash(asset_hash, to_user)
                                                         if updated:

@@ -12,7 +12,7 @@ import threading
 import struct
 import logging
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import base64
 import time
@@ -142,8 +142,8 @@ def _is_timestamp_valid(ts_str):
         ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=None)
-        now = datetime.utcnow()
-        delta = abs((now - ts.replace(tzinfo=None)).total_seconds())
+        now = datetime.now(timezone.utc)
+        delta = abs((now.replace(tzinfo=None) - ts.replace(tzinfo=None)).total_seconds())
         return delta <= TX_TIME_WINDOW_SECONDS
     except Exception:
         return False
@@ -155,20 +155,20 @@ def _register_tx_id(tx_id, ts_str):
     with SEEN_TX_LOCK:
         if tx_id in SEEN_TX_IDS:
             return False, "duplicate tx_id"
-        SEEN_TX_IDS[tx_id] = ts_str or datetime.utcnow().isoformat()
+        SEEN_TX_IDS[tx_id] = ts_str or datetime.now(timezone.utc).isoformat()
     return True, "ok"
 
 
 def _cleanup_seen_tx_ids():
     while True:
         time.sleep(max(30, TX_TIME_WINDOW_SECONDS))
-        cutoff = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with SEEN_TX_LOCK:
             to_delete = []
             for tx_id, ts_str in SEEN_TX_IDS.items():
                 try:
                     ts = datetime.fromisoformat(ts_str)
-                    if abs((cutoff - ts).total_seconds()) > TX_TIME_WINDOW_SECONDS * 2:
+                    if abs((now.replace(tzinfo=None) - ts.replace(tzinfo=None)).total_seconds()) > TX_TIME_WINDOW_SECONDS * 2:
                         to_delete.append(tx_id)
                 except Exception:
                     to_delete.append(tx_id)
@@ -276,7 +276,7 @@ def _record_block_confirmation(confirmation):
         block_hash = confirmation.get('block_hash') or ''
         block_index = confirmation.get('block_index')
         miner_id = confirmation.get('miner_id') or ''
-        timestamp = confirmation.get('timestamp') or datetime.utcnow().isoformat()
+        timestamp = confirmation.get('timestamp') or datetime.now(timezone.utc).isoformat()
         tx_list = confirmation.get('transactions') or []
 
         conn = get_db_connection()
@@ -603,9 +603,7 @@ def main():
                 if not body:
                     _send_json(conn, {'error': 'Invalid or missing body'})
                 else:
-                    from datetime import datetime
-
-                    ts = datetime.utcnow().isoformat()
+                    ts = datetime.now(timezone.utc).isoformat()
                     logger.info(
                         "=== TRANSACTION SUBMITTED === timestamp=%s sender=%s data=%s signature=%s",
                         ts,
