@@ -78,8 +78,12 @@ def hashing_process(data_hash, difficulty, stop_event, result_queue):
         while not stop_event.is_set():
             hash_attempt = hashlib.sha256(f"{data_hash}{nonce}".encode()).hexdigest()
             try:
-                sys.stdout.write(f"[nonce={nonce}] {hash_attempt[:16]}...\n")
-                sys.stdout.flush()
+                if not hash_attempt.startswith(target):
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
+                else:
+                    sys.stdout.write(f"\n[nonce={nonce}] {hash_attempt[:16]}...\n")
+                    sys.stdout.flush()
             except (BrokenPipeError, OSError, ValueError):
                 stop_event.set()
                 return
@@ -441,6 +445,19 @@ class PoWNode:
         if current_hash:
             self.seen_block_hashes.add(current_hash)
         logger.info("gossip: block accepted index=%s hash=%s...", block_index, current_hash[:16])
+
+        # Stop mining and drop any matching mempool/inflight txs
+        tx_ids = set()
+        for tx in tx_list:
+            tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+            if tx_id:
+                tx_ids.add(tx_id)
+        if tx_ids:
+            with self.mempool_lock:
+                self.mempool = [t for t in self.mempool if (t.get('data', {}).get('tx_id') not in tx_ids)]
+                for tx_id in list(tx_ids):
+                    if tx_id in self.inflight_tx_ids:
+                        self.inflight_tx_ids.remove(tx_id)
 
         # Stop our miner so we don't keep hashing
         self._stop_mining("new_block")

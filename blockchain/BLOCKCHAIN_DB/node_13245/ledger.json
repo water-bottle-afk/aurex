@@ -1,1 +1,32 @@
-[]
+[
+  {
+    "index": 0,
+    "timestamp": "2026-04-11T13:59:46.266738+00:00",
+    "prev_hash": "0",
+    "current_hash": "088272bf5e71e7b91b584a9ecf848f3d318240692cac5fc2ec939cbe7c1bf02a",
+    "nonce": 3,
+    "miner_id": "node_13245",
+    "signature": "1d92b3f78372069c80267a49d968107b44671736a821081198fefa9fbde2a46e70acb3b1fb0043d3a0f8bdf7a7167a6aaff7f95a1ce6120379c55b39c6ffc17758ccee863ac768e759f94a654b681398a9055fe49df4b8f2e1917267d2c9d53e871103743956f90a4b76df88b44f4e2c0bb4049b84d0c8c7f21119be9822778c395a4b16a30de462de0cb0da03ebd8a9118021695c695e9821e70b46b740cec51b85e1a6005160a2552f3bb46f6cc4d79f6e04b92059502fb94617f3e7f849e8613cff88c53c8288bb50c97a3f90075d254483f50cf82ea406563e2eb4c22ff08d66e8f319ab2e3251f7a5d0d5ee9208bff23d26db6830dffdbcd3a4ac950230",
+    "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAviNA0MgiPVFLWG/BLFfn\nR+mZ58a0BhD4Z9n0mP+XXpdwYedSVVavLpegg92qSjNm8fiOsoSEBKT960EZoIky\nHj3h9S7WXH4NnEoXa7ZapODTPJrNjSmYrjLx51kZoC6qk1BMjtTqDJStONy5lwcK\nL3iEMbAIkO0UE+0Rs2K8rJwIh/lGF2KTX+BB19Vmd1VFQVV0d2g80JxerttHP9s2\n9CTmJSxjrTVGcgzw87BHc7RucPkJ+NA+pU1DnrToaYJE46USCfa8d5/HUtdUHabP\n5mWiDs2+0Dk05XBmJSfrf72+r7jbHofH3q5NFL7E1KlVwnsSIXOUhQ7z5cszl+Rg\nCwIDAQAB\n-----END PUBLIC KEY-----\n",
+    "transactions": [
+      {
+        "sender": "user",
+        "data": {
+          "action": "asset_mint",
+          "tx_id": "MINT_user_1775915982721_fa65a5eb",
+          "asset_hash": "4adfd57c971794315acb57f69e6ca6c486f213990b83020fea5c742a5f2dc038",
+          "asset_name": "tg",
+          "file_name": "logo.png",
+          "owner": "user",
+          "owner_pub": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+          "cost": 3.0,
+          "timestamp": "2026-04-11T13:59:42.721480+00:00"
+        },
+        "signature": "PuVPk33CAXUHOuHapNf8oexeMApaPk0P6xQovFoHyGXLwo6jbrZTKWiVpI5RFIjz8K73CFFw7C4yV2zs55S+AQ==",
+        "public_key": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+        "start_timestamp": "2026-04-11T13:59:43.732912+00:00",
+        "end_timestamp": "2026-04-11T13:59:46.266738+00:00"
+      }
+    ]
+  }
+]

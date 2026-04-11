@@ -29,11 +29,9 @@ class BlockchainNode:
         self.running = False
     
     def start(self):
-        """Start the node in a background thread"""
+        """Start the node and block until it stops"""
         self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=False)
-        self.thread.start()
-        print(f" {self.node_name} started (listening on {self.port})")
+        self._run()
     
     def _run(self):
         """Run the node"""
@@ -74,8 +72,6 @@ class BlockchainNode:
         if self.node:
             self.node.is_running = False
         self.running = False
-        if self.thread:
-            self.thread.join(timeout=2)
         print(f" {self.node_name} stopped")
 
     # ── Direct gateway submission helpers ─────────────────────────────────

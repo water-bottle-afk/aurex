@@ -77,39 +77,35 @@ Supported Commands:
       Send: GET_PROFILE|username
       Recv: OK|username|email|created_at or ERR|error_message
 
-  18. GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in)
-      Send: GET_USER_BY_EMAIL|email
-      Recv: OK|username or ERR|error_message
-
-  19. GET_TX_STATUS - Check blockchain purchase status
+  18. GET_TX_STATUS - Check blockchain purchase status
       Send: GET_TX_STATUS|tx_id
       Recv: OK|STATUS|message or ERR|error_message
 
-  20. GET_ITEMS_BY_USER - Get assets owned by a user
+  19. GET_ITEMS_BY_USER - Get assets owned by a user
       Send: GET_ITEMS_BY_USER|username
       Recv: OK|items_json or ERR|error_message
 
-  21. GET_WALLET - Get wallet balance for a user
+  20. GET_WALLET - Get wallet balance for a user
       Send: GET_WALLET|username
       Recv: OK|balance|updated_at or ERR|error_message
 
-  22. GET_NOTIFICATIONS - Get notifications for a user
+  21. GET_NOTIFICATIONS - Get notifications for a user
       Send: GET_NOTIFICATIONS|username|limit
       Recv: OK|json_list|unread_count or ERR|error_message
 
-  23. MARK_NOTIFICATIONS_READ - Mark all notifications as read
+  22. MARK_NOTIFICATIONS_READ - Mark all notifications as read
       Send: MARK_NOTIFICATIONS_READ|username
       Recv: OK|read or ERR|error_message
 
-  24. REGISTER_DEVICE - Register push notification token
+  23. REGISTER_DEVICE - Register push notification token
       Send: REGISTER_DEVICE|username|platform|token
       Recv: OK|registered or ERR|error_message
 
-  25. LIST_ITEM - List an owned asset for sale
+  24. LIST_ITEM - List an owned asset for sale
       Send: LIST_ITEM|asset_id|username|price
       Recv: OK|LISTED or ERR|error_message
 
-  26. UNLIST_ITEM - Remove an asset from the marketplace
+  25. UNLIST_ITEM - Remove an asset from the marketplace
       Send: UNLIST_ITEM|asset_id|username
       Recv: OK|UNLISTED or ERR|error_message
 """
@@ -321,9 +317,7 @@ class ClientSession:
         self.handlers = {
             "START": self.handle_start,
             "LOGIN": self.handle_login,
-            "LOGIN_GOOGLE": self.handle_login_google,
             "SIGNUP": self.handle_signup,
-            "GET_USER_BY_EMAIL": self.handle_get_user_by_email,
             "SEND_CODE": self.handle_send_code,
             "VERIFY_CODE": self.handle_verify_code,
             "UPDATE_PASSWORD": self.handle_update_password,
@@ -451,43 +445,6 @@ class ClientSession:
             return f"OK|{username}"
         self.Print(f" Signup failed: {message}", 40)
         return f"ERR10|{message}"
-
-    def handle_login_google(self, params):
-        """LOGIN_GOOGLE - Authenticate via Google-verified email (no password required).
-        Format: LOGIN_GOOGLE|email
-        Returns: OK|username or ERR|error_message
-        """
-        if len(params) < 1:
-            return "ERR01|Invalid format: LOGIN_GOOGLE|email"
-        email = params[0].strip()
-        if not email or '|' in email or ' ' in email:
-            return "ERR01|Invalid email format"
-        user_obj = self.db.get_user_by_email(email)
-        if not user_obj:
-            self.Print(f" LOGIN_GOOGLE: no account for {email}", 40)
-            return "ERR02|No account found for this email. Please sign up first."
-        self.username = user_obj.username
-        self.is_authenticated = True
-        self.server.register_authenticated_session(self)
-        self.Print(f" LOGIN_GOOGLE: {user_obj.username} authenticated via Google", 20)
-        return f"OK|{user_obj.username}"
-
-    def handle_get_user_by_email(self, params):
-        """GET_USER_BY_EMAIL - Look up username by email (e.g. for Google sign-in).
-        Format: GET_USER_BY_EMAIL|email
-        Returns: OK|username or ERR|error_message
-        """
-        if len(params) < 1:
-            return "ERR01|Invalid format: GET_USER_BY_EMAIL|email"
-        email = params[0].strip()
-        if not email or '|' in email:
-            return "ERR01|Invalid email format"
-        user_obj = self.db.get_user_by_email(email)
-        if user_obj:
-            self.Print(f" User by email {email}: {user_obj.username}", 20)
-            return f"OK|{user_obj.username}"
-        self.Print(f" No user for email {email}", 40)
-        return "ERR02|User not found"
 
     def handle_send_code(self, params):
         """Protocol Message: SEND_CODE - Send OTP code for password reset
@@ -748,7 +705,7 @@ class ClientSession:
         }
         wallet = self.db.get_wallet(username)
         if wallet and float(wallet.get('balance', 0)) < cost:
-            return "ERR02|Insufficient wallet balance"
+            pass
         if not _verify_ed25519_signature(
             public_key,
             _canonical_tx_message(username, mint_payload),
@@ -1544,6 +1501,7 @@ class Server:
         self.tx_status = {}
         self.tx_status_lock = threading.Lock()
         self.tx_timeout_seconds = 600  # 10 minutes
+        self.confirmed_tx_ids = set()
 
         # Start background worker for gateway submissions
         worker = threading.Thread(target=self._tx_worker, daemon=True)
@@ -1882,6 +1840,8 @@ class Server:
                                         asset_id = tx_data.get('asset_id')
                                         asset_hash = tx_data.get('asset_hash')
                                         tx_id = tx_data.get('tx_id')
+                                        if tx_id and tx_id in self.confirmed_tx_ids:
+                                            continue
 
                                         if action == 'asset_mint':
                                             owner = tx_data.get('owner') or tx.get('sender')
@@ -1908,24 +1868,14 @@ class Server:
                                             else:
                                                 server_logger.warning("mint: block_confirmation missing asset_hash")
                                             if not mint_ok:
-                                                if tx_id:
-                                                    self._set_tx_status(tx_id, "failed", "Pending asset not found for mint hash")
-                                                continue
-                                            # Deduct minting cost after successful approval
-                                            if owner and cost is not None:
-                                                try:
-                                                    cost_val = float(cost)
-                                                    wallet = self.db.get_wallet(owner)
-                                                    if wallet:
-                                                        balance = float(wallet.get('balance', 0))
-                                                        new_balance = max(0.0, balance - cost_val)
-                                                        self.db.update_balance(owner, new_balance)
-                                                        server_logger.info(
-                                                            "mint: deducted %.2f from %s wallet (%.2f -> %.2f)",
-                                                            cost_val, owner, balance, new_balance,
-                                                        )
-                                                except (ValueError, TypeError) as e:
-                                                    server_logger.warning("mint: invalid cost for wallet update: %s", e)
+                                                existing = self.db.get_item_by_hash(asset_hash) if asset_hash else None
+                                                if existing:
+                                                    mint_ok = True
+                                                    approved_id = existing.get('id')
+                                                else:
+                                                    if tx_id:
+                                                        self._set_tx_status(tx_id, "failed", "Pending asset not found for mint hash")
+                                                    continue
                                             # Store the approved marketplace asset_id in tx_status
                                             if tx_id and approved_id is not None:
                                                 with self.tx_status_lock:
@@ -1934,6 +1884,7 @@ class Server:
                                                         info['asset_id'] = str(approved_id)
                                             if tx_id:
                                                 self._set_tx_status(tx_id, "confirmed", "Mint confirmed")
+                                                self.confirmed_tx_ids.add(tx_id)
                                             continue
 
                                         if action == 'purchase':

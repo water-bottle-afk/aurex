@@ -41,7 +41,6 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
         password_field.disabled = is_busy
         sign_up_button.disabled = is_busy
         back_button.disabled = is_busy
-        google_button.disabled = is_busy
         progress.visible = is_busy
         status_text.visible = bool(message)
         status_text.value = message
@@ -75,18 +74,6 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
                 set_busy(False)
 
         threading.Thread(target=worker, daemon=True).start()
-
-    google_button = ft.OutlinedButton(
-        content=ft.Row(
-            alignment=ft.MainAxisAlignment.CENTER,
-            controls=[
-                ft.Image(src="images/google_logo.png", width=18, height=18),
-                ft.Text("Continue with Google", color=AUREX_TEXT),
-            ],
-        ),
-        width=_CARD_WIDTH,
-        height=46,
-    )
 
     sign_up_button = ft.FilledButton(
         content="Create Account",
@@ -151,15 +138,6 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
                             brand,
                             ft.Text("Create your account", color=AUREX_MUTED),
                             ft.Divider(color=AUREX_SLATE, height=24),
-                            google_button,
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[
-                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                    ft.Text("or", color=AUREX_MUTED, size=12),
-                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                ],
-                            ),
                             username_field,
                             email_field,
                             password_field,

@@ -51,6 +51,8 @@ logger = logging.getLogger('gateway_server')
 SOCKET_TIMEOUT = 3
 SEEN_TX_IDS = {}
 SEEN_TX_LOCK = threading.Lock()
+SEEN_BLOCK_INDEXES = set()
+SEEN_BLOCK_LOCK = threading.Lock()
 
 # (host, port) -> {'node_id': str, 'last_seen': monotonic time}
 NODE_REGISTRY = {}
@@ -440,6 +442,18 @@ def _append_gateway_ledger(block_entry):
         logger.warning("_append_gateway_ledger failed: %s", e)
 
 
+def _block_index_seen(block_index):
+    try:
+        idx = int(block_index)
+    except (TypeError, ValueError):
+        return False
+    with SEEN_BLOCK_LOCK:
+        if idx in SEEN_BLOCK_INDEXES:
+            return True
+        SEEN_BLOCK_INDEXES.add(idx)
+    return False
+
+
 def _ensure_gateway_ledger_dir():
     """Create BLOCKCHAIN_DB/gateway/ and an empty gateway_ledger.json if missing."""
     base = Path(__file__).parent / "BLOCKCHAIN_DB" / "gateway"
@@ -478,6 +492,11 @@ def main():
                 conn.close()
                 return
             if msg.get('type') == 'block_confirmation':
+                block_index = msg.get('block_index')
+                if _block_index_seen(block_index):
+                    _send_json(conn, {'status': 'rejected', 'reason': 'already_confirmed'})
+                    conn.close()
+                    return
                 logger.info(
                     "=== TRANSACTION CONFIRMED (block committed) === block_index=%s block_hash=%s miner_id=%s node_id=%s timestamp=%s",
                     msg.get('block_index'),
@@ -493,6 +512,7 @@ def main():
                     block_index=msg.get('block_index'),
                     block_hash=msg.get('block_hash'),
                 )
+                _send_json(conn, {'status': 'ok'})
                 conn.close()
                 return
             mtype = msg.get('type')

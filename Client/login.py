@@ -44,7 +44,6 @@ def build_login_view(app: "AurexFletApp") -> ft.View:
         login_button.disabled = is_busy
         signup_button.disabled = is_busy
         forgot_button.disabled = is_busy
-        google_button.disabled = is_busy
         progress.visible = is_busy
         status_text.visible = bool(message)
         status_text.value = message
@@ -80,9 +79,6 @@ def build_login_view(app: "AurexFletApp") -> ft.View:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def handle_google(_: ft.ControlEvent) -> None:
-        app.show_message("Google sign-in is not configured yet", error=True)
-
     brand = ft.Column(
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         spacing=6,
@@ -103,25 +99,6 @@ def build_login_view(app: "AurexFletApp") -> ft.View:
                 ),
             ),
         ],
-    )
-
-    google_button = ft.OutlinedButton(
-        on_click=handle_google,
-        disabled=True,
-        tooltip="Google sign-in is not available in this version",
-        content=ft.Row(
-            alignment=ft.MainAxisAlignment.CENTER,
-            controls=[
-                ft.Icon(ft.Icons.G_MOBILEDATA, size=20, color=AUREX_MUTED),
-                ft.Text("Continue with Google", color=AUREX_MUTED),
-            ],
-        ),
-        style=ft.ButtonStyle(
-            side={ft.ControlState.DEFAULT: ft.BorderSide(1, AUREX_SLATE)},
-            shape=ft.RoundedRectangleBorder(radius=14),
-        ),
-        width=_CARD_WIDTH,
-        height=46,
     )
 
     login_button = ft.FilledButton(
@@ -172,15 +149,6 @@ def build_login_view(app: "AurexFletApp") -> ft.View:
                             brand,
                             ft.Text("Welcome back", color=AUREX_MUTED),
                             ft.Divider(color=AUREX_SLATE, height=24),
-                            google_button,
-                            ft.Row(
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                controls=[
-                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                    ft.Text("or", color=AUREX_MUTED, size=12),
-                                    ft.Container(height=1, width=80, bgcolor=AUREX_SLATE),
-                                ],
-                            ),
                             username_field,
                             password_field,
                             ft.Row(
