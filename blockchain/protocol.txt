@@ -62,8 +62,8 @@ Gateway listens on RPC_LISTEN_HOST:RPC_LISTEN_PORT. Wire format: 2-byte big-endi
   Client -> Gateway: length-prefixed JSON, e.g. {"action": "submit_transaction", "body": {"sender": "...", "data": {...}, "signature": "...", "public_key": "..."}}
   Gateway -> Client: {"status": "broadcast", "nodes_reached": 5, "total_nodes": 5, "message": "..."}
 
---- Client request (submit purchase) ---
-  Client -> Gateway: {"action": "submit_purchase", "body": {"tx_id": "...", "buyer": "...", "seller": "...", "asset_id": "...", "asset_name": "...", "asset_hash": "...", "price": 12.34, "timestamp": "ISO8601", "public_key": "...", "signature": "..."}}
+--- Client request (/buy purchase endpoint) ---
+  Client -> Gateway: {"action": "/buy", "body": {"tx_id": "...", "buyer": "...", "seller": "...", "asset_id": "...", "asset_name": "...", "asset_hash": "...", "buyer_pub": "...", "price": 12.34, "timestamp": "ISO8601", "public_key": "...", "signature": "..."}}
   Gateway -> Client: {"status": "submitted", "nodes_reached": 5, "message": "...", "transaction": {...}}
 
   Optional: {"action": "health"}
@@ -105,4 +105,5 @@ Each block stores transactions with sender, data, signature, public_key, timesta
   MINING_STARTED         node -> client     ack tx received
   block_confirmation     node -> RPC        block committed (RPC forwards to server)
   submit_transaction     client -> RPC      action: broadcast tx to all nodes
+  /buy                   client -> RPC      action: submit asset_purchase tx to nodes
   health                 client -> RPC      action: liveness

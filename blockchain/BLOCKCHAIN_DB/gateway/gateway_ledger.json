@@ -98,5 +98,30 @@
         "start_timestamp": "2026-04-11T13:59:43.710303+00:00"
       }
     ]
+  },
+  {
+    "block_index": 1,
+    "block_hash": "09fde02d430d5ac0e839d7f8c4ab1f53cfb2409f86d3d8b88184629e3576a8a3",
+    "miner_id": "node_13246",
+    "timestamp": "2026-04-15T06:56:10.647257+00:00",
+    "transactions": [
+      {
+        "sender": "user",
+        "data": {
+          "action": "asset_mint",
+          "tx_id": "MINT_user_1776236169819_d02ef450",
+          "asset_hash": "5185bfb31b94014097962decb87dbd651f64e4224bdd49ffec0216c805f0ecc7",
+          "asset_name": "try22",
+          "file_name": "sheshbesh_protocol_flow.png",
+          "owner": "user",
+          "owner_pub": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+          "cost": 8.0,
+          "timestamp": "2026-04-15T06:56:09.819684+00:00"
+        },
+        "signature": "EcAqf38peunGb/R17m+NF1uwrlSi6ui2M7p8e/zICPnyXCS6ioLOXtwZGqAx192k/NRH0oceuupelkrtiK8VBA==",
+        "public_key": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+        "start_timestamp": "2026-04-15T06:56:10.276378+00:00"
+      }
+    ]
   }
 ]

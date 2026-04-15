@@ -424,11 +424,12 @@ class AurexProtocolClient:
         timestamp = datetime.now(timezone.utc).isoformat()
         public_key = get_public_key_base64()
         payload = {
-            "action": "purchase",
+            "action": "asset_purchase",
             "tx_id": tx_id,
             "asset_id": asset_id,
             "asset_hash": asset_hash,
             "asset_name": asset_name,
+            "buyer_pub": public_key,
             "price": amount,
             "from": username,
             "to": seller,

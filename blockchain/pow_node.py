@@ -12,6 +12,7 @@ import threading
 import multiprocessing
 import logging
 import struct
+import sqlite3
 from datetime import datetime, timezone
 import sys
 import os
@@ -115,6 +116,7 @@ class PoWNode:
         self.known_nodes = {}
         self.mempool = []
         self.mempool_lock = threading.Lock()
+        self.marketplace_db_path = Path(__file__).parent.parent / "DB" / "marketplace.db"
 
         # Ledger — each node has its own subfolder BLOCKCHAIN_DB/node_{port}/
         ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB" / f"node_{self.port}"
@@ -272,9 +274,87 @@ class PoWNode:
         message_bytes = _canonical_tx_message(sender, data)
         if not _verify_ed25519_signature(public_key_b64, message_bytes, signature):
             return False, "invalid signature"
+        tx_action = (data.get('action') or '') if isinstance(data, dict) else ''
+        if tx_action in ('asset_purchase', 'purchase'):
+            ok, reason = self._validate_asset_purchase_state(sender, data)
+            if not ok:
+                return False, reason
         if tx_id:
             logger.info("tx validate ok tx_id=%s", tx_id)
         return True, "ok"
+
+    def _validate_asset_purchase_state(self, sender, data):
+        """Pre-mining validation for asset purchases against marketplace SQL state."""
+        buyer = data.get('from') or sender
+        seller = data.get('to')
+        asset_id = data.get('asset_id')
+        asset_hash = data.get('asset_hash')
+        amount_raw = data.get('amount') if data.get('amount') is not None else data.get('price')
+
+        if not buyer or not seller:
+            return False, "purchase missing buyer/seller"
+        if buyer == seller:
+            return False, "buyer cannot equal seller"
+        try:
+            amount = float(amount_raw)
+        except (TypeError, ValueError):
+            return False, "purchase invalid amount"
+        if amount <= 0:
+            return False, "purchase amount must be positive"
+
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.marketplace_db_path))
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            item = None
+            if asset_id not in (None, ''):
+                cur.execute(
+                    '''SELECT id, username, cost, is_listed, asset_hash
+                       FROM marketplace_items
+                       WHERE id = ?
+                       LIMIT 1''',
+                    (str(asset_id),),
+                )
+                item = cur.fetchone()
+            if item is None and asset_hash:
+                cur.execute(
+                    '''SELECT id, username, cost, is_listed, asset_hash
+                       FROM marketplace_items
+                       WHERE asset_hash = ?
+                       LIMIT 1''',
+                    (asset_hash,),
+                )
+                item = cur.fetchone()
+            if item is None:
+                return False, "asset not found"
+
+            if item['username'] != seller:
+                return False, "seller does not own asset"
+            if item['is_listed'] is not None and int(item['is_listed']) == 0:
+                return False, "asset not listed"
+
+            listed_price = float(item['cost'] or 0)
+            if abs(listed_price - amount) > 0.01:
+                return False, "price mismatch"
+
+            cur.execute('SELECT wallet_balance FROM users WHERE username = ?', (buyer,))
+            buyer_wallet = cur.fetchone()
+            if buyer_wallet is None:
+                return False, "buyer wallet not found"
+            buyer_balance = float(buyer_wallet['wallet_balance'] or 0)
+            if buyer_balance < amount:
+                return False, "insufficient balance"
+            return True, "ok"
+        except Exception as e:
+            return False, f"purchase DB validation error: {e}"
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def start_listening(self):
         self.is_running = True

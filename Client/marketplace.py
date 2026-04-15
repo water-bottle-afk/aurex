@@ -105,9 +105,12 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
             app.show_message("Please log in to buy", error=True)
             return
         username = app.session.user_data.username if app.session.user_data else ""
+        if username and item.author == username:
+            app.show_message("You cannot buy your own asset.", error=True)
+            return
         def _worker() -> None:
             try:
-                app.client.buy_asset(
+                result = app.client.buy_asset(
                     asset_id=str(item.id),
                     username=username,
                     amount=item.price,
@@ -115,7 +118,10 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
                     seller=item.author,
                     asset_hash=item.asset_hash or "",
                 )
-                app.show_message(f"'{item.title}' purchase initiated!")
+                tx_id = result.get("tx_id") if isinstance(result, dict) else None
+                app.show_message(
+                    f"'{item.title}' purchase initiated{f' (tx {tx_id})' if tx_id else ''}!"
+                )
             except Exception as exc:
                 app.show_message(f"Purchase failed: {exc}", error=True)
         threading.Thread(target=_worker, daemon=True).start()

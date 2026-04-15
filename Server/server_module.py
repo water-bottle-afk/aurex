@@ -1044,11 +1044,12 @@ class ClientSession:
             if not asset_hash:
                 return "ERR02|Asset missing verified hash"
             tx_payload = {
-                'action': 'purchase',
+                'action': 'asset_purchase',
                 'tx_id': tx_id,
                 'asset_id': asset_id,
                 'asset_hash': asset_hash,
                 'asset_name': item.get('asset_name'),
+                'buyer_pub': public_key,
                 'price': price,
                 'from': username,
                 'to': seller,
@@ -1887,7 +1888,7 @@ class Server:
                                                 self.confirmed_tx_ids.add(tx_id)
                                             continue
 
-                                        if action == 'purchase':
+                                        if action in ('asset_purchase', 'purchase'):
                                             buyer = from_user
                                             seller = to_user
                                             try:
@@ -1898,6 +1899,26 @@ class Server:
                                                 if tx_id:
                                                     self._set_tx_status(tx_id, "failed", "Invalid purchase payload")
                                                 continue
+                                            if action == 'asset_purchase':
+                                                # Gateway finalizes SQL updates (wallet transfer + ownership update)
+                                                # on block commit; server only updates tx status + notifications.
+                                                gw_status = str(tx.get('gateway_status', '')).lower() if isinstance(tx, dict) else ''
+                                                gw_message = tx.get('gateway_message') if isinstance(tx, dict) else None
+                                                if gw_status == 'failed':
+                                                    if tx_id:
+                                                        self._set_tx_status(
+                                                            tx_id,
+                                                            "failed",
+                                                            str(gw_message or "Gateway finalization failed"),
+                                                        )
+                                                        self.confirmed_tx_ids.add(tx_id)
+                                                    continue
+                                                if tx_id:
+                                                    self._set_tx_status(tx_id, "confirmed", "Transaction confirmed")
+                                                    self.confirmed_tx_ids.add(tx_id)
+                                                continue
+
+                                            # Legacy fallback: pre-upgrade "purchase" blocks are finalized here.
                                             ok, res = self.db.transfer(buyer, seller, amt)
                                             if ok:
                                                 new_owner = buyer
@@ -1906,24 +1927,23 @@ class Server:
                                                     updated = self.db.update_asset_owner(str(asset_id), new_owner)
                                                 if not updated and asset_hash:
                                                     updated = self.db.update_asset_owner_by_hash(asset_hash, new_owner)
-                                                # Always unlist the asset on successful purchase
                                                 if asset_id:
                                                     self.db.set_item_listed(str(asset_id), False)
                                                     self.broadcast_marketplace_remove(str(asset_id))
                                                 if updated:
                                                     server_logger.info(
-                                                        "purchase: asset_id=%s transferred to buyer=%s", asset_id, new_owner
+                                                        "purchase (legacy): asset_id=%s transferred to buyer=%s", asset_id, new_owner
                                                     )
                                                     if tx_id:
                                                         self._set_tx_status(tx_id, "confirmed", "Transaction confirmed")
                                                 else:
                                                     server_logger.warning(
-                                                        "purchase: ownership update failed asset_id=%s", asset_id
+                                                        "purchase (legacy): ownership update failed asset_id=%s", asset_id
                                                     )
                                                     if tx_id:
                                                         self._set_tx_status(tx_id, "failed", "Asset ownership update failed")
                                             else:
-                                                server_logger.warning("purchase: wallet transfer failed: %s", res)
+                                                server_logger.warning("purchase (legacy): wallet transfer failed: %s", res)
                                                 if tx_id:
                                                     self._set_tx_status(tx_id, "failed", res)
                                             continue
@@ -2095,7 +2115,7 @@ class Server:
 
     def _submit_purchase_to_gateway(self, purchase):
         payload = {
-            'action': 'submit_purchase',
+            'action': '/buy',
             'body': {
                 'tx_id': purchase.get('tx_id'),
                 'buyer': purchase.get('buyer'),
@@ -2103,6 +2123,7 @@ class Server:
                 'asset_id': purchase.get('asset_id'),
                 'asset_hash': purchase.get('asset_hash'),
                 'asset_name': purchase.get('asset_name'),
+                'buyer_pub': purchase.get('public_key'),
                 'price': purchase.get('amount'),
                 'timestamp': purchase.get('timestamp'),
                 'public_key': purchase.get('public_key'),

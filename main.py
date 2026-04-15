@@ -6,6 +6,9 @@ from pathlib import Path
 
 import flet as ft
 
+SERVER_IP = "172.16.250.153"
+SERVER_PORT = 8555
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from Client.app import AurexFletApp
 
@@ -54,8 +57,8 @@ if __name__ == "__main__":
     ft.run(
         main,
         view=ft.AppView.WEB_BROWSER,
-        host=os.getenv("AUREX_FLET_HOST", "10.100.102.58"),
-        port=int(os.getenv("AUREX_FLET_PORT", "8555")),
+        host=os.getenv("AUREX_FLET_HOST", SERVER_IP),
+        port=int(os.getenv("AUREX_FLET_PORT", SERVER_PORT)),
         assets_dir="assets",
         upload_dir=str(_upload_dir),
     )

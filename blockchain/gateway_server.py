@@ -1,6 +1,6 @@
 """
 Gateway Server - Socket-based entry point (no Flask).
-- Listens for submit_transaction and health on RPC_LISTEN_PORT.
+- Listens for submit_transaction, /buy, and health on RPC_LISTEN_PORT.
 - Receives block_confirmation from nodes and forwards to main server.
 """
 
@@ -273,6 +273,84 @@ def notify_server(confirmation):
     except Exception as e:
         logger.warning("notify server failed: %s", e)
 
+
+def _finalize_asset_purchase(cursor, *, buyer, seller, asset_id, asset_hash, amount, timestamp):
+    """Finalize marketplace DB state for a confirmed asset purchase."""
+    if not buyer or not seller:
+        return False, "missing buyer/seller", None, None
+    if buyer == seller:
+        return False, "buyer cannot equal seller", None, None
+    try:
+        amt = float(amount)
+    except (TypeError, ValueError):
+        return False, "invalid amount", None, None
+    if amt <= 0:
+        return False, "amount must be positive", None, None
+
+    item_row = None
+    if asset_id not in (None, ''):
+        cursor.execute(
+            '''SELECT id, username, cost, is_listed, asset_hash
+               FROM marketplace_items
+               WHERE id = ?
+               LIMIT 1''',
+            (str(asset_id),),
+        )
+        item_row = cursor.fetchone()
+    if item_row is None and asset_hash:
+        cursor.execute(
+            '''SELECT id, username, cost, is_listed, asset_hash
+               FROM marketplace_items
+               WHERE asset_hash = ?
+               LIMIT 1''',
+            (asset_hash,),
+        )
+        item_row = cursor.fetchone()
+    if item_row is None:
+        return False, "asset not found", None, None
+
+    resolved_asset_id = str(item_row['id'])
+    resolved_asset_hash = item_row['asset_hash']
+    current_owner = item_row['username']
+    listed = item_row['is_listed']
+    listed_price = float(item_row['cost'] or 0)
+
+    if current_owner != seller:
+        return False, f"seller mismatch (expected owner={current_owner})", resolved_asset_id, resolved_asset_hash
+    if listed is not None and int(listed) == 0:
+        return False, "asset is not listed", resolved_asset_id, resolved_asset_hash
+    if abs(listed_price - amt) > 0.01:
+        return False, "price mismatch", resolved_asset_id, resolved_asset_hash
+
+    cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (buyer,))
+    buyer_row = cursor.fetchone()
+    cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (seller,))
+    seller_row = cursor.fetchone()
+    if buyer_row is None:
+        return False, "buyer wallet not found", resolved_asset_id, resolved_asset_hash
+    if seller_row is None:
+        return False, "seller wallet not found", resolved_asset_id, resolved_asset_hash
+
+    buyer_balance = float(buyer_row['wallet_balance'] or 0)
+    seller_balance = float(seller_row['wallet_balance'] or 0)
+    if buyer_balance < amt:
+        return False, "insufficient balance", resolved_asset_id, resolved_asset_hash
+
+    cursor.execute(
+        'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+        (buyer_balance - amt, timestamp, buyer),
+    )
+    cursor.execute(
+        'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
+        (seller_balance + amt, timestamp, seller),
+    )
+    cursor.execute(
+        'UPDATE marketplace_items SET username = ?, is_listed = 0, timestamp = ? WHERE id = ?',
+        (buyer, timestamp, resolved_asset_id),
+    )
+    return True, "ok", resolved_asset_id, resolved_asset_hash
+
+
 def _record_block_confirmation(confirmation):
     try:
         block_hash = confirmation.get('block_hash') or ''
@@ -337,33 +415,52 @@ def _record_block_confirmation(confirmation):
                 continue
 
             # ── PURCHASE: buyer pays seller, buyer gets asset ownership ────────
-            if action == 'purchase':
+            if action in ('asset_purchase', 'purchase'):
                 buyer = data.get('from') or tx.get('sender', '')  # buyer pays
                 seller = data.get('to') or ''                      # seller receives money
                 amount = float(data.get('amount') or data.get('price') or 0)
                 asset_id = data.get('asset_id', '')
                 asset_hash = data.get('asset_hash', '')
                 asset_name = data.get('asset_name', '')
-                tx_hash_src = f"PURCHASE|{block_hash}|{buyer}|{seller}|{amount}|{tx_id}"
+                ok, finalize_msg, resolved_asset_id, resolved_asset_hash = _finalize_asset_purchase(
+                    cursor,
+                    buyer=buyer,
+                    seller=seller,
+                    asset_id=asset_id,
+                    asset_hash=asset_hash,
+                    amount=amount,
+                    timestamp=timestamp,
+                )
+                if isinstance(tx, dict):
+                    tx['gateway_status'] = 'confirmed' if ok else 'failed'
+                    if not ok:
+                        tx['gateway_message'] = finalize_msg
+                tx_hash_src = f"ASSET_PURCHASE|{block_hash}|{buyer}|{seller}|{amount}|{tx_id}"
                 tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
                 cursor.execute(
                     '''INSERT OR IGNORE INTO transactions
                        (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
                        VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (tx_hash, buyer, seller, amount, timestamp, block_id, 'confirmed'),
+                    (tx_hash, buyer, seller, amount, timestamp, block_id, 'confirmed' if ok else 'failed'),
                 )
-                # buyer becomes the new asset owner
-                if buyer and (asset_id or asset_hash):
-                    ref = asset_hash or asset_id
+                # buyer becomes the new asset owner in blockchain assets index.
+                if ok and buyer and (resolved_asset_hash or asset_hash):
+                    ref = resolved_asset_hash or asset_hash
                     cursor.execute(
                         '''UPDATE assets SET owner = ?, block_hash = ?, timestamp = ?
                            WHERE asset_id = ?''',
                         (buyer, block_hash, timestamp, ref),
                     )
-                logger.info(
-                    "PURCHASE confirmed: buyer=%s seller=%s asset=%s amount=%.2f",
-                    buyer, seller, asset_id or asset_hash, amount,
-                )
+                if ok:
+                    logger.info(
+                        "ASSET_PURCHASE confirmed: buyer=%s seller=%s asset=%s amount=%.2f",
+                        buyer, seller, resolved_asset_id or asset_id or resolved_asset_hash or asset_hash, amount,
+                    )
+                else:
+                    logger.warning(
+                        "ASSET_PURCHASE finalize failed: buyer=%s seller=%s asset=%s reason=%s",
+                        buyer, seller, asset_id or asset_hash, finalize_msg,
+                    )
                 continue
 
             # ── ASSET_TRANSFER: non-monetary ownership transfer ────────────────
@@ -473,13 +570,13 @@ def main():
     )
     threading.Thread(target=_cleanup_seen_tx_ids, daemon=True).start()
     threading.Thread(target=_registry_reaper_loop, daemon=True).start()
-    # Single listener: clients send action=submit_transaction or action=health; nodes send type=block_confirmation
+    # Single listener: clients send action=submit_transaction, /buy, or health; nodes send type=block_confirmation
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((RPC_LISTEN_HOST, RPC_LISTEN_PORT))
     server.listen(5)
     logger.info(
-        "Gateway listening on %s:%s (clients: submit_transaction/health; nodes: block_confirmation)",
+        "Gateway listening on %s:%s (clients: submit_transaction,/buy,health; nodes: block_confirmation)",
         RPC_LISTEN_HOST,
         RPC_LISTEN_PORT,
     )
@@ -548,9 +645,9 @@ def main():
                 })
                 conn.close()
                 return
-            if action == 'submit_purchase':
+            if action in ('/buy', 'buy', 'submit_purchase'):
                 body = msg.get('body') or {}
-                required = ['buyer', 'seller', 'asset_id', 'asset_name', 'price', 'timestamp', 'tx_id', 'public_key', 'signature']
+                required = ['buyer', 'seller', 'asset_id', 'price', 'timestamp', 'tx_id', 'public_key', 'signature']
                 missing = [k for k in required if k not in body or body.get(k) in (None, '')]
                 if missing:
                     _send_json(conn, {'status': 'failed', 'message': f"Missing fields: {', '.join(missing)}"})
@@ -560,7 +657,7 @@ def main():
                 buyer = body.get('buyer')
                 seller = body.get('seller')
                 asset_id = body.get('asset_id')
-                asset_name = body.get('asset_name')
+                asset_name = body.get('asset_name') or ''
                 try:
                     price = float(body.get('price'))
                 except (TypeError, ValueError):
@@ -583,11 +680,12 @@ def main():
                     conn.close()
                     return
                 tx_payload = {
-                    'action': 'purchase',
+                    'action': 'asset_purchase',
                     'tx_id': tx_id,
                     'asset_id': asset_id,
                     'asset_hash': asset_hash,
                     'asset_name': asset_name,
+                    'buyer_pub': body.get('buyer_pub') or public_key,
                     'price': price,
                     'from': buyer,
                     'to': seller,
