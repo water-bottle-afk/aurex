@@ -11,7 +11,13 @@ from typing import Any, Callable, Optional
 
 from .models import ItemOffering, MarketplaceItem, NotificationItem, ServerEvent
 from .session import UserData, UserSession
-from .wallet import canonical_tx_message, generate_tx_id, get_public_key_base64, sign_message
+from .wallet import (
+    activate_wallet_user,
+    canonical_tx_message,
+    generate_tx_id,
+    get_public_key_base64,
+    sign_message,
+)
 
 
 class ProtocolError(RuntimeError):
@@ -108,20 +114,33 @@ class AurexProtocolClient:
         parts = response.split("|")
         if parts[0] == "OK" and len(parts) >= 2:
             returned_username = parts[1]
+            activate_wallet_user(returned_username, password=password, ensure_keys=True)
             self.session.user_data = UserData(username=returned_username)
             return returned_username
         raise ProtocolError(parts[1] if len(parts) > 1 else response)
 
-    def signup(self, username: str, password: str, email: str) -> str:
+    def signup(self, username: str, password: str, email: str, public_key_b64: str | None = None) -> str:
         username = username.strip()
         email = email.strip()
+        print(
+            f"[aurex][client] signup called username={username!r} "
+            f"email={email!r} has_public_key={bool(public_key_b64)}"
+        )
         if not username or "|" in username or username != username.strip():
             raise ProtocolError("Invalid username")
         if len(password) < 6 or "|" in password or password != password.strip():
             raise ProtocolError("Password must be at least 6 characters")
         if not email or "|" in email or "@" not in email or " " in email:
             raise ProtocolError("Invalid email")
-        response = self._request_text(f"SIGNUP|{username}|{password}|{email}")
+        request = f"SIGNUP|{username}|{password}|{email}"
+        if public_key_b64:
+            request = f"{request}|{public_key_b64}"
+        print(
+            f"[aurex][client] sending SIGNUP username={username!r} "
+            f"request_parts={len(request.split('|'))}"
+        )
+        response = self._request_text(request)
+        print(f"[aurex][client] signup response for {username!r}: {response!r}")
         parts = response.split("|")
         if parts[0] == "OK":
             return parts[1] if len(parts) > 1 else username
@@ -422,7 +441,7 @@ class AurexProtocolClient:
             raise ProtocolError("Missing asset hash")
         tx_id = generate_tx_id("TXN", username, asset_id=asset_id)
         timestamp = datetime.now(timezone.utc).isoformat()
-        public_key = get_public_key_base64()
+        public_key = get_public_key_base64(username)
         payload = {
             "action": "asset_purchase",
             "tx_id": tx_id,
@@ -436,7 +455,7 @@ class AurexProtocolClient:
             "amount": amount,
             "timestamp": timestamp,
         }
-        signature = sign_message(canonical_tx_message(username, payload))
+        signature = sign_message(canonical_tx_message(username, payload), username)
         message = (
             f"BUY|{asset_id}|{username}|{amount}|{tx_id}|{timestamp}|{public_key}|{signature}"
         )
@@ -459,7 +478,7 @@ class AurexProtocolClient:
             raise ProtocolError("Missing asset hash")
         tx_id = generate_tx_id("SEND", sender_username, asset_id=asset_id)
         timestamp = datetime.now(timezone.utc).isoformat()
-        public_key = get_public_key_base64()
+        public_key = get_public_key_base64(sender_username)
         payload = {
             "action": "asset_transfer",
             "tx_id": tx_id,
@@ -471,7 +490,7 @@ class AurexProtocolClient:
             "amount": 0,
             "timestamp": timestamp,
         }
-        signature = sign_message(canonical_tx_message(sender_username, payload))
+        signature = sign_message(canonical_tx_message(sender_username, payload), sender_username)
         message = (
             f"SEND|{asset_id}|{sender_username}|{receiver_username}|{tx_id}|{timestamp}|{public_key}|{signature}"
         )

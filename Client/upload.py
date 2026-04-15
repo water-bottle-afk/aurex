@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING, Callable
 
 import flet as ft
 
-from .wallet import canonical_tx_message, generate_tx_id, get_public_key_base64, sign_message
+from .wallet import (
+    canonical_tx_message,
+    generate_tx_id,
+    get_key_file_path,
+    get_public_key_base64,
+    sign_message,
+)
 from .theme import (
     AUREX_BG,
     AUREX_CARD,
@@ -48,7 +54,7 @@ def upload_marketplace_item_from_bytes(
     asset_hash = _sha256_bytes(file_bytes)
     mint_tx_id = generate_tx_id("MINT", username)
     mint_timestamp = datetime.now(timezone.utc).isoformat()
-    public_key = get_public_key_base64()
+    public_key = get_public_key_base64(username)
     mint_payload = {
         "action": "asset_mint",
         "tx_id": mint_tx_id,
@@ -60,7 +66,7 @@ def upload_marketplace_item_from_bytes(
         "cost": cost,
         "timestamp": mint_timestamp,
     }
-    mint_signature = sign_message(canonical_tx_message(username, mint_payload))
+    mint_signature = sign_message(canonical_tx_message(username, mint_payload), username)
     return app.client.upload_marketplace_item_from_bytes(
         file_bytes=file_bytes,
         file_name=file_name,
@@ -82,7 +88,8 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
     page = app.page
 
     from . import wallet as _wallet
-    if not _wallet._KEY_FILE.exists():
+    current_username = app.session.user_data.username if app.session.user_data else None
+    if not get_key_file_path(current_username).exists():
         return ft.View(
             route="/upload",
             bgcolor=AUREX_BG,

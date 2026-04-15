@@ -292,7 +292,7 @@ class MarketplaceDB:
         conn.commit()
         conn.close()
     
-    def add_user(self, username, password, email):
+    def add_user(self, username, password, email, public_key=None):
         """Add new user to database"""
         try:
             user = User(username, password, email)
@@ -310,10 +310,20 @@ class MarketplaceDB:
                 user.created_at,
                 100.0,  # Default starting balance
                 user.created_at,  # Initial wallet update time
-                None,
+                public_key,
             ))
 
-            # Wallet is now part of users table - no separate wallets table
+            if public_key:
+                cursor.execute(
+                    '''
+                    INSERT INTO wallets (username, public_key_hex, key_type, registered_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(username) DO UPDATE SET
+                        public_key_hex = excluded.public_key_hex,
+                        key_type = excluded.key_type
+                    ''',
+                    (username, public_key, "ED25519", user.created_at),
+                )
             
             conn.commit()
             conn.close()
@@ -854,7 +864,7 @@ class MarketplaceDB:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, owner_public_key, timestamp, created_at, is_listed
                 FROM marketplace_items WHERE id = ?
             ''', (item_id,))
             
@@ -871,9 +881,10 @@ class MarketplaceDB:
                     'file_type': result[5],
                     'cost': result[6],
                     'asset_hash': result[7],
-                    'timestamp': result[8],
-                    'created_at': result[9],
-                    'is_listed': result[10],
+                    'owner_public_key': result[8],
+                    'timestamp': result[9],
+                    'created_at': result[10],
+                    'is_listed': result[11],
                 }
             return None
         except Exception as e:
@@ -886,7 +897,7 @@ class MarketplaceDB:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
+                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, owner_public_key, timestamp, created_at, is_listed
                 FROM marketplace_items WHERE asset_hash = ?
             ''', (asset_hash,))
             result = cursor.fetchone()
@@ -901,9 +912,10 @@ class MarketplaceDB:
                     'file_type': result[5],
                     'cost': result[6],
                     'asset_hash': result[7],
-                    'timestamp': result[8],
-                    'created_at': result[9],
-                    'is_listed': result[10],
+                    'owner_public_key': result[8],
+                    'timestamp': result[9],
+                    'created_at': result[10],
+                    'is_listed': result[11],
                 }
             return None
         except Exception as e:
@@ -1094,15 +1106,21 @@ class MarketplaceDB:
             print(f"Error updating item listing: {e}")
             return False
 
-    def update_asset_owner(self, asset_id, new_owner):
+    def update_asset_owner(self, asset_id, new_owner, new_owner_public_key=None):
         """Update marketplace item owner by asset id. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute(
-                'UPDATE marketplace_items SET username = ? WHERE id = ?',
-                (new_owner, asset_id)
-            )
+            if new_owner_public_key is None:
+                cursor.execute(
+                    'UPDATE marketplace_items SET username = ? WHERE id = ?',
+                    (new_owner, asset_id)
+                )
+            else:
+                cursor.execute(
+                    'UPDATE marketplace_items SET username = ?, owner_public_key = ? WHERE id = ?',
+                    (new_owner, new_owner_public_key, asset_id)
+                )
             conn.commit()
             updated = cursor.rowcount > 0
             conn.close()
@@ -1111,15 +1129,21 @@ class MarketplaceDB:
             print(f"Error updating asset owner: {e}")
             return False
 
-    def update_asset_owner_by_hash(self, asset_hash, new_owner):
+    def update_asset_owner_by_hash(self, asset_hash, new_owner, new_owner_public_key=None):
         """Update marketplace item owner by asset hash. Returns True on success."""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute(
-                'UPDATE marketplace_items SET username = ? WHERE asset_hash = ?',
-                (new_owner, asset_hash)
-            )
+            if new_owner_public_key is None:
+                cursor.execute(
+                    'UPDATE marketplace_items SET username = ? WHERE asset_hash = ?',
+                    (new_owner, asset_hash)
+                )
+            else:
+                cursor.execute(
+                    'UPDATE marketplace_items SET username = ?, owner_public_key = ? WHERE asset_hash = ?',
+                    (new_owner, new_owner_public_key, asset_hash)
+                )
             conn.commit()
             updated = cursor.rowcount > 0
             conn.close()

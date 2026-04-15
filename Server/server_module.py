@@ -401,16 +401,21 @@ class ClientSession:
     
     def handle_signup(self, params):
         """Protocol Message: SIGNUP - User registration
-        Format: SIGNUP|username|password
+        Format: SIGNUP|username|password|email
         Returns: OK|username or ERR|error_message
         """
-        if len(params) < 2:
+        self.Print(
+            f" [SIGNUP] handler entered params_count={len(params)} "
+            f"has_public_key={len(params) >= 4}",
+            20,
+        )
+        if len(params) < 3:
             self.Print(" Invalid signup format", 40)
             return "ERR10|Invalid signup format: SIGNUP|username|password|email"
         
         username = params[0].strip()
         password = params[1].strip()
-        email = params[2].strip() if len(params) >= 3 else f"{username}@aurex.local"
+        email = params[2].strip().lower()
         
         # Validate fields - no pipes or spaces
         if '|' in username or '|' in password or '|' in email:
@@ -422,7 +427,7 @@ class ClientSession:
             return "ERR10|Fields cannot have leading/trailing spaces"
         
         # Validate inputs
-        if not username or not password:
+        if not username or not password or not email:
             self.Print(f" Missing required fields for signup", 40)
             return "ERR10|Missing required fields"
         
@@ -437,9 +442,27 @@ class ClientSession:
             self.Print(f" Password too short", 40)
             return "ERR10|Password must be at least 6 characters"
         
-        if not email or ' ' in email or '@' not in email:
+        if ' ' in email or '@' not in email:
             return "ERR10|Invalid email format"
-        success, message = self.db.add_user(username, password, email)
+
+        # Explicit duplicate checks before insertion.
+        if self.db.get_user(username):
+            self.Print(f" Signup blocked: username already exists ({username})", 40)
+            return "ERR10|Username already exists"
+        if self.db.get_user_by_email(email):
+            self.Print(f" Signup blocked: email already exists ({email})", 40)
+            return "ERR10|Email already exists"
+
+        public_key = params[3].strip() if len(params) >= 4 else None
+        if public_key and "|" in public_key:
+            return "ERR10|Invalid public key"
+        self.Print(
+            f" [SIGNUP] username={username} email={email} "
+            f"public_key_len={len(public_key) if public_key else 0}",
+            20,
+        )
+
+        success, message = self.db.add_user(username, password, email, public_key=public_key)
         if success:
             self.Print(f" User {username} signed up", 20)
             return f"OK|{username}"
@@ -1001,23 +1024,29 @@ class ClientSession:
 
         try:
             asset_id = params[0].strip()
-            username = params[1].strip()
+            requested_username = params[1].strip()
+            username = (self.username or "").strip()
             amount = float(params[2].strip())
             tx_id = params[3].strip()
             timestamp = params[4].strip()
             public_key = params[5].strip()
             signature = params[6].strip()
 
-            self.Print(f" Processing purchase: {username} buying asset {asset_id} for {amount}", 20)
+            self.Print(
+                f" Processing purchase: session_user={username} requested_user={requested_username} "
+                f"asset={asset_id} amount={amount}",
+                20,
+            )
 
-            if username != self.username:
+            if requested_username and requested_username != username:
                 return "ERR02|Cannot purchase on behalf of another user"
 
             item = self.db.get_item_by_id(asset_id)
             if not item:
                 return "ERR02|Asset not found"
 
-            seller = item.get('username')
+            seller = (item.get('username') or "").strip()
+            self.Print(f" BUY ownership check: buyer={username} seller={seller} asset={asset_id}", 20)
             if seller == username:
                 return "ERR02|Cannot buy your own asset"
 
@@ -1891,6 +1920,7 @@ class Server:
                                         if action in ('asset_purchase', 'purchase'):
                                             buyer = from_user
                                             seller = to_user
+                                            buyer_public_key = tx.get('public_key', '') if isinstance(tx, dict) else ''
                                             try:
                                                 amt = float(amount) if amount is not None else None
                                             except (ValueError, TypeError):
@@ -1900,8 +1930,6 @@ class Server:
                                                     self._set_tx_status(tx_id, "failed", "Invalid purchase payload")
                                                 continue
                                             if action == 'asset_purchase':
-                                                # Gateway finalizes SQL updates (wallet transfer + ownership update)
-                                                # on block commit; server only updates tx status + notifications.
                                                 gw_status = str(tx.get('gateway_status', '')).lower() if isinstance(tx, dict) else ''
                                                 gw_message = tx.get('gateway_message') if isinstance(tx, dict) else None
                                                 if gw_status == 'failed':
@@ -1913,6 +1941,70 @@ class Server:
                                                         )
                                                         self.confirmed_tx_ids.add(tx_id)
                                                     continue
+
+                                                item = None
+                                                if asset_id:
+                                                    item = self.db.get_item_by_id(str(asset_id))
+                                                if not item and asset_hash:
+                                                    item = self.db.get_item_by_hash(asset_hash)
+
+                                                already_finalized = bool(
+                                                    item
+                                                    and (item.get('username') or '') == buyer
+                                                    and int(item.get('is_listed') or 0) == 0
+                                                )
+
+                                                if already_finalized and buyer_public_key:
+                                                    if asset_id:
+                                                        self.db.update_asset_owner(
+                                                            str(asset_id),
+                                                            buyer,
+                                                            buyer_public_key,
+                                                        )
+                                                    elif asset_hash:
+                                                        self.db.update_asset_owner_by_hash(
+                                                            asset_hash,
+                                                            buyer,
+                                                            buyer_public_key,
+                                                        )
+
+                                                if not already_finalized:
+                                                    ok, res = self.db.transfer(buyer, seller, amt)
+                                                    if not ok:
+                                                        server_logger.warning("purchase finalize transfer failed: %s", res)
+                                                        if tx_id:
+                                                            self._set_tx_status(tx_id, "failed", res)
+                                                            self.confirmed_tx_ids.add(tx_id)
+                                                        continue
+
+                                                    updated = False
+                                                    if asset_id:
+                                                        updated = self.db.update_asset_owner(
+                                                            str(asset_id),
+                                                            buyer,
+                                                            buyer_public_key or None,
+                                                        )
+                                                    if not updated and asset_hash:
+                                                        updated = self.db.update_asset_owner_by_hash(
+                                                            asset_hash,
+                                                            buyer,
+                                                            buyer_public_key or None,
+                                                        )
+                                                    if asset_id:
+                                                        self.db.set_item_listed(str(asset_id), False)
+                                                        self.broadcast_marketplace_remove(str(asset_id))
+                                                    elif asset_hash:
+                                                        self.db.set_item_listed_by_hash(asset_hash, False)
+                                                        resolved = self.db.get_item_by_hash(asset_hash)
+                                                        if resolved and resolved.get('id'):
+                                                            self.broadcast_marketplace_remove(str(resolved['id']))
+
+                                                    if not updated:
+                                                        if tx_id:
+                                                            self._set_tx_status(tx_id, "failed", "Asset ownership update failed")
+                                                            self.confirmed_tx_ids.add(tx_id)
+                                                        continue
+
                                                 if tx_id:
                                                     self._set_tx_status(tx_id, "confirmed", "Transaction confirmed")
                                                     self.confirmed_tx_ids.add(tx_id)
@@ -1924,9 +2016,9 @@ class Server:
                                                 new_owner = buyer
                                                 updated = False
                                                 if asset_id:
-                                                    updated = self.db.update_asset_owner(str(asset_id), new_owner)
+                                                    updated = self.db.update_asset_owner(str(asset_id), new_owner, buyer_public_key or None)
                                                 if not updated and asset_hash:
-                                                    updated = self.db.update_asset_owner_by_hash(asset_hash, new_owner)
+                                                    updated = self.db.update_asset_owner_by_hash(asset_hash, new_owner, buyer_public_key or None)
                                                 if asset_id:
                                                     self.db.set_item_listed(str(asset_id), False)
                                                     self.broadcast_marketplace_remove(str(asset_id))

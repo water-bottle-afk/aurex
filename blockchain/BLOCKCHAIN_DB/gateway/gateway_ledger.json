@@ -123,5 +123,89 @@
         "start_timestamp": "2026-04-15T06:56:10.276378+00:00"
       }
     ]
+  },
+  {
+    "block_index": 2,
+    "block_hash": "0c52cb536bdf1c0db9eab62b681d29f071d87a3d52d78237831f33e17a71ece2",
+    "miner_id": "node_13246",
+    "timestamp": "2026-04-15T08:05:09.424645+00:00",
+    "transactions": [
+      {
+        "sender": "bob",
+        "data": {
+          "action": "asset_purchase",
+          "tx_id": "TXN_bob_13_1776240308866_c2b52cde",
+          "asset_id": "13",
+          "asset_hash": "5157e6c23f53929b77ff91e4c956b762b9820f4577efad8cb6f45e0b9953f81b",
+          "asset_name": "icon",
+          "buyer_pub": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+          "price": 3.0,
+          "from": "bob",
+          "to": "user",
+          "amount": 3.0,
+          "timestamp": "2026-04-15T08:05:08.866470+00:00"
+        },
+        "signature": "p28noqmM2LOo0f/LOUXoGnaVhP6jV8kUH3h6OeE1wYwlPvA15O1uZF4gD22HNJiTkAn/9740By8C0CwwYeE4CQ==",
+        "public_key": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+        "start_timestamp": "2026-04-15T08:05:09.112439+00:00",
+        "gateway_status": "confirmed"
+      }
+    ]
+  },
+  {
+    "block_index": 3,
+    "block_hash": "0be5dd8646d21c53fa0b7a7793875e31c83c641f7107b3e068471d64463e6d0a",
+    "miner_id": "node_13246",
+    "timestamp": "2026-04-15T08:33:55.848690+00:00",
+    "transactions": [
+      {
+        "sender": "bob",
+        "data": {
+          "action": "asset_purchase",
+          "tx_id": "TXN_bob_11_1776242035172_17f2987f",
+          "asset_id": "11",
+          "asset_hash": "de987ea86ed2333ac689bdce1151a4ce6c7feca297dcb094dc47a7b3bec1ceac",
+          "asset_name": "Bengal Tiger",
+          "buyer_pub": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+          "price": 69.99,
+          "from": "bob",
+          "to": "user",
+          "amount": 69.99,
+          "timestamp": "2026-04-15T08:33:55.172387+00:00"
+        },
+        "signature": "pjLcS2SRb/nUlli79loEUipbEKe8AZY1BT0kRfLOz3DA79/BbQo8VvJE31JoRTrTaxqQZ73p8uK7iqMeKkD0Cw==",
+        "public_key": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+        "start_timestamp": "2026-04-15T08:33:55.429305+00:00",
+        "gateway_status": "confirmed"
+      }
+    ]
+  },
+  {
+    "block_index": 4,
+    "block_hash": "0d3f882b6b915b0b30a0767298eefd56b1ad23bf254d759440583646bfd609a8",
+    "miner_id": "node_13246",
+    "timestamp": "2026-04-15T08:48:23.755478+00:00",
+    "transactions": [
+      {
+        "sender": "bob",
+        "data": {
+          "action": "asset_purchase",
+          "tx_id": "TXN_bob_20_1776242903259_5e9aa527",
+          "asset_id": "20",
+          "asset_hash": "5185bfb31b94014097962decb87dbd651f64e4224bdd49ffec0216c805f0ecc7",
+          "asset_name": "try22",
+          "buyer_pub": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+          "price": 8.0,
+          "from": "bob",
+          "to": "user",
+          "amount": 8.0,
+          "timestamp": "2026-04-15T08:48:23.259320+00:00"
+        },
+        "signature": "jBSfu4IzSGsyejUg5qM2vemg+LIgg0bajhYyacrFp+Vzowf1subGqIiEi/7yqfbIq94AbzpvbHYlyodKUsP+Aw==",
+        "public_key": "9n3HwzTJOCRkaqosbJnPyenAoGRBuda/uHEj15rpNf8=",
+        "start_timestamp": "2026-04-15T08:48:23.309984+00:00",
+        "gateway_status": "confirmed"
+      }
+    ]
   }
 ]

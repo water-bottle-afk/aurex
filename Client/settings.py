@@ -13,12 +13,11 @@ from . import wallet as _wallet
 if TYPE_CHECKING:
     from .app import AurexFletApp
 
-_KEY_FILE = _wallet._KEY_FILE
-
-
 def build_settings_view(app: "AurexFletApp") -> ft.View:
     page = app.page
     user = app.session.user_data
+    current_username = user.username if user else None
+    key_file = _wallet.get_key_file_path(current_username)
 
     # ── server connection ────────────────────────────────────────────────────
     host_field = ft.TextField(
@@ -46,7 +45,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
         app.show_message("Server settings updated")
 
     # ── wallet section state ─────────────────────────────────────────────────
-    has_key = _KEY_FILE.exists()
+    has_key = key_file.exists()
 
     pubkey_display = ft.TextField(
         label="Your Public Key",
@@ -56,7 +55,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
         min_lines=2,
         max_lines=3,
         text_size=11,
-        value=(_wallet.get_public_key_base64() if has_key else ""),
+        value=(_wallet.get_public_key_base64(current_username) if has_key else ""),
         color=AUREX_GOLD_SOFT,
     )
 
@@ -280,8 +279,8 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
     def _write_key_backup() -> None:
         """Write aurex_keys_backup.json directly to ~/Downloads."""
         try:
-            pub_b64 = _wallet.get_public_key_base64()
-            priv_pem = _wallet._KEY_FILE.read_text(encoding="utf-8") if _wallet._KEY_FILE.exists() else ""
+            pub_b64 = _wallet.get_public_key_base64(current_username)
+            priv_pem = key_file.read_text(encoding="utf-8") if key_file.exists() else ""
             payload = json.dumps({"public_key": pub_b64, "private_key_pem": priv_pem}, indent=2)
             dest = Path.home() / "Downloads" / "aurex_keys_backup.json"
             dest.write_text(payload, encoding="utf-8")
@@ -295,8 +294,9 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
     def _do_generate(force: bool) -> None:
         try:
             _set_wallet_status("Generating keys…")
-            pub_b64, key_path = _wallet.generate_user_keys(force=force)
-            priv_pem = _wallet._KEY_FILE.read_text(encoding="utf-8") if _wallet._KEY_FILE.exists() else ""
+            pub_b64, key_path = _wallet.generate_user_keys(username=current_username, force=force)
+            resolved_key_file = _wallet.get_key_file_path(current_username)
+            priv_pem = resolved_key_file.read_text(encoding="utf-8") if resolved_key_file.exists() else ""
 
             # push new public key to server so signatures keep working
             server_sync_msg = ""

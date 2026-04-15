@@ -244,4 +244,10 @@ class AurexFletApp:
         self.page.run_task(self._noop_update_async)
 
     def _on_server_event(self, event) -> None:
-        pass  # pubsub not used in Flet 0.83
+        if event.event == "marketplace_remove":
+            asset_id = str((event.payload or {}).get("asset_id") or "")
+            if asset_id:
+                self.session.market_items = [
+                    item for item in self.session.market_items if str(item.id) != asset_id
+                ]
+                self.refresh_marketplace_view()

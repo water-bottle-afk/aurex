@@ -1,5 +1,5 @@
 """
-Aurex Wallet — Ed25519 key management, local encrypted storage, and signing.
+Aurex Wallet - Ed25519 key management, local encrypted storage, and signing.
 
 Security model:
   - Private key NEVER leaves this file or the local PEM on disk.
@@ -10,6 +10,7 @@ Security model:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -18,8 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.serialization import (
     BestAvailableEncryption,
     Encoding,
@@ -30,7 +31,7 @@ from cryptography.hazmat.primitives.serialization import (
 
 
 def _default_wallet_dir() -> Path:
-    """Resolve wallet dir: env override → ~/Downloads/aurex_wallet → ~/.aurex_wallet fallback."""
+    """Resolve wallet dir: env override -> ~/Downloads/aurex_wallet -> ~/.aurex_wallet."""
     env = os.getenv("AUREX_WALLET_DIR")
     if env:
         return Path(env)
@@ -47,11 +48,8 @@ _KEY_FILE = _WALLET_DIR / "aurex_private_key.pem"
 _PUB_FILE = _WALLET_DIR / "aurex_public_key.txt"
 
 _KEY_ENV = "AUREX_WALLET_PASSWORD"
+_ACTIVE_USER: str | None = None
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _wallet_password() -> bytes | None:
     """Return wallet encryption password from env, or None for no encryption."""
@@ -70,31 +68,68 @@ def _set_private_permissions(path: Path) -> None:
     try:
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except NotImplementedError:
-        pass  # Windows — best-effort
+        pass
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+def _safe_user_fragment(username: str | None) -> str | None:
+    if not username:
+        return None
+    cleaned = "".join(ch for ch in username.strip() if ch.isalnum() or ch in ("_", "-"))
+    return cleaned or None
 
-def generate_user_keys(*, force: bool = False) -> tuple[str, str]:
+
+def get_key_file_path(username: str | None = None) -> Path:
+    user_fragment = _safe_user_fragment(username or _ACTIVE_USER)
+    if not user_fragment:
+        return _KEY_FILE
+    return _WALLET_DIR / user_fragment / "aurex_private_key.pem"
+
+
+def get_public_key_file_path(username: str | None = None) -> Path:
+    user_fragment = _safe_user_fragment(username or _ACTIVE_USER)
+    if not user_fragment:
+        return _PUB_FILE
+    return _WALLET_DIR / user_fragment / "aurex_public_key.txt"
+
+
+def activate_wallet_user(username: str, *, password: str | None = None, ensure_keys: bool = False) -> None:
+    global _ACTIVE_USER
+    _ACTIVE_USER = _safe_user_fragment(username)
+    if ensure_keys and _ACTIVE_USER and not get_key_file_path().exists():
+        generate_user_keys(username=username, password_material=password, force=True)
+
+
+def _derive_private_key(username: str, password_material: str) -> ed25519.Ed25519PrivateKey:
+    password_hash = hashlib.sha256(password_material.encode("utf-8")).hexdigest()
+    seed = hashlib.sha256(f"{username}|{password_hash}".encode("utf-8")).digest()
+    return ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def generate_user_keys(
+    *,
+    username: str | None = None,
+    password_material: str | None = None,
+    force: bool = False,
+) -> tuple[str, str]:
     """
-    Generate a new Ed25519 key pair and save locally.
+    Generate a user key pair and save locally.
 
-    Returns:
-        (public_key_base64, key_file_path)  — the private key path for user info.
-
-    The private key is saved as an encrypted PEM file (password from
-    AUREX_WALLET_PASSWORD env var, or unencrypted if env var not set).
-
-    Prints a prominent warning reminding the user to back up the key file.
+    When username and password are provided, the Ed25519 private key is derived
+    deterministically from username + hashed password so different users do not
+    share a wallet even if they reuse the same plaintext password.
     """
-    _WALLET_DIR.mkdir(parents=True, exist_ok=True)
+    key_file = get_key_file_path(username)
+    pub_file = get_public_key_file_path(username)
+    key_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if _KEY_FILE.exists() and not force:
-        return get_public_key_base64(), str(_KEY_FILE)
+    if key_file.exists() and not force:
+        return get_public_key_base64(username=username), str(key_file)
 
-    private_key = ed25519.Ed25519PrivateKey.generate()
+    resolved_username = username or _ACTIVE_USER
+    if resolved_username and password_material:
+        private_key = _derive_private_key(resolved_username, password_material)
+    else:
+        private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
 
     password = _wallet_password()
@@ -103,65 +138,58 @@ def generate_user_keys(*, force: bool = False) -> tuple[str, str]:
         format=PrivateFormat.PKCS8,
         encryption_algorithm=_encryption_algorithm(password),
     )
-    _KEY_FILE.write_bytes(pem_bytes)
-    _set_private_permissions(_KEY_FILE)
+    key_file.write_bytes(pem_bytes)
+    _set_private_permissions(key_file)
 
     pub_raw = public_key.public_bytes(encoding=Encoding.Raw, format=PublicFormat.Raw)
     pub_b64 = base64.b64encode(pub_raw).decode("ascii")
-    _PUB_FILE.write_text(pub_b64 + "\n", encoding="utf-8")
+    pub_file.write_text(pub_b64 + "\n", encoding="utf-8")
 
     print(
         "\n"
-        "╔══════════════════════════════════════════════════════════╗\n"
-        "║  KEY GENERATED — CRITICAL SECURITY NOTICE               ║\n"
-        "║                                                          ║\n"
-        f"║  Private key saved to: {str(_KEY_FILE)[:34]:<34} ║\n"
-        "║                                                          ║\n"
-        "║  ⚠  BACK UP THIS FILE NOW.                              ║\n"
-        "║  If lost, your Aurex assets are UNRECOVERABLE.          ║\n"
-        "╚══════════════════════════════════════════════════════════╝\n"
+        "============================================================\n"
+        "  KEY GENERATED - CRITICAL SECURITY NOTICE\n"
+        f"  Private key saved to: {str(key_file)}\n"
+        "  Back up this file now.\n"
+        "============================================================\n"
     )
-    return pub_b64, str(_KEY_FILE)
+    return pub_b64, str(key_file)
 
 
-def _load_private_key() -> ed25519.Ed25519PrivateKey:
+def _load_private_key(username: str | None = None) -> ed25519.Ed25519PrivateKey:
     """Load private key from PEM file, decrypting with env password if needed."""
-    if not _KEY_FILE.exists():
-        generate_user_keys()
-    pem_bytes = _KEY_FILE.read_bytes()
+    key_file = get_key_file_path(username)
+    if not key_file.exists():
+        generate_user_keys(username=username)
+    pem_bytes = key_file.read_bytes()
     password = _wallet_password()
     return serialization.load_pem_private_key(pem_bytes, password=password)
 
 
-def get_public_key_base64() -> str:
+def get_public_key_base64(username: str | None = None) -> str:
     """Return the base64-encoded raw public key bytes (32 bytes for Ed25519)."""
-    if _PUB_FILE.exists():
-        return _PUB_FILE.read_text(encoding="utf-8").strip()
-    private_key = _load_private_key()
+    pub_file = get_public_key_file_path(username)
+    if pub_file.exists():
+        return pub_file.read_text(encoding="utf-8").strip()
+    private_key = _load_private_key(username)
     pub_raw = private_key.public_key().public_bytes(
         encoding=Encoding.Raw, format=PublicFormat.Raw
     )
     pub_b64 = base64.b64encode(pub_raw).decode("ascii")
-    _WALLET_DIR.mkdir(parents=True, exist_ok=True)
-    _PUB_FILE.write_text(pub_b64 + "\n", encoding="utf-8")
+    pub_file.parent.mkdir(parents=True, exist_ok=True)
+    pub_file.write_text(pub_b64 + "\n", encoding="utf-8")
     return pub_b64
 
 
-def sign_message(message_bytes: bytes) -> str:
-    """Sign arbitrary bytes with the local Ed25519 private key.
-
-    Returns base64-encoded signature string.
-    """
-    private_key = _load_private_key()
+def sign_message(message_bytes: bytes, username: str | None = None) -> str:
+    """Sign arbitrary bytes with the local Ed25519 private key."""
+    private_key = _load_private_key(username)
     signature = private_key.sign(message_bytes)
     return base64.b64encode(signature).decode("ascii")
 
 
 def verify_message(public_key_b64: str, message_bytes: bytes, signature_b64: str) -> bool:
-    """Verify a signature using a raw-bytes base64 public key.
-
-    Returns True if valid, False otherwise.
-    """
+    """Verify a signature using a raw-bytes base64 public key."""
     try:
         pub_raw = base64.b64decode(public_key_b64.encode("ascii"))
         sig_raw = base64.b64decode(signature_b64.encode("ascii"))

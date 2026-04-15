@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import flet as ft
@@ -122,6 +123,25 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
                 app.show_message(
                     f"'{item.title}' purchase initiated{f' (tx {tx_id})' if tx_id else ''}!"
                 )
+                if tx_id:
+                    for _ in range(30):
+                        time.sleep(1)
+                        status = app.client.get_transaction_status(tx_id)
+                        state = (status.get("status") or "").upper()
+                        if state == "CONFIRMED":
+                            if app.session.user_data:
+                                balance = app.client.get_wallet(app.session.user_data.username)
+                                if balance is not None:
+                                    app.session.wallet_balance = balance
+                            app.load_marketplace_async(reset=True)
+                            app.show_message(f"Purchase confirmed: '{item.title}'")
+                            return
+                        if state in {"FAILED", "TIMEOUT"}:
+                            app.show_message(
+                                f"Purchase failed: {status.get('message') or 'Transaction failed'}",
+                                error=True,
+                            )
+                            return
             except Exception as exc:
                 app.show_message(f"Purchase failed: {exc}", error=True)
         threading.Thread(target=_worker, daemon=True).start()
