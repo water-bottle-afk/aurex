@@ -4,6 +4,8 @@ import base64
 import threading
 import time
 import flet as ft
+
+from aurex_logging import AurexLogger
 from .protocol_client import AurexProtocolClient
 from .session import UserSession
 from .theme import AUREX_BG, AUREX_ERROR, AUREX_SUCCESS, build_aurex_theme
@@ -17,15 +19,17 @@ from .notifications import build_notifications_view
 from .my_assets import build_my_assets_view
 import Client.notifications as _notif_store
 
+logger = AurexLogger.get_logger(__name__)
+
 
 class AurexFletApp:
     def __init__(self, page: ft.Page) -> None:
-        print("[aurex] AurexFletApp.__init__ start")
+        logger.info("[aurex] AurexFletApp.__init__ start")
         self.page = page
         self.session = UserSession()
-        print("[aurex] UserSession created")
+        logger.info("[aurex] UserSession created")
         self.client = AurexProtocolClient(self.session)
-        print("[aurex] AurexProtocolClient created")
+        logger.info("[aurex] AurexProtocolClient created")
         self.client.on_server_event = self._on_server_event
 
         self.market_loading = False
@@ -45,13 +49,13 @@ class AurexFletApp:
         self.page.on_route_change = self._on_route_change
         self.page.on_view_pop = self._on_view_pop
 
-        print("[aurex] AurexFletApp.__init__ done")
+        logger.info("[aurex] AurexFletApp.__init__ done")
 
     def start(self) -> None:
         route = self.page.route or "/login"
-        print(f"[aurex] start() -> going to {route!r}")
+        logger.info("[aurex] start() -> going to %r", route)
         self._render_current_route()
-        print(f"[aurex] start() -> initial render done")
+        logger.info("[aurex] start() -> initial render done")
 
     def show_message(self, message: str, *, error: bool = False) -> None:
         """Show a snackbar message from any thread (UI or background worker).
@@ -122,11 +126,11 @@ class AurexFletApp:
         if self.session.user_data:
             try:
                 balance = self.client.get_wallet(self.session.user_data.username)
-                print(f"[aurex] wallet fetch -> {balance!r}")
+                logger.debug("[aurex] wallet fetch -> %r", balance)
                 if balance is not None:
                     self.session.wallet_balance = balance
             except Exception as exc:
-                print(f"[aurex] wallet fetch failed: {exc}")
+                logger.warning("[aurex] wallet fetch failed: %s", exc)
 
         self.refresh_marketplace_view()
 
@@ -206,7 +210,7 @@ class AurexFletApp:
 
     def _render_current_route(self) -> None:
         route = self.page.route or "/login"
-        print(f"[aurex] _render_current_route: {route!r}")
+        logger.debug("[aurex] _render_current_route: %r", route)
         protected = {"/marketplace", "/settings", "/upload", "/my_assets"}
         if route in protected and not self.session.is_authenticated:
             route = "/login"
@@ -226,8 +230,7 @@ class AurexFletApp:
         try:
             view = builder(self)
         except Exception as exc:
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error while building route view")
             view = ft.View(
                 route=route,
                 bgcolor="#1A1A1B",
@@ -251,3 +254,4 @@ class AurexFletApp:
                     item for item in self.session.market_items if str(item.id) != asset_id
                 ]
                 self.refresh_marketplace_view()
+

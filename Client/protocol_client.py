@@ -1,14 +1,36 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
+import queue
 import socket
 import ssl
 import struct
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
+import websockets
+from websockets.exceptions import ConnectionClosed
+
+from aurex_logging import AurexLogger
+from protocol_definitions import (
+    CLIENT_IDENTITY,
+    EVENT_PREFIX,
+    UPLOAD_CHUNK_PREFIX,
+    DiscoveryRequest,
+    DiscoveryResponse,
+    ProtocolCommand,
+    ProtocolPrefix,
+    is_error_response,
+    join_wire_fields,
+    parse_wire_message,
+    serialize_command,
+    serialize_response,
+)
 from .models import ItemOffering, MarketplaceItem, NotificationItem, ServerEvent
 from .session import UserData, UserSession
 from .wallet import (
@@ -24,9 +46,11 @@ class ProtocolError(RuntimeError):
     pass
 
 
+logger = AurexLogger.get_logger(__name__)
+
+
 class AurexProtocolClient:
-    START_MESSAGE = "START|Client_Flet_App"
-    GOT_PART_ACK = b"GOTPRT|Got the part"
+    START_MESSAGE = serialize_command(ProtocolCommand.START, CLIENT_IDENTITY)
 
     def __init__(
         self,
@@ -36,25 +60,31 @@ class AurexProtocolClient:
         discovery_port: int = 12345,
     ) -> None:
         self.session = session
-        self.host = host or os.getenv("AUREX_SERVER_HOST", "127.0.0.1")
+        self.host = host or os.getenv("AUREX_SERVER_HOST", "10.100.102.58")
         self.port = port or int(os.getenv("AUREX_SERVER_PORT", "23456"))
         self.discovery_port = discovery_port
+        self.enable_udp_discovery = os.getenv("AUREX_ENABLE_UDP_DISCOVERY", "0") == "1"
         self.on_server_event: Callable[[ServerEvent], None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+        self._loop_ready = threading.Event()
+        self._incoming_frames: queue.Queue[Any] = queue.Queue()
+        self._receiver_closed = object()
+        self._receive_timeout = 20.0
+        self._receiver_task = None
 
     def discover_server(self, timeout: float = 5.0) -> tuple[str, int] | None:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             probe.settimeout(timeout)
-            probe.sendto(b"WHRSRV", ("255.255.255.255", self.discovery_port))
+            probe.sendto(DiscoveryRequest().to_bytes(), ("255.255.255.255", self.discovery_port))
             payload, _ = probe.recvfrom(1024)
             message = payload.decode("utf-8", errors="ignore")
-            if not message.startswith("SRVRSP|"):
+            parsed = DiscoveryResponse.from_text(message)
+            if parsed is None:
                 return None
-            parts = message.split("|")
-            if len(parts) < 3:
-                return None
-            return parts[1], int(parts[2])
+            return parsed.host, parsed.port
         except OSError:
             return None
         finally:
@@ -67,26 +97,24 @@ class AurexProtocolClient:
 
             host = self.session.host or self.host
             port = self.session.port or self.port
-            if discover_first:
+            if discover_first and self.enable_udp_discovery:
                 discovered = self.discover_server()
                 if discovered is not None:
                     host, port = discovered
 
-            raw_socket = socket.create_connection((host, port), timeout=10)
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            tls_socket = context.wrap_socket(raw_socket, server_hostname=host)
-            tls_socket.settimeout(20)
+            self._ensure_loop_thread()
+            self._incoming_frames = queue.Queue()
+            websocket = self._run_coro_sync(self._connect_async(host, port), timeout=20)
 
-            self.session.socket = tls_socket
+            self.session.socket = websocket
             self.session.host = host
             self.session.port = port
 
             try:
                 self._send_frame_unlocked(self.START_MESSAGE.encode("utf-8"))
                 response = self._recv_text_frame_unlocked()
-                if not response.startswith("ACCPT"):
+                head, _ = self._split_response(response)
+                if head != ProtocolPrefix.ACCEPT.value:
                     raise ProtocolError(f"Unexpected START response: {response}")
                 self.session.remember(f"Connected to {host}:{port}")
             except Exception:
@@ -104,25 +132,38 @@ class AurexProtocolClient:
             self.host = host
             self.port = port
 
+    def _build_server_uri(self, host: str, port: int) -> str:
+        return f"wss://{host}:{port}"
+
+    def _resolve_ca_cert_path(self) -> Path:
+        configured = os.getenv("AUREX_CA_CERT_FILE", "").strip()
+        if configured:
+            cert_path = Path(configured).expanduser()
+            if not cert_path.is_absolute():
+                cert_path = (Path(__file__).resolve().parent.parent / cert_path).resolve()
+        else:
+            cert_path = (Path(__file__).resolve().parent.parent / "HTTPS" / "rootCA.crt").resolve()
+        return cert_path
+
     def login(self, username: str, password: str) -> str:
         username = username.strip()
         if not username or "|" in username or " " in username:
             raise ProtocolError("Invalid username format")
         if not password or "|" in password:
             raise ProtocolError("Invalid password format")
-        response = self._request_text(f"LOGIN|{username}|{password}")
-        parts = response.split("|")
-        if parts[0] == "OK" and len(parts) >= 2:
-            returned_username = parts[1]
+        response = self._request_command(ProtocolCommand.LOGIN, username, password)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value and parts:
+            returned_username = parts[0]
             activate_wallet_user(returned_username, password=password, ensure_keys=True)
             self.session.user_data = UserData(username=returned_username)
             return returned_username
-        raise ProtocolError(parts[1] if len(parts) > 1 else response)
+        raise ProtocolError(parts[0] if parts else response)
 
     def signup(self, username: str, password: str, email: str, public_key_b64: str | None = None) -> str:
         username = username.strip()
         email = email.strip()
-        print(
+        logger.debug(
             f"[aurex][client] signup called username={username!r} "
             f"email={email!r} has_public_key={bool(public_key_b64)}"
         )
@@ -132,52 +173,53 @@ class AurexProtocolClient:
             raise ProtocolError("Password must be at least 6 characters")
         if not email or "|" in email or "@" not in email or " " in email:
             raise ProtocolError("Invalid email")
-        request = f"SIGNUP|{username}|{password}|{email}"
+        request_parts: list[str] = [username, password, email]
         if public_key_b64:
-            request = f"{request}|{public_key_b64}"
-        print(
+            request_parts.append(public_key_b64)
+        request = serialize_command(ProtocolCommand.SIGNUP, *request_parts)
+        logger.debug(
             f"[aurex][client] sending SIGNUP username={username!r} "
             f"request_parts={len(request.split('|'))}"
         )
         response = self._request_text(request)
-        print(f"[aurex][client] signup response for {username!r}: {response!r}")
-        parts = response.split("|")
-        if parts[0] == "OK":
-            return parts[1] if len(parts) > 1 else username
-        raise ProtocolError(parts[1] if len(parts) > 1 else response)
+        logger.debug("[aurex][client] signup response for %r: %r", username, response)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value:
+            return parts[0] if parts else username
+        raise ProtocolError(parts[0] if parts else response)
 
     def request_password_reset(self, email: str) -> str | None:
         email = email.strip()
         if not email or "|" in email or " " in email:
             raise ProtocolError("Invalid email")
-        response = self._request_text(f"SEND_CODE|{email}")
-        parts = response.split("|")
-        if parts[0] == "OK":
-            return parts[2] if len(parts) > 2 else None
-        raise ProtocolError(parts[1] if len(parts) > 1 else response)
+        response = self._request_command(ProtocolCommand.SEND_CODE, email)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value:
+            return parts[1] if len(parts) > 1 else None
+        raise ProtocolError(parts[0] if parts else response)
 
     def verify_password_reset_code(self, email: str, code: str) -> str:
         email = email.strip()
         code = code.strip()
         if not email or not code:
             raise ProtocolError("Email and code are required")
-        response = self._request_text(f"VERIFY_CODE|{email}|{code}")
-        parts = response.split("|")
-        if parts[0] == "OK" and len(parts) > 1:
-            self.session.reset_token = parts[1]
-            return parts[1]
-        raise ProtocolError(parts[1] if len(parts) > 1 else response)
+        response = self._request_command(ProtocolCommand.VERIFY_CODE, email, code)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value and parts:
+            self.session.reset_token = parts[0]
+            return parts[0]
+        raise ProtocolError(parts[0] if parts else response)
 
     def update_password(self, email: str, new_password: str) -> str:
         email = email.strip()
         if not email or len(new_password) < 6:
             raise ProtocolError("Password must be at least 6 characters")
-        response = self._request_text(f"UPDATE_PASSWORD|{email}|{new_password}")
-        parts = response.split("|")
-        if parts[0] == "OK":
+        response = self._request_command(ProtocolCommand.UPDATE_PASSWORD, email, new_password)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value:
             self.session.reset_token = None
-            return parts[1] if len(parts) > 1 else "Password updated successfully"
-        raise ProtocolError(parts[1] if len(parts) > 1 else response)
+            return parts[0] if parts else "Password updated successfully"
+        raise ProtocolError(parts[0] if parts else response)
 
     def logout(self) -> None:
         username = self.session.user_data.username if self.session.user_data else ""
@@ -185,7 +227,7 @@ class AurexProtocolClient:
             self.session.clear_user_state()
             return
         try:
-            self._request_text(f"LOGOUT|{username}")
+            self._request_command(ProtocolCommand.LOGOUT, username)
         except Exception:
             pass
         finally:
@@ -193,11 +235,11 @@ class AurexProtocolClient:
 
     def get_wallet(self, username: str) -> float | None:
         """Send GET_WALLET|username, return balance as float or None on error."""
-        response = self._request_text(f"GET_WALLET|{username}")
-        parts = response.split("|")
-        if parts[0] == "OK" and len(parts) >= 2:
+        response = self._request_command(ProtocolCommand.GET_WALLET, username)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value and parts:
             try:
-                return float(parts[1])
+                return float(parts[0])
             except ValueError:
                 return None
         return None
@@ -207,10 +249,10 @@ class AurexProtocolClient:
         limit: int = 10,
         last_timestamp: str | None = None,
     ) -> list[MarketplaceItem]:
-        message = f"GET_ITEMS_PAGINATED|{limit}"
         if last_timestamp:
-            message = f"{message}|{last_timestamp}"
-        response = self._request_text(message)
+            response = self._request_command(ProtocolCommand.GET_ITEMS_PAGINATED, limit, last_timestamp)
+        else:
+            response = self._request_command(ProtocolCommand.GET_ITEMS_PAGINATED, limit)
         payload = self._extract_ok_payload(response)
         items_json = json.loads(payload)
         items = [MarketplaceItem.from_json(item) for item in items_json if isinstance(item, dict)]
@@ -222,7 +264,7 @@ class AurexProtocolClient:
         return items
 
     def get_items(self) -> list[MarketplaceItem]:
-        response = self._request_text("GET_ITEMS")
+        response = self._request_command(ProtocolCommand.GET_ITEMS)
         payload = self._extract_ok_payload(response)
         items_json = json.loads(payload)
         return [MarketplaceItem.from_json(item) for item in items_json if isinstance(item, dict)]
@@ -238,21 +280,20 @@ class AurexProtocolClient:
             return None
         with self.session.socket_lock:
             self._ensure_connected_unlocked()
-            self._send_frame_unlocked(f"GET_ASSET_BINARY|{rel_path}".encode("utf-8"))
+            self._send_frame_unlocked(
+                serialize_command(ProtocolCommand.GET_ASSET_BINARY, rel_path).encode("utf-8")
+            )
             first_frame = self._recv_frame_unlocked()
             text_header = self._try_decode_text(first_frame)
             if text_header is None:
                 return self._sanitize_asset_bytes(first_frame)
             if self._is_error_response(text_header):
                 raise ProtocolError(self._extract_error_message(text_header))
-            if text_header.startswith("ASSET_START|"):
+            if text_header.startswith(f"{ProtocolPrefix.ASSET_START.value}|"):
                 size = self._parse_int(text_header.split("|", 1)[1])
                 raw = self._recv_frame_unlocked()
                 if on_progress:
                     on_progress(1.0 if size else 0.0)
-                return self._sanitize_asset_bytes(raw)
-            if self._looks_like_chunk_count(text_header):
-                raw = self._receive_chunked_binary_with_ack_unlocked(text_header, on_progress=on_progress)
                 return self._sanitize_asset_bytes(raw)
             raise ProtocolError(f"Unexpected binary header: {text_header}")
 
@@ -265,9 +306,15 @@ class AurexProtocolClient:
         file_type: str,
         cost: float,
     ) -> str:
-        message = f"UPLOAD|{asset_name}|{username}|{google_drive_url}|{file_type}|{cost}"
-        response = self._request_text(message)
-        if response.startswith("OK"):
+        response = self._request_command(
+            ProtocolCommand.UPLOAD,
+            asset_name,
+            username,
+            google_drive_url,
+            file_type,
+            cost,
+        )
+        if response.startswith(ProtocolPrefix.OK.value):
             return "success"
         raise ProtocolError(self._extract_error_message(response))
 
@@ -309,18 +356,19 @@ class AurexProtocolClient:
                 "public_key": public_key,
                 "mint_signature": mint_signature,
             }
-            init_message = "UPLOAD_INIT|" + base64.b64encode(
-                json.dumps(init_payload).encode("utf-8")
-            ).decode("ascii")
+            init_message = join_wire_fields(
+                ProtocolCommand.UPLOAD_INIT.value,
+                base64.b64encode(json.dumps(init_payload).encode("utf-8")).decode("ascii"),
+            )
             self._send_frame_unlocked(init_message.encode("utf-8"))
             init_response = self._recv_text_frame_unlocked()
-            init_parts = init_response.split("|")
-            if not init_parts or init_parts[0] != "OK":
+            init_head, init_parts = self._split_response(init_response)
+            if init_head != ProtocolPrefix.OK.value:
                 raise ProtocolError(self._extract_error_message(init_response))
-            upload_id = init_parts[1] if len(init_parts) > 1 else None
+            upload_id = init_parts[0] if init_parts else None
             if not upload_id or upload_id == "[]":
                 raise ProtocolError("Invalid upload_id from server")
-            server_chunk_size = int(init_parts[2]) if len(init_parts) > 2 else preferred_chunk_size
+            server_chunk_size = int(init_parts[1]) if len(init_parts) > 1 else preferred_chunk_size
             chunk_size = server_chunk_size if server_chunk_size > 0 else preferred_chunk_size
 
             sent_chunks = 0
@@ -330,19 +378,24 @@ class AurexProtocolClient:
                     chunk = handle.read(chunk_size)
                     if not chunk:
                         break
-                    payload = b"UPLOAD_CHUNK|" + upload_id.encode("utf-8") + b"|" + struct.pack(">I", seq) + chunk
+                    payload = UPLOAD_CHUNK_PREFIX + upload_id.encode("utf-8") + b"|" + struct.pack(">I", seq) + chunk
                     self._send_frame_unlocked(payload)
                     ack = self._recv_text_frame_unlocked()
-                    if not (ack == f"OK|{seq}" or ack.startswith("GOTPRT")):
+                    if not (
+                        ack == serialize_response(ProtocolPrefix.OK, seq)
+                        or ack.startswith(ProtocolPrefix.GOTPRT.value)
+                    ):
                         raise ProtocolError(f"Chunk {seq} rejected: {self._extract_error_message(ack)}")
                     seq += 1
                     sent_chunks += 1
                     if on_progress:
                         on_progress(min(1.0, sent_chunks / max(total_chunks, 1)))
 
-            self._send_frame_unlocked(f"UPLOAD_FINISH|{upload_id}".encode("utf-8"))
+            self._send_frame_unlocked(
+                serialize_command(ProtocolCommand.UPLOAD_FINISH, upload_id).encode("utf-8")
+            )
             finish = self._recv_text_frame_unlocked()
-            if finish.startswith("OK"):
+            if finish.startswith(ProtocolPrefix.OK.value):
                 return "success"
             raise ProtocolError(self._extract_error_message(finish))
 
@@ -386,18 +439,19 @@ class AurexProtocolClient:
                 "public_key": public_key,
                 "mint_signature": mint_signature,
             }
-            init_message = "UPLOAD_INIT|" + base64.b64encode(
-                json.dumps(init_payload).encode("utf-8")
-            ).decode("ascii")
+            init_message = join_wire_fields(
+                ProtocolCommand.UPLOAD_INIT.value,
+                base64.b64encode(json.dumps(init_payload).encode("utf-8")).decode("ascii"),
+            )
             self._send_frame_unlocked(init_message.encode("utf-8"))
             init_response = self._recv_text_frame_unlocked()
-            init_parts = init_response.split("|")
-            if not init_parts or init_parts[0] != "OK":
+            init_head, init_parts = self._split_response(init_response)
+            if init_head != ProtocolPrefix.OK.value:
                 raise ProtocolError(self._extract_error_message(init_response))
-            upload_id = init_parts[1] if len(init_parts) > 1 else None
+            upload_id = init_parts[0] if init_parts else None
             if not upload_id or upload_id == "[]":
                 raise ProtocolError("Invalid upload_id from server")
-            server_chunk_size = int(init_parts[2]) if len(init_parts) > 2 else preferred_chunk_size
+            server_chunk_size = int(init_parts[1]) if len(init_parts) > 1 else preferred_chunk_size
             chunk_size = server_chunk_size if server_chunk_size > 0 else preferred_chunk_size
 
             handle = io.BytesIO(file_bytes)
@@ -407,19 +461,24 @@ class AurexProtocolClient:
                 chunk = handle.read(chunk_size)
                 if not chunk:
                     break
-                payload = b"UPLOAD_CHUNK|" + upload_id.encode("utf-8") + b"|" + struct.pack(">I", seq) + chunk
+                payload = UPLOAD_CHUNK_PREFIX + upload_id.encode("utf-8") + b"|" + struct.pack(">I", seq) + chunk
                 self._send_frame_unlocked(payload)
                 ack = self._recv_text_frame_unlocked()
-                if not (ack == f"OK|{seq}" or ack.startswith("GOTPRT")):
+                if not (
+                    ack == serialize_response(ProtocolPrefix.OK, seq)
+                    or ack.startswith(ProtocolPrefix.GOTPRT.value)
+                ):
                     raise ProtocolError(f"Chunk {seq} rejected: {self._extract_error_message(ack)}")
                 seq += 1
                 sent_chunks += 1
                 if on_progress:
                     on_progress(min(1.0, sent_chunks / max(total_chunks, 1)))
 
-            self._send_frame_unlocked(f"UPLOAD_FINISH|{upload_id}".encode("utf-8"))
+            self._send_frame_unlocked(
+                serialize_command(ProtocolCommand.UPLOAD_FINISH, upload_id).encode("utf-8")
+            )
             finish = self._recv_text_frame_unlocked()
-            if finish.startswith("OK"):
+            if finish.startswith(ProtocolPrefix.OK.value):
                 return "success"
             raise ProtocolError(self._extract_error_message(finish))
 
@@ -456,13 +515,19 @@ class AurexProtocolClient:
             "timestamp": timestamp,
         }
         signature = sign_message(canonical_tx_message(username, payload), username)
-        message = (
-            f"BUY|{asset_id}|{username}|{amount}|{tx_id}|{timestamp}|{public_key}|{signature}"
+        response = self._request_command(
+            ProtocolCommand.BUY,
+            asset_id,
+            username,
+            amount,
+            tx_id,
+            timestamp,
+            public_key,
+            signature,
         )
-        response = self._request_text(message)
-        parts = response.split("|")
-        if parts[0] == "OK":
-            return {"status": parts[1] if len(parts) > 1 else "OK", "tx_id": parts[2] if len(parts) > 2 else None}
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value:
+            return {"status": parts[0] if parts else "OK", "tx_id": parts[1] if len(parts) > 1 else None}
         raise ProtocolError(self._extract_error_message(response))
 
     def send_asset_to_user(
@@ -491,30 +556,36 @@ class AurexProtocolClient:
             "timestamp": timestamp,
         }
         signature = sign_message(canonical_tx_message(sender_username, payload), sender_username)
-        message = (
-            f"SEND|{asset_id}|{sender_username}|{receiver_username}|{tx_id}|{timestamp}|{public_key}|{signature}"
+        response = self._request_command(
+            ProtocolCommand.SEND,
+            asset_id,
+            sender_username,
+            receiver_username,
+            tx_id,
+            timestamp,
+            public_key,
+            signature,
         )
-        response = self._request_text(message)
-        parts = response.split("|")
-        if parts[0] == "OK":
-            # Server returns OK|PENDING|tx_id — capture tx_id so caller can poll GET_TX_STATUS.
-            returned_tx_id = parts[2] if len(parts) > 2 else tx_id
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value:
+            # Server returns OK|PENDING|tx_id; capture tx_id so caller can poll GET_TX_STATUS.
+            returned_tx_id = parts[1] if len(parts) > 1 else tx_id
             return returned_tx_id
         raise ProtocolError(self._extract_error_message(response))
 
     def get_transaction_status(self, tx_id: str) -> dict[str, str]:
-        response = self._request_text(f"GET_TX_STATUS|{tx_id}")
-        parts = response.split("|")
-        if parts[0] == "OK" and len(parts) >= 2:
-            status = parts[1].upper()
-            msg = parts[2] if len(parts) > 2 else ""
+        response = self._request_command(ProtocolCommand.GET_TX_STATUS, tx_id)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value and parts:
+            status = parts[0].upper()
+            msg = parts[1] if len(parts) > 1 else ""
             return {"status": status, "message": msg}
         raise ProtocolError(self._extract_error_message(response))
 
     def get_user_assets(self, username: str) -> list[ItemOffering]:
         if not username or "|" in username:
             raise ProtocolError("Invalid username")
-        response = self._request_text(f"GET_ITEMS_BY_USER|{username}")
+        response = self._request_command(ProtocolCommand.GET_ITEMS_BY_USER, username)
         payload = self._extract_ok_payload(response)
         decoded = json.loads(payload)
         assets = []
@@ -529,11 +600,11 @@ class AurexProtocolClient:
     def get_notifications(self, *, username: str, limit: int = 20) -> tuple[list[NotificationItem], int]:
         if not username or "|" in username:
             raise ProtocolError("Invalid username")
-        response = self._request_text(f"GET_NOTIFICATIONS|{username}|{limit}")
+        response = self._request_command(ProtocolCommand.GET_NOTIFICATIONS, username, limit)
         if response.startswith("ERR02"):
             return [], 0
         first_pipe = response.find("|")
-        if response.startswith("OK") and first_pipe != -1:
+        if response.startswith(ProtocolPrefix.OK.value) and first_pipe != -1:
             last_pipe = response.rfind("|")
             json_str = response[first_pipe + 1 : last_pipe if last_pipe != first_pipe else None]
             unread_str = response[last_pipe + 1 :] if last_pipe != first_pipe else "0"
@@ -550,16 +621,16 @@ class AurexProtocolClient:
     def mark_notifications_read(self, username: str) -> bool:
         if not username or "|" in username:
             raise ProtocolError("Invalid username")
-        response = self._request_text(f"MARK_NOTIFICATIONS_READ|{username}")
-        return response.startswith("OK")
+        response = self._request_command(ProtocolCommand.MARK_NOTIFICATIONS_READ, username)
+        return response.startswith(ProtocolPrefix.OK.value)
 
     def register_device_token(self, *, username: str, platform: str, token: str) -> bool:
         if not username or "|" in username:
             raise ProtocolError("Invalid username")
         if not token or "|" in token:
             raise ProtocolError("Invalid token")
-        response = self._request_text(f"REGISTER_DEVICE|{username}|{platform}|{token}")
-        return response.startswith("OK")
+        response = self._request_command(ProtocolCommand.REGISTER_DEVICE, username, platform, token)
+        return response.startswith(ProtocolPrefix.OK.value)
 
     def update_public_key(self, username: str, public_key_b64: str) -> bool:
         """Notify server of a new public key after key regeneration."""
@@ -567,32 +638,32 @@ class AurexProtocolClient:
             raise ProtocolError("Invalid username")
         if not public_key_b64:
             raise ProtocolError("Missing public key")
-        response = self._request_text(f"UPDATE_PUBLIC_KEY|{username}|{public_key_b64}")
-        return response.startswith("OK")
+        response = self._request_command(ProtocolCommand.UPDATE_PUBLIC_KEY, username, public_key_b64)
+        return response.startswith(ProtocolPrefix.OK.value)
 
     def list_asset_for_sale(self, *, asset_id: str, username: str, price: float) -> str:
         if not asset_id or not username or price <= 0:
             raise ProtocolError("Invalid parameters")
-        response = self._request_text(f"LIST_ITEM|{asset_id}|{username}|{price}")
-        if response.startswith("OK"):
+        response = self._request_command(ProtocolCommand.LIST_ITEM, asset_id, username, price)
+        if response.startswith(ProtocolPrefix.OK.value):
             return "success"
         raise ProtocolError(self._extract_error_message(response))
 
     def unlist_asset(self, *, asset_id: str, username: str) -> str:
         if not asset_id or not username:
             raise ProtocolError("Invalid parameters")
-        response = self._request_text(f"UNLIST_ITEM|{asset_id}|{username}")
-        if response.startswith("OK"):
+        response = self._request_command(ProtocolCommand.UNLIST_ITEM, asset_id, username)
+        if response.startswith(ProtocolPrefix.OK.value):
             return "success"
         raise ProtocolError(self._extract_error_message(response))
 
     def get_user_profile(self, username: str) -> dict[str, str] | None:
         if not username or "|" in username:
             raise ProtocolError("Invalid username")
-        response = self._request_text(f"GET_PROFILE|{username}")
-        parts = response.split("|")
-        if parts[0] == "OK" and len(parts) >= 4:
-            return {"username": parts[1], "email": parts[2], "created_at": parts[3]}
+        response = self._request_command(ProtocolCommand.GET_PROFILE, username)
+        head, parts = self._split_response(response)
+        if head == ProtocolPrefix.OK.value and len(parts) >= 3:
+            return {"username": parts[0], "email": parts[1], "created_at": parts[2]}
         raise ProtocolError(self._extract_error_message(response))
 
     def sha256_file(self, file_path: str) -> str:
@@ -610,36 +681,45 @@ class AurexProtocolClient:
             self._send_frame_unlocked(command.encode("utf-8"))
             return self._recv_text_frame_unlocked()
 
+    def _request_command(self, command: ProtocolCommand, *parts: Any) -> str:
+        return self._request_text(serialize_command(command, *parts))
+
+    def _split_response(self, response: str) -> tuple[str, list[str]]:
+        parsed = parse_wire_message(response)
+        return parsed.head, list(parsed.parts)
+
     def _ensure_connected_unlocked(self) -> None:
         if self.session.socket is None:
             raise ProtocolError("Not connected to server")
 
     def _disconnect_unlocked(self, clear_user: bool) -> None:
-        sock = self.session.socket
+        websocket = self.session.socket
         self.session.socket = None
-        if sock is not None:
+        if websocket is not None:
             try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                sock.close()
-            except OSError:
+                self._run_coro_sync(self._close_async(websocket), timeout=10)
+            except Exception:
                 pass
         if clear_user:
             self.session.clear_user_state()
 
     def _send_frame_unlocked(self, data: bytes) -> None:
         self._ensure_connected_unlocked()
-        assert self.session.socket is not None
-        self.session.socket.sendall(struct.pack(">I", len(data)) + data)
+        self._run_coro_sync(self._send_async(data), timeout=30)
 
     def _recv_frame_unlocked(self) -> bytes:
-        header = self._recv_exact_unlocked(4)
-        if not header:
-            raise ProtocolError("Socket closed by server")
-        frame_length = struct.unpack(">I", header)[0]
-        return self._recv_exact_unlocked(frame_length)
+        try:
+            payload = self._incoming_frames.get(timeout=self._receive_timeout)
+        except queue.Empty as exc:
+            raise ProtocolError("Timed out waiting for server response") from exc
+
+        if payload is self._receiver_closed:
+            raise ProtocolError("WebSocket closed by server")
+        if isinstance(payload, Exception):
+            raise payload
+        if isinstance(payload, str):
+            return payload.encode("utf-8")
+        return payload
 
     def _recv_text_frame_unlocked(self) -> str:
         while True:
@@ -649,54 +729,7 @@ class AurexProtocolClient:
             except UnicodeDecodeError as exc:
                 raise ProtocolError("Expected text frame but received binary data") from exc
 
-            if text.startswith("EVENT|"):
-                json_str = text[6:]
-                try:
-                    event = ServerEvent.from_json(json_str)
-                    self.session.server_events.append(event)
-                    if self.on_server_event:
-                        self.on_server_event(event)
-                except Exception:
-                    pass
-                continue
             return text
-
-    def _recv_exact_unlocked(self, size: int) -> bytes:
-        self._ensure_connected_unlocked()
-        assert self.session.socket is not None
-        chunks: list[bytes] = []
-        remaining = size
-        while remaining > 0:
-            chunk = self.session.socket.recv(remaining)
-            if not chunk:
-                raise ProtocolError("Socket closed during receive")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
-
-    def _looks_like_chunk_count(self, text_header: str) -> bool:
-        prefixes = ("PARTS|", "NUMPRT|", "AMNPRT|")
-        return text_header.startswith(prefixes)
-
-    def _receive_chunked_binary_with_ack_unlocked(
-        self,
-        text_header: str,
-        *,
-        on_progress: Callable[[float], None] | None = None,
-    ) -> bytes:
-        _, _, raw_count = text_header.partition("|")
-        total_parts = int(raw_count) if raw_count.isdigit() else 0
-        collected = bytearray()
-        for idx in range(total_parts + 1):
-            self._send_frame_unlocked(self.GOT_PART_ACK)
-            part = self._recv_frame_unlocked()
-            part_text = self._try_decode_text(part)
-            if part_text in {"The proccess has ended.", "DONE", "END"}:
-                break
-            collected.extend(part)
-            if on_progress and total_parts:
-                on_progress(min(1.0, (idx + 1) / max(total_parts, 1)))
-        return bytes(collected)
 
     def _try_decode_text(self, payload: bytes) -> Optional[str]:
         try:
@@ -730,8 +763,9 @@ class AurexProtocolClient:
         return data if self._has_supported_image_signature(data) else None
 
     def _extract_ok_payload(self, response: str) -> str:
-        if response.startswith("OK|"):
-            return response.split("|", 1)[1]
+        ok_prefix = f"{ProtocolPrefix.OK.value}|"
+        if response.startswith(ok_prefix):
+            return response[len(ok_prefix):]
         raise ProtocolError(self._extract_error_message(response))
 
     def _extract_error_message(self, response: str) -> str:
@@ -740,10 +774,98 @@ class AurexProtocolClient:
         return response
 
     def _is_error_response(self, response: str) -> bool:
-        return response.startswith(("ERR", "PTHERR", "GRLERR"))
+        return is_error_response(response)
 
     def _parse_int(self, raw: str) -> int:
         try:
             return int(raw)
         except Exception:
             return 0
+
+    def _ensure_loop_thread(self) -> None:
+        if self._loop_thread and self._loop_thread.is_alive() and self._loop is not None:
+            return
+        self._loop_ready.clear()
+        self._loop_thread = threading.Thread(target=self._loop_worker, daemon=True)
+        self._loop_thread.start()
+        self._loop_ready.wait(timeout=5)
+        if self._loop is None:
+            raise ProtocolError("Failed to start WebSocket event loop")
+
+    def _loop_worker(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        self._loop_ready.set()
+        loop.run_forever()
+
+    def _run_coro_sync(self, coro, *, timeout: float | None = None):
+        self._ensure_loop_thread()
+        assert self._loop is not None
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
+    async def _connect_async(self, host: str, port: int):
+        ssl_context = ssl.create_default_context()
+        ca_cert_path = self._resolve_ca_cert_path()
+        if not ca_cert_path.exists():
+            raise ProtocolError(f"CA certificate not found: {ca_cert_path}")
+        ssl_context.load_verify_locations(cafile=str(ca_cert_path))
+        uri = self._build_server_uri(host, port)
+        frame_queue = self._incoming_frames
+        websocket = await websockets.connect(
+            uri,
+            ssl=ssl_context,
+            max_size=None,
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=5,
+        )
+        self._receiver_task = asyncio.create_task(self._receiver_loop(websocket, frame_queue))
+        return websocket
+
+    async def _close_async(self, websocket) -> None:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+    async def _send_async(self, data: bytes) -> None:
+        self._ensure_connected_unlocked()
+        assert self.session.socket is not None
+        payload: str | bytes
+        if data.startswith(UPLOAD_CHUNK_PREFIX):
+            payload = data
+        else:
+            try:
+                payload = data.decode("utf-8")
+            except UnicodeDecodeError:
+                payload = data
+        await self.session.socket.send(payload)
+
+    async def _receiver_loop(self, websocket, frame_queue: queue.Queue[Any]) -> None:
+        try:
+            async for payload in websocket:
+                if isinstance(payload, str) and payload.startswith(EVENT_PREFIX):
+                    self._handle_server_event(payload)
+                    continue
+                frame_queue.put(payload)
+        except ConnectionClosed:
+            pass
+        except Exception as exc:
+            frame_queue.put(ProtocolError(str(exc)))
+        finally:
+            frame_queue.put(self._receiver_closed)
+
+    def _handle_server_event(self, payload: str) -> None:
+        json_str = payload[len(EVENT_PREFIX):]
+        try:
+            event = ServerEvent.from_json(json_str)
+            self.session.server_events.append(event)
+            if self.on_server_event:
+                self.on_server_event(event)
+        except Exception:
+            pass
+
+
+

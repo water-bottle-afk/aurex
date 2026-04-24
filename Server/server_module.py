@@ -1,120 +1,15 @@
-"""
-Aurex Blockchain Server - Handles client connections and marketplace (ORM: DB/marketplace.db)
-One persistent connection per client, event-based processing
+"""Aurex WSS marketplace server.
 
-PROTOCOL SPECIFICATION
-======================
-All client-server communication uses TLS on port 23456 with 4-byte big-endian length prefix.
-
-Message Format: [4-byte unsigned int, big-endian][protocol command payload]
-
-Supported Commands:
-  1. START - Connection initialization
-     Send: START|Client_Flutter_App
-     Recv: ACCPT|Connection accepted
-  
-  2. LOGIN - User authentication (by USERNAME)
-     Send: LOGIN|username|password
-     Recv: OK|username or ERR|error_message
-  
-  3. SIGNUP - User registration (by USERNAME)
-     Send: SIGNUP|username|password
-     Recv: OK or ERR|error_message
-  
-  4. SEND_CODE - Request password reset OTP code via username
-     Send: SEND_CODE|username
-     Recv: OK|code_sent or ERR|error_message
-  
-  5. VERIFY_CODE - Verify OTP code for password reset
-     Send: VERIFY_CODE|username|otp_code
-     Recv: OK|token or ERR|error_message
-  
-  6. UPDATE_PASSWORD - Change user password (after OTP verification)
-     Send: UPDATE_PASSWORD|username|new_password
-     Recv: OK or ERR|error_message
-  
-  7. LOGOUT - User logout
-     Send: LOGOUT|username
-     Recv: OK or ERR|error_message
-  
-  8. UPLOAD_INIT - Start chunked upload session
-     Send: UPLOAD_INIT|base64(json) (includes asset_hash + mint signature)
-     Recv: OK|upload_id|chunk_size or ERR|error_message
-
-  9. UPLOAD_CHUNK - Send file chunk (base64)
-     Send: UPLOAD_CHUNK|upload_id|seq|total|base64(chunk)
-     Recv: OK|seq or ERR|error_message
-
-  10. UPLOAD_FINISH - Finalize upload (Drive + DB)
-      Send: UPLOAD_FINISH|upload_id
-      Recv: OK|asset_name|drive_url or ERR|error_message
-
-  11. UPLOAD_ABORT - Cancel an in-progress upload
-      Send: UPLOAD_ABORT|upload_id
-      Recv: OK|message or ERR|error_message
-
-  12. UPLOAD - Legacy direct-URL upload/register (disabled)
-      Send: UPLOAD|asset_name|username|google_drive_url|file_type|cost
-      Recv: ERR|Legacy upload disabled
-  
-  13. GET_ITEMS - Get all marketplace items
-     Send: GET_ITEMS
-     Recv: OK|item1|item2|... or ERR|error_message
-  
-  14. GET_ITEMS_PAGINATED - Lazy scrolling with timestamp cursor
-      Send: GET_ITEMS_PAGINATED|limit[|timestamp]
-      Recv: OK|item1|item2|... or ERR|error_message
-  
-  15. BUY - Purchase an asset from marketplace
-      Send: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature
-      Recv: OK|PENDING|transaction_id or ERR|error_message
-  
-  16. SEND - Send purchased asset to another user
-      Send: SEND|asset_id|sender_username|receiver_username|tx_id|timestamp|public_key|signature
-      Recv: OK|transaction_id or ERR|error_message
-  
-  17. GET_PROFILE - Get user profile (anonymous - username only)
-      Send: GET_PROFILE|username
-      Recv: OK|username|email|created_at or ERR|error_message
-
-  18. GET_TX_STATUS - Check blockchain purchase status
-      Send: GET_TX_STATUS|tx_id
-      Recv: OK|STATUS|message or ERR|error_message
-
-  19. GET_ITEMS_BY_USER - Get assets owned by a user
-      Send: GET_ITEMS_BY_USER|username
-      Recv: OK|items_json or ERR|error_message
-
-  20. GET_WALLET - Get wallet balance for a user
-      Send: GET_WALLET|username
-      Recv: OK|balance|updated_at or ERR|error_message
-
-  21. GET_NOTIFICATIONS - Get notifications for a user
-      Send: GET_NOTIFICATIONS|username|limit
-      Recv: OK|json_list|unread_count or ERR|error_message
-
-  22. MARK_NOTIFICATIONS_READ - Mark all notifications as read
-      Send: MARK_NOTIFICATIONS_READ|username
-      Recv: OK|read or ERR|error_message
-
-  23. REGISTER_DEVICE - Register push notification token
-      Send: REGISTER_DEVICE|username|platform|token
-      Recv: OK|registered or ERR|error_message
-
-  24. LIST_ITEM - List an owned asset for sale
-      Send: LIST_ITEM|asset_id|username|price
-      Recv: OK|LISTED or ERR|error_message
-
-  25. UNLIST_ITEM - Remove an asset from the marketplace
-      Send: UNLIST_ITEM|asset_id|username
-      Recv: OK|UNLISTED or ERR|error_message
+This module keeps transport concerns (WebSocket framing), command routing,
+and domain actions separate so networking changes do not leak into business
+logic handlers.
 """
 
+import asyncio
 import base64
 import datetime
 import json
 import hashlib
-import logging
 import os
 import queue
 import random
@@ -122,6 +17,7 @@ import re
 import socket
 import ssl as ssl_module
 import struct
+import sys
 import threading
 import time
 import shutil
@@ -131,24 +27,73 @@ import urllib.request
 from importlib import util as importlib_util
 from dataclasses import dataclass, field
 from pathlib import Path
-from config import (
-    SERVER_HOST, SERVER_PORT, SERVER_IP,
-    BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
-    LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
-    GATEWAY_HOST, GATEWAY_PORT,
-    UPLOADS_DIR,
-    UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
-    TX_TIME_WINDOW_SECONDS,
-    FCM_ENABLED, FCM_SERVER_KEY,
-)
-from classes import PROTO, CustomLogger
-from DB_ORM import MarketplaceDB, send_reset_email
+import websockets
+from websockets.exceptions import ConnectionClosed
+from aurex_logging import AurexLogger
+
+try:
+    from protocol_definitions import (
+        GET_ASSET_BINARY_PREFIX,
+        UPLOAD_CHUNK_PREFIX,
+        DiscoveryRequest,
+        DiscoveryResponse,
+        ProtocolCommand,
+        ProtocolPrefix,
+        parse_wire_message,
+        serialize_command,
+        serialize_event,
+        serialize_response,
+    )
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from protocol_definitions import (
+        GET_ASSET_BINARY_PREFIX,
+        UPLOAD_CHUNK_PREFIX,
+        DiscoveryRequest,
+        DiscoveryResponse,
+        ProtocolCommand,
+        ProtocolPrefix,
+        parse_wire_message,
+        serialize_command,
+        serialize_event,
+        serialize_response,
+    )
+try:
+    from Server.config import (
+        SERVER_HOST, SERVER_PORT, SERVER_IP,
+        BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
+        LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
+        GATEWAY_HOST, GATEWAY_PORT,
+        ENABLE_UDP_DISCOVERY,
+        UPLOADS_DIR,
+        UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
+        TX_TIME_WINDOW_SECONDS,
+        FCM_ENABLED, FCM_SERVER_KEY,
+    )
+    from Server.classes import PROTO, CustomLogger
+    from Server.DB_ORM import MarketplaceDB, send_reset_email
+except ModuleNotFoundError:
+    # Allow running this file directly from the Server folder:
+    #   python server_module.py
+    from config import (
+        SERVER_HOST, SERVER_PORT, SERVER_IP,
+        BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
+        LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
+        GATEWAY_HOST, GATEWAY_PORT,
+        ENABLE_UDP_DISCOVERY,
+        UPLOADS_DIR,
+        UPLOAD_TMP_DIR, UPLOAD_CHUNK_SIZE,
+        TX_TIME_WINDOW_SECONDS,
+        FCM_ENABLED, FCM_SERVER_KEY,
+    )
+    from classes import PROTO, CustomLogger
+    from DB_ORM import MarketplaceDB, send_reset_email
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 _UPLOADS_DIR_PATH = (Path(__file__).parent / UPLOADS_DIR).resolve()
 _UPLOADS_DIR_PATH.mkdir(parents=True, exist_ok=True)
 
-server_logger = CustomLogger("server", LOGGING_LEVEL).logger
+server_logger = AurexLogger.get_logger("server")
 
 
 def _read_image_bytes(filename: str, max_width: int = 400) -> bytes | None:
@@ -250,6 +195,14 @@ def _resolve_server_ip(config_ip: str, bind_host: str) -> str:
     return _detect_local_ip()
 
 
+def _normalize_remote_address(remote_address) -> tuple[str, int]:
+    if isinstance(remote_address, tuple) and len(remote_address) >= 2:
+        return str(remote_address[0]), int(remote_address[1])
+    if remote_address:
+        return str(remote_address), 0
+    return "unknown", 0
+
+
 def _load_blockchain_notifications_manager():
     classes_path = (Path(__file__).parent.parent / "blockchain" / "classes.py").resolve()
     spec = importlib_util.spec_from_file_location("blockchain_classes", classes_path)
@@ -289,13 +242,12 @@ class UploadSession:
 
 class ClientSession:
     """Represents one authenticated client connection"""
-    def __init__(self, sock, addr, logging_level, server):
+    def __init__(self, sock, addr, logging_level, server, loop):
         self.socket = sock
         self.address = addr
         self.server = server
         
-        # Pass socket directly to PROTO constructor instead of assigning afterward
-        self.proto = PROTO("ClientSession", logging_level=logging_level, cln_sock=sock)
+        self.proto = PROTO("ClientSession", logging_level=logging_level, cln_sock=sock, loop=loop)
         
         self.logger = CustomLogger(f"Session-{addr[0]}:{addr[1]}", logging_level)
         self.Print = self.logger.Print
@@ -315,40 +267,40 @@ class ClientSession:
         self.upload_tmp_dir.mkdir(parents=True, exist_ok=True)
 
         self.handlers = {
-            "START": self.handle_start,
-            "LOGIN": self.handle_login,
-            "SIGNUP": self.handle_signup,
-            "SEND_CODE": self.handle_send_code,
-            "VERIFY_CODE": self.handle_verify_code,
-            "UPDATE_PASSWORD": self.handle_update_password,
-            "LOGOUT": self.handle_logout,
-            "UPLOAD": self.handle_log_asset,
-            "UPLOAD_INIT": self.handle_upload_init,
-            "UPLOAD_FINISH": self.handle_upload_finish,
-            "UPLOAD_ABORT": self.handle_upload_abort,
-            "GET_ASSET_BINARY": self.handle_get_asset_binary,
-            "GET_ITEMS": self.handle_asset_list,
-            "GET_ITEMS_PAGINATED": self.handle_get_items_paginated,
-            "BUY": self.handle_buy_asset,
-            "SEND": self.handle_send_asset,
-            "GET_PROFILE": self.handle_get_profile,
-            "GET_TX_STATUS": self.handle_get_tx_status,
-            "GET_ITEMS_BY_USER": self.handle_get_items_by_user,
-            "GET_WALLET": self.handle_get_wallet,
-            "GET_NOTIFICATIONS": self.handle_get_notifications,
-            "MARK_NOTIFICATIONS_READ": self.handle_mark_notifications_read,
-            "REGISTER_DEVICE": self.handle_register_device,
-            "LIST_ITEM": self.handle_list_item,
-            "UNLIST_ITEM": self.handle_unlist_item,
-            "UPDATE_PUBLIC_KEY": self.handle_update_public_key,
+            ProtocolCommand.START.value: self.handle_start,
+            ProtocolCommand.LOGIN.value: self.handle_login,
+            ProtocolCommand.SIGNUP.value: self.handle_signup,
+            ProtocolCommand.SEND_CODE.value: self.handle_send_code,
+            ProtocolCommand.VERIFY_CODE.value: self.handle_verify_code,
+            ProtocolCommand.UPDATE_PASSWORD.value: self.handle_update_password,
+            ProtocolCommand.LOGOUT.value: self.handle_logout,
+            ProtocolCommand.UPLOAD.value: self.handle_log_asset,
+            ProtocolCommand.UPLOAD_INIT.value: self.handle_upload_init,
+            ProtocolCommand.UPLOAD_FINISH.value: self.handle_upload_finish,
+            ProtocolCommand.UPLOAD_ABORT.value: self.handle_upload_abort,
+            ProtocolCommand.GET_ASSET_BINARY.value: self.handle_get_asset_binary,
+            ProtocolCommand.GET_ITEMS.value: self.handle_asset_list,
+            ProtocolCommand.GET_ITEMS_PAGINATED.value: self.handle_get_items_paginated,
+            ProtocolCommand.BUY.value: self.handle_buy_asset,
+            ProtocolCommand.SEND.value: self.handle_send_asset,
+            ProtocolCommand.GET_PROFILE.value: self.handle_get_profile,
+            ProtocolCommand.GET_TX_STATUS.value: self.handle_get_tx_status,
+            ProtocolCommand.GET_ITEMS_BY_USER.value: self.handle_get_items_by_user,
+            ProtocolCommand.GET_WALLET.value: self.handle_get_wallet,
+            ProtocolCommand.GET_NOTIFICATIONS.value: self.handle_get_notifications,
+            ProtocolCommand.MARK_NOTIFICATIONS_READ.value: self.handle_mark_notifications_read,
+            ProtocolCommand.REGISTER_DEVICE.value: self.handle_register_device,
+            ProtocolCommand.LIST_ITEM.value: self.handle_list_item,
+            ProtocolCommand.UNLIST_ITEM.value: self.handle_unlist_item,
+            ProtocolCommand.UPDATE_PUBLIC_KEY.value: self.handle_update_public_key,
         }
     
     def process_message(self, message):
         """Parse and handle incoming message"""
         try:
-            parts = message.split('|')
-            command = parts[0].strip()
-            tail = parts[1:]
+            parsed = parse_wire_message(message)
+            command = parsed.head
+            tail = list(parsed.parts)
             
             if command not in self.handlers:
                 self.Print(f" Unknown command: {command}", 40)
@@ -365,7 +317,7 @@ class ClientSession:
     def handle_start(self, params):
         """Protocol Message 1: START - Initialize connection"""
         self.Print(" START message received - accepting connection", 20)
-        return "ACCPT|Connection accepted"
+        return serialize_response(ProtocolPrefix.ACCEPT, "Connection accepted")
     
     def handle_login(self, params):
         """Protocol Message: LOGIN - Username/Password authentication
@@ -419,16 +371,16 @@ class ClientSession:
         
         # Validate fields - no pipes or spaces
         if '|' in username or '|' in password or '|' in email:
-            self.Print(f" Invalid characters in signup fields", 40)
+            self.Print(" Invalid characters in signup fields", 40)
             return "ERR10|Fields cannot contain '|'"
         
         if username != params[0] or password != params[1]:
-            self.Print(f" Fields have leading/trailing spaces", 40)
+            self.Print(" Fields have leading/trailing spaces", 40)
             return "ERR10|Fields cannot have leading/trailing spaces"
         
         # Validate inputs
         if not username or not password or not email:
-            self.Print(f" Missing required fields for signup", 40)
+            self.Print(" Missing required fields for signup", 40)
             return "ERR10|Missing required fields"
         
         # Username validation: 3-20 chars, alphanumeric + underscore
@@ -439,7 +391,7 @@ class ClientSession:
         
         # Password validation: min 6 chars
         if len(password) < 6:
-            self.Print(f" Password too short", 40)
+            self.Print(" Password too short", 40)
             return "ERR10|Password must be at least 6 characters"
         
         if ' ' in email or '@' not in email:
@@ -481,7 +433,7 @@ class ClientSession:
         email = params[0].strip()
         
         if not email or '|' in email or ' ' in email:
-            self.Print(f" Invalid email format", 40)
+            self.Print(" Invalid email format", 40)
             return "ERR04|Invalid email format"
         user_obj = self.db.get_user_by_email(email)
         if not user_obj:
@@ -527,7 +479,7 @@ class ClientSession:
         otp_code = params[1].strip()
         
         if not email or not otp_code or '|' in email or '|' in otp_code:
-            self.Print(f" Invalid verify code inputs", 40)
+            self.Print(" Invalid verify code inputs", 40)
             return "ERR08|Invalid input format"
         user_obj = self.db.get_user_by_email(email)
         if not user_obj:
@@ -554,10 +506,10 @@ class ClientSession:
         new_password = params[1].strip()
         
         if not email or not new_password or '|' in email or '|' in new_password:
-            self.Print(f" Invalid password update inputs", 40)
+            self.Print(" Invalid password update inputs", 40)
             return "ERR07|Invalid input format"
         if len(new_password) < 6:
-            self.Print(f" New password too short", 40)
+            self.Print(" New password too short", 40)
             return "ERR07|Password must be at least 6 characters"
         user_obj = self.db.get_user_by_email(email)
         if not user_obj:
@@ -664,7 +616,7 @@ class ClientSession:
                 self.Print(f" Failed to upload asset: {message}", 40)
                 return f"ERR03|{message}"
                 
-        except ValueError as ve:
+        except ValueError:
             return "ERR01|Invalid cost format"
         except Exception as e:
             self.Print(f" Error processing UPLOAD: {e}", 40)
@@ -819,7 +771,9 @@ class ClientSession:
         data = _read_image_bytes(rel_path)
         if data is None:
             return "ERR05|Asset not found or unreadable"
-        self.proto.send_one_message(f"ASSET_START|{len(data)}".encode())
+        self.proto.send_one_message(
+            serialize_response(ProtocolPrefix.ASSET_START, len(data)).encode()
+        )
         self.proto.send_one_message(data)
         return None  # handle_client must not send an additional response
 
@@ -972,7 +926,7 @@ class ClientSession:
         import json
         
         if len(params) < 1:
-            self.Print(f"[RECV] GET_ITEMS_PAGINATED - Invalid format", 40)
+            self.Print("[RECV] GET_ITEMS_PAGINATED - Invalid format", 40)
             return "ERR01|Invalid format"
         
         try:
@@ -999,7 +953,7 @@ class ClientSession:
                     self.Print(f"[SEND] OK|{len(items_list)} items", 20)
                     return response
                 response = "OK|[]"
-                self.Print(f"[SEND] OK|0 items (no more items)", 20)
+                self.Print("[SEND] OK|0 items (no more items)", 20)
                 return response
             except Exception as db_error:
                 self.Print(f" Database error: {db_error}", 40)
@@ -1019,7 +973,7 @@ class ClientSession:
         if not self.is_authenticated:
             return "ERR03|Not authenticated"
         if len(params) < 7:
-            self.Print(f"[RECV] BUY - Invalid format", 40)
+            self.Print("[RECV] BUY - Invalid format", 40)
             return "ERR01|Invalid format: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature"
 
         try:
@@ -1137,7 +1091,7 @@ class ClientSession:
         if not self.is_authenticated:
             return "ERR02|Not authenticated"
         if len(params) < 7:
-            self.Print(f"[RECV] SEND - Invalid format", 40)
+            self.Print("[RECV] SEND - Invalid format", 40)
             return "ERR01|Invalid format: SEND|asset_id|sender|receiver|tx_id|timestamp|public_key|signature"
         
         try:
@@ -1237,12 +1191,12 @@ class ClientSession:
         Returns: OK|username|email|created_at or ERR|error_message
         """
         if len(params) < 1:
-            self.Print(f"[RECV] GET_PROFILE - Invalid format", 40)
+            self.Print("[RECV] GET_PROFILE - Invalid format", 40)
             return "ERR01|Invalid format: GET_PROFILE|username"
         try:
             username = params[0].strip()
             if not username or '|' in username:
-                self.Print(f" Invalid username format", 40)
+                self.Print(" Invalid username format", 40)
                 return "ERR01|Invalid username"
             user_obj = self.db.get_user(username)
             if not user_obj:
@@ -1567,7 +1521,7 @@ class Server:
         if not session:
             return
         try:
-            raw = f"EVENT|{json.dumps(event_payload)}".encode()
+            raw = serialize_event(event_payload).encode()
             session.proto.send_one_message(raw)
         except Exception as e:
             server_logger.warning("event send failed: %s", e)
@@ -1810,11 +1764,11 @@ class Server:
                 while self.is_running:
                     try:
                         data, addr = broadcast_sock.recvfrom(1024)
-                        message = data.decode('utf-8').strip()
-                        
-                        if message == "WHRSRV":
-                            response = f"SRVRSP|{self.server_ip}|{self.port}"
-                            broadcast_sock.sendto(response.encode('utf-8'), addr)
+                        message = data.decode("utf-8").strip()
+
+                        if DiscoveryRequest.matches(message):
+                            response = DiscoveryResponse(host=self.server_ip, port=self.port).to_text()
+                            broadcast_sock.sendto(response.encode("utf-8"), addr)
                             self.Print(f" Broadcast response sent to {addr}: {response}", 10)
                     except socket.timeout:
                         continue
@@ -1874,7 +1828,6 @@ class Server:
                                             continue
 
                                         if action == 'asset_mint':
-                                            owner = tx_data.get('owner') or tx.get('sender')
                                             cost = tx_data.get('cost')
                                             if cost is None:
                                                 cost = tx_data.get('amount') if tx_data.get('amount') is not None else tx_data.get('price')
@@ -2310,187 +2263,178 @@ class Server:
             return None
     
     def start(self):
-        """Start the server"""
+        """Start the WSS server."""
         self.Print(f" Server starting on {self.host}:{self.port}...", 20)
-        
         try:
-            self.is_running = True
-            
-            # Start broadcast listener thread
-            self._start_broadcast_listener()
-            # Start block confirmation listener (RPC -> server)
-            self._start_block_confirmation_listener()
-            
-            # Create SSL context
-            context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)
-            cert_path = _resolve_path(SSL_CERT_FILE)
-            key_path = _resolve_path(SSL_KEY_FILE)
-            context.load_cert_chain(certfile=cert_path, keyfile=key_path)
-            
-            # Create socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind((self.host, self.port))
-                sock.listen(5)
-                
-                self.Print(f" Server listening on {self.host}:{self.port}", 20)
-                
-                while self.is_running:
-                    try:
-                        # Accept connection
-                        client_sock, addr = sock.accept()
-                        
-                        self.Print(f" Connection attempt from {addr[0]}:{addr[1]}", 20)
-                        
-                        # Wrap with SSL
-                        try:
-                            ssl_sock = context.wrap_socket(
-                                client_sock,
-                                server_side=True
-                            )
-                            # Keep socket blocking (no timeout) for persistent connections
-                            ssl_sock.setblocking(True)
-                            self.Print(f" SSL/TLS handshake successful for {addr[0]}:{addr[1]}", 20)
-                        except Exception as ssl_err:
-                            self.Print(f" SSL error for {addr[0]}:{addr[1]}: {ssl_err}", 40)
-                            ssl_sock = client_sock  # Fallback to plain socket
-                            ssl_sock.setblocking(True)
-                        
-                        # Handle client in separate thread (non-blocking)
-                        client_thread = threading.Thread(
-                            target=self.handle_client,
-                            args=(ssl_sock, addr),
-                            daemon=True
-                        )
-                        client_thread.start()
-                    except KeyboardInterrupt:
-                        self.Print(" Server shutting down...", 20)
-                        self.is_running = False
-                    except Exception as e:
-                        self.Print(f" Error accepting connection: {e}", 40)
-        
+            asyncio.run(self._run_server_async())
+        except KeyboardInterrupt:
+            self.Print(" Server shutting down...", 20)
         except Exception as e:
             self.Print(f" Critical server error: {e}", 40)
         finally:
-            self.Print(f" Server shutdown complete", 20)
-    
-    def handle_client(self, sock, addr):
-        """Handle a single client connection (non-blocking event loop)"""
-        session = None
+            self.is_running = False
+            self.Print(" Server shutdown complete", 20)
+
+    async def _run_server_async(self):
+        self.is_running = True
+        if ENABLE_UDP_DISCOVERY:
+            self._start_broadcast_listener()
+        self._start_block_confirmation_listener()
+
+        context = ssl_module.SSLContext(ssl_module.PROTOCOL_TLS_SERVER)
+        cert_path = _resolve_path(SSL_CERT_FILE)
+        key_path = _resolve_path(SSL_KEY_FILE)
+        context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+
+        async with websockets.serve(
+            self.handle_client,
+            self.host,
+            self.port,
+            ssl=context,
+            max_size=None,
+            ping_interval=20,
+            ping_timeout=20,
+        ):
+            self.Print(f" Server listening on wss://{self.server_ip}:{self.port}", 20)
+            await asyncio.Future()
+
+    async def _handle_upload_chunk_message(self, session, addr, message):
+        if not (isinstance(message, bytes) and message.startswith(UPLOAD_CHUNK_PREFIX)):
+            return False
+
+        response = "ERR|INVALID_ID"
         try:
+            parts = message.split(b"|", 2)
+            if len(parts) == 3 and len(parts[2]) >= 4:
+                upload_id = parts[1].decode("ascii").strip()
+                if upload_id and upload_id != "[]":
+                    sequence = struct.unpack("!I", parts[2][:4])[0]
+                    chunk_data = parts[2][4:]
+                    response = await asyncio.to_thread(
+                        session._handle_binary_chunk_inline,
+                        upload_id,
+                        sequence,
+                        chunk_data,
+                    )
+        except Exception as chunk_err:
+            self.Print(f" Malformed binary chunk from {addr[0]}:{addr[1]}: {chunk_err}", 40)
+
+        self.Print(f" {addr[0]}:{addr[1]} -> {response[:80]}", 10)
+        await session.proto.async_send_one_message(response.encode())
+        return True
+
+    async def _handle_asset_binary_message(self, session, addr, message):
+        if not (isinstance(message, bytes) and message.startswith(GET_ASSET_BINARY_PREFIX)):
+            return False
+
+        rel_path = message.split(b"|", 1)[1].decode("utf-8").strip()
+        self.Print(
+            f" {addr[0]}:{addr[1]} <- "
+            f"{serialize_command(ProtocolCommand.GET_ASSET_BINARY, rel_path)}",
+            20,
+        )
+        self.Print(f" Processing command: {ProtocolCommand.GET_ASSET_BINARY.value}", 10)
+
+        image_data = await asyncio.to_thread(_read_image_bytes, rel_path)
+        if image_data is None:
+            await session.proto.async_send_one_message(b"ERR05|Asset not found or unreadable")
+        else:
+            await session.proto.async_send_one_message(
+                serialize_response(ProtocolPrefix.ASSET_START, len(image_data)).encode()
+            )
+            await session.proto.async_send_one_message(image_data)
+        return True
+
+    @staticmethod
+    def _sanitize_for_wire_log(message):
+        if isinstance(message, str):
+            message_text = message
+        else:
+            message_text = message.decode("utf-8")
+        upload_init_prefix = f"{ProtocolCommand.UPLOAD_INIT.value}|"
+        if message_text.startswith(upload_init_prefix):
+            return message_text, f"{upload_init_prefix}<payload>"
+        return message_text, message_text
+
+    async def _dispatch_text_message(self, session, addr, message):
+        message_text, log_text = self._sanitize_for_wire_log(message)
+        self.Print(f" {addr[0]}:{addr[1]} <- {log_text}", 20)
+
+        response = await asyncio.to_thread(session.process_message, message_text)
+        if response is None:
+            return
+        response_preview = response if len(response) < 200 else f"{response[:197]}..."
+        self.Print(f" {addr[0]}:{addr[1]} -> {response_preview}", 20)
+        await session.proto.async_send_one_message(response.encode())
+
+    async def _process_client_message(self, session, addr, message):
+        if await self._handle_upload_chunk_message(session, addr, message):
+            return
+        if await self._handle_asset_binary_message(session, addr, message):
+            return
+        await self._dispatch_text_message(session, addr, message)
+
+    async def _cleanup_client_session(self, session, addr, websocket):
+        if session:
+            with self.upload_sessions_lock:
+                stale_upload_ids = [uid for uid, s in self.upload_sessions.items() if s.username == session.username]
+            for upload_id in stale_upload_ids:
+                await asyncio.to_thread(session._cleanup_upload, upload_id)
+            self.unregister_session(session)
+
+        with self.clients_lock:
+            if addr in self.clients:
+                del self.clients[addr]
+                self.Print(f" Client session removed for {addr[0]}:{addr[1]}", 20)
+
+        await websocket.close()
+        self.Print(f" Connection closed for {addr[0]}:{addr[1]}", 20)
+
+    async def handle_client(self, websocket):
+        """Handle a single WebSocket client connection."""
+        session = None
+        addr = _normalize_remote_address(getattr(websocket, "remote_address", None))
+        loop = asyncio.get_running_loop()
+        try:
+            self.Print(f" Connection attempt from {addr[0]}:{addr[1]}", 20)
             self.Print(f" Client connected {addr[0]}:{addr[1]} (session ready)", 20)
-            
-            # Create session for this client
-            session = ClientSession(sock, addr, self.logging_level, server=self)
+
+            session = ClientSession(websocket, addr, self.logging_level, server=self, loop=loop)
             with self.clients_lock:
                 self.clients[addr] = session
-            
-            # Receive messages until client disconnects
+
             while session.is_connected:
                 try:
-                    message = session.proto.recv_one_message()
-                    
+                    message = await session.proto.async_recv_one_message()
                     if message is None:
-                        self.Print(f" Client {addr[0]}:{addr[1]} disconnected (recv returned None)", 20)
+                        self.Print(f" Client {addr[0]}:{addr[1]} disconnected", 20)
                         session.is_connected = False
                         break
-                    
+
                     try:
-                        # ── Inline binary upload chunk ────────────────────────────────
-                        # UPLOAD_CHUNK|{upload_id}|{4-byte-seq}{raw-data}
-                        # Detected before UTF-8 decode to avoid failures on binary payload.
-                        if isinstance(message, bytes) and message.startswith(b"UPLOAD_CHUNK|"):
-                            try:
-                                parts = message.split(b"|", 2)
-                                if len(parts) != 3 or len(parts[2]) < 4:
-                                    response = "ERR|INVALID_ID"
-                                else:
-                                    upload_id = parts[1].decode('ascii').strip()
-                                    if not upload_id or upload_id == "[]":
-                                        response = "ERR|INVALID_ID"
-                                    else:
-                                        seq = struct.unpack('!I', parts[2][:4])[0]
-                                        chunk_data = parts[2][4:]
-                                        response = session._handle_binary_chunk_inline(upload_id, seq, chunk_data)
-                            except Exception as chunk_err:
-                                self.Print(f" Malformed binary chunk from {addr[0]}:{addr[1]}: {chunk_err}", 40)
-                                response = "ERR|INVALID_ID"
-                            self.Print(f" {addr[0]}:{addr[1]} -> {response[:80]}", 10)
-                            session.proto.send_one_message(response.encode())
-                            continue
-
-                        # ── Inline GET_ASSET_BINARY ───────────────────────────────────
-                        # Handle before UTF-8 decode; sends two frames (text + raw binary)
-                        # and must NOT go through process_message to avoid the binary
-                        # frame being read back as the next command.
-                        if isinstance(message, bytes) and message.startswith(b"GET_ASSET_BINARY|"):
-                            try:
-                                rel_path = message.split(b"|", 1)[1].decode('utf-8').strip()
-                                self.Print(f" {addr[0]}:{addr[1]} <- GET_ASSET_BINARY|{rel_path}", 20)
-                                self.Print(f" Processing command: GET_ASSET_BINARY", 10)
-                                image_data = _read_image_bytes(rel_path)
-                                if image_data is None:
-                                    session.proto.send_one_message(b"ERR05|Asset not found or unreadable")
-                                else:
-                                    session.proto.send_one_message(f"ASSET_START|{len(image_data)}".encode())
-                                    session.proto.send_one_message(image_data)
-                            except Exception as asset_err:
-                                self.Print(f" GET_ASSET_BINARY error from {addr[0]}:{addr[1]}: {asset_err}", 40)
-                                try:
-                                    session.proto.send_one_message(f"ERR99|{asset_err}".encode())
-                                except Exception:
-                                    pass
-                            continue
-
-                        msg_str = message.decode() if isinstance(message, bytes) else message
-                        log_msg = "UPLOAD_INIT|<payload>" if msg_str.startswith("UPLOAD_INIT|") else msg_str
-                        self.Print(f" {addr[0]}:{addr[1]} <- {log_msg}", 20)
-
-                        response = session.process_message(msg_str)
-
-                        if response is not None:
-                            resp_preview = response if len(response) < 200 else f"{response[:197]}..."
-                            self.Print(f" {addr[0]}:{addr[1]} -> {resp_preview}", 20)
-                            session.proto.send_one_message(response.encode())
-                    
+                        await self._process_client_message(session, addr, message)
                     except Exception as e:
                         self.Print(f" Error processing message from {addr[0]}:{addr[1]}: {e}", 40)
                         try:
-                            session.proto.send_one_message(f"ERR99|{str(e)}".encode())
-                        except:
+                            await session.proto.async_send_one_message(f"ERR99|{str(e)}".encode())
+                        except Exception:
                             self.Print(f" Failed to send error response to {addr[0]}:{addr[1]}", 40)
                             session.is_connected = False
                             break
-                
-                except ConnectionResetError:
-                    self.Print(f" Client {addr[0]}:{addr[1]} reset connection", 20)
-                    session.is_connected = False
-                except BrokenPipeError:
+
+                except ConnectionClosed:
                     self.Print(f" Client {addr[0]}:{addr[1]} closed connection", 20)
                     session.is_connected = False
                 except Exception as e:
                     self.Print(f" Error in message loop for {addr[0]}:{addr[1]}: {e}", 40)
                     session.is_connected = False
-        
+
         except Exception as e:
             self.Print(f" Critical error in handle_client for {addr[0]}:{addr[1]}: {e}", 40)
-        
+
         finally:
-            # Clean up
             try:
-                if session:
-                    with self.upload_sessions_lock:
-                        stale = [uid for uid, s in self.upload_sessions.items()
-                                 if s.username == session.username]
-                    for upload_id in stale:
-                        session._cleanup_upload(upload_id)
-                    self.unregister_session(session)
-                with self.clients_lock:
-                    if addr in self.clients:
-                        del self.clients[addr]
-                        self.Print(f" Client session removed for {addr[0]}:{addr[1]}", 20)
-                sock.close()
-                self.Print(f" Connection closed for {addr[0]}:{addr[1]}", 20)
+                await self._cleanup_client_session(session, addr, websocket)
             except Exception as cleanup_err:
                 self.Print(f" Error during cleanup for {addr[0]}:{addr[1]}: {cleanup_err}", 40)
 

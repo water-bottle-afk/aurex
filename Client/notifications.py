@@ -182,7 +182,7 @@ def build_notifications_view(app: "AurexFletApp") -> ft.View:
                     content=ft.Column(
                         spacing=20,
                         controls=[
-                            # ── header ───────────────────────────────────────
+                            # Header row with title and unread badge.
                             ft.Row(
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -235,7 +235,7 @@ def build_notifications_view(app: "AurexFletApp") -> ft.View:
                                     ),
                                 ],
                             ),
-                            # ── info banner ───────────────────────────────────
+                            # Info banner clarifies notification retention behavior.
                             ft.Container(
                                 padding=ft.padding.symmetric(horizontal=16, vertical=10),
                                 border_radius=12,
@@ -253,7 +253,7 @@ def build_notifications_view(app: "AurexFletApp") -> ft.View:
                                     ],
                                 ),
                             ),
-                            # ── list ─────────────────────────────────────────
+                            # Scrollable notification list.
                             content,
                         ],
                     ),

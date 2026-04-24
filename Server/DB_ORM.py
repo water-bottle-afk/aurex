@@ -6,13 +6,19 @@ SQLite database for users and marketplace items with email verification
 import sqlite3
 import hashlib
 import random
-import os
 import re
 import smtplib
 import ssl
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
+
+try:
+    from aurex_logging import AurexLogger
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from aurex_logging import AurexLogger
 
 # Hardcoded pepper (secret)
 PEPPER = "aurex_marketplace_2026_secret"
@@ -25,6 +31,7 @@ DB_PATH = str(DB_FOLDER / "marketplace.db")
 _EMAIL_SENDER = "aurex.main.service@gmail.com"
 _EMAIL_APP_PASSWORD = "sshb anri wzom zybg"
 
+logger = AurexLogger.get_logger(__name__)
 
 def send_reset_email(recipient: str, otp: str) -> bool:
     """Send a password-reset OTP to *recipient* via Gmail SMTP SSL."""
@@ -45,10 +52,10 @@ def send_reset_email(recipient: str, otp: str) -> bool:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as smtp:
             smtp.login(_EMAIL_SENDER, _EMAIL_APP_PASSWORD)
             smtp.sendmail(_EMAIL_SENDER, recipient, em.as_string())
-        print(f"[email] Reset code sent to {recipient}")
+        logger.info("[email] Reset code sent to %s", recipient)
         return True
     except Exception as exc:
-        print(f"[email] Failed to send to {recipient}: {exc}")
+        logger.error("[email] Failed to send to %s: %s", recipient, exc)
         return False
 
 
@@ -363,7 +370,7 @@ class MarketplaceDB:
                 return user
             return None
         except Exception as e:
-            print(f"Error getting user: {e}")
+            logger.error(f"Error getting user: {e}")
             return None
 
     def get_user_public_key(self, username):
@@ -378,7 +385,7 @@ class MarketplaceDB:
                 return row[0]
             return None
         except Exception as e:
-            print(f"Error getting user public key: {e}")
+            logger.error(f"Error getting user public key: {e}")
             return None
 
     def set_user_public_key(self, username, public_key, force_update=False):
@@ -411,7 +418,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error setting user public key: {e}")
+            logger.error(f"Error setting user public key: {e}")
             return False
     
     def set_user_public_key_force(self, username, public_key):
@@ -442,7 +449,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error registering wallet: {e}")
+            logger.error(f"Error registering wallet: {e}")
             return False
 
     def get_wallet_pubkey(self, username: str) -> str | None:
@@ -455,7 +462,7 @@ class MarketplaceDB:
             conn.close()
             return row[0] if row else None
         except Exception as e:
-            print(f"Error getting wallet pubkey: {e}")
+            logger.error(f"Error getting wallet pubkey: {e}")
             return None
 
     def get_user_by_email(self, email):
@@ -483,7 +490,7 @@ class MarketplaceDB:
                 return user
             return None
         except Exception as e:
-            print(f"Error getting user by email: {e}")
+            logger.error(f"Error getting user by email: {e}")
             return None
     
     def verify_user(self, username, password):
@@ -505,7 +512,7 @@ class MarketplaceDB:
                 return {'balance': row[0], 'updated_at': row[1] or datetime.now().isoformat()}
             return None
         except Exception as e:
-            print(f"Error getting wallet: {e}")
+            logger.error(f"Error getting wallet: {e}")
             return None
 
     def ensure_wallet(self, username, initial_balance=100):
@@ -529,7 +536,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error ensuring wallet: {e}")
+            logger.error(f"Error ensuring wallet: {e}")
             return False
 
     def update_balance(self, username, new_balance):
@@ -545,7 +552,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error updating balance: {e}")
+            logger.error(f"Error updating balance: {e}")
             return False
 
     def transfer(self, from_user, to_user, amount):
@@ -602,13 +609,13 @@ class MarketplaceDB:
         ]:
             if self.get_user(username) is None:
                 ok, msg = self.add_user(username, password, email)
-                print(f"  User {username}: {msg}")
+                logger.info(f"  User {username}: {msg}")
             else:
-                print(f"  User {username}: already exists")
+                logger.info(f"  User {username}: already exists")
             self.ensure_wallet(username, balance)
             w = self.get_wallet(username)
-            print(f"  Wallet {username}: balance={w['balance'] if w else 'N/A'}")
-        print("  Done: alice and bob ready (alice 100 coins, bob 0).")
+            logger.info(f"  Wallet {username}: balance={w['balance'] if w else 'N/A'}")
+        logger.info("  Done: alice and bob ready (alice 100 coins, bob 0).")
     
     def update_user(self, username, user):
         """Update user information (verification status, codes, password)"""
@@ -629,12 +636,12 @@ class MarketplaceDB:
             conn.commit()
             if cursor.rowcount == 0:
                 conn.close()
-                print(f"Warning: update_user matched no rows for username='{user.username}'")
+                logger.warning("update_user matched no rows for username='%s'", user.username)
                 return False
             conn.close()
             return True
         except Exception as e:
-            print(f"Error updating user: {e}")
+            logger.error(f"Error updating user: {e}")
             return False
     
     def add_marketplace_item(
@@ -770,7 +777,7 @@ class MarketplaceDB:
             conn.close()
             return deleted
         except Exception as e:
-            print(f"Error deleting pending asset: {e}")
+            logger.error(f"Error deleting pending asset: {e}")
             return False
     
     def get_all_items(self):
@@ -806,57 +813,9 @@ class MarketplaceDB:
                 })
             return items
         except Exception as e:
-            print(f"Error getting items: {e}")
+            logger.error(f"Error getting items: {e}")
             return []
     
-    def get_latest_items(self, limit=12):
-        """Get latest marketplace items ordered by created_at DESC (used by GET_ITEMS_PAGINATED)."""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
-                FROM marketplace_items
-                WHERE is_listed = 1
-                ORDER BY created_at DESC
-                LIMIT ?
-            ''', (limit,))
-            rows = cursor.fetchall()
-            conn.close()
-            return [
-                {'id': r[0], 'asset_name': r[1], 'description': r[2], 'username': r[3],
-                 'url': r[4], 'file_type': r[5], 'cost': r[6], 'asset_hash': r[7],
-                 'timestamp': r[8], 'created_at': r[9], 'is_listed': r[10]}
-                for r in rows
-            ]
-        except Exception as e:
-            print(f"Error in get_latest_items: {e}")
-            return []
-
-    def get_items_before_timestamp(self, last_timestamp, limit=12):
-        """Get marketplace items created before last_timestamp (cursor-based pagination)."""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT id, asset_name, description, username, url, file_type, cost, asset_hash, timestamp, created_at, is_listed
-                FROM marketplace_items
-                WHERE is_listed = 1 AND created_at < ?
-                ORDER BY created_at DESC
-                LIMIT ?
-            ''', (last_timestamp, limit))
-            rows = cursor.fetchall()
-            conn.close()
-            return [
-                {'id': r[0], 'asset_name': r[1], 'description': r[2], 'username': r[3],
-                 'url': r[4], 'file_type': r[5], 'cost': r[6], 'asset_hash': r[7],
-                 'timestamp': r[8], 'created_at': r[9], 'is_listed': r[10]}
-                for r in rows
-            ]
-        except Exception as e:
-            print(f"Error in get_items_before_timestamp: {e}")
-            return []
-
     def get_item_by_id(self, item_id):
         """Get marketplace item by ID"""
         try:
@@ -888,7 +847,7 @@ class MarketplaceDB:
                 }
             return None
         except Exception as e:
-            print(f"Error getting item: {e}")
+            logger.error(f"Error getting item: {e}")
             return None    
 
     def get_item_by_hash(self, asset_hash):
@@ -919,7 +878,7 @@ class MarketplaceDB:
                 }
             return None
         except Exception as e:
-            print(f"Error getting item by hash: {e}")
+            logger.error(f"Error getting item by hash: {e}")
             return None
     def get_items_paginated(self, limit=10, last_timestamp=None):
         """Get paginated marketplace items (lazy scrolling)
@@ -974,7 +933,7 @@ class MarketplaceDB:
                 })
             return items
         except Exception as e:
-            print(f"Error getting paginated items: {e}")
+            logger.error(f"Error getting paginated items: {e}")
             return []
 
     def get_latest_items(self, limit=10):
@@ -1005,7 +964,7 @@ class MarketplaceDB:
                 for row in results
             ]
         except Exception as e:
-            print(f"Error getting items by username: {e}")
+            logger.error(f"Error getting items by username: {e}")
             return []
 
     def set_item_listed(self, asset_id, is_listed):
@@ -1022,7 +981,7 @@ class MarketplaceDB:
             conn.close()
             return updated
         except Exception as e:
-            print(f"Error updating listing status: {e}")
+            logger.error(f"Error updating listing status: {e}")
             return False
 
     def set_item_listed_by_hash(self, asset_hash, is_listed):
@@ -1039,7 +998,7 @@ class MarketplaceDB:
             conn.close()
             return updated
         except Exception as e:
-            print(f"Error updating listing status by hash: {e}")
+            logger.error(f"Error updating listing status by hash: {e}")
             return False
 
     def delete_marketplace_item(self, asset_id):
@@ -1053,7 +1012,7 @@ class MarketplaceDB:
             conn.close()
             return deleted
         except Exception as e:
-            print(f"Error deleting marketplace item: {e}")
+            logger.error(f"Error deleting marketplace item: {e}")
             return False
 
     def delete_marketplace_item_by_hash(self, asset_hash):
@@ -1067,7 +1026,7 @@ class MarketplaceDB:
             conn.close()
             return deleted
         except Exception as e:
-            print(f"Error deleting marketplace item by hash: {e}")
+            logger.error(f"Error deleting marketplace item by hash: {e}")
             return False
 
     def update_item_listing(self, asset_id, is_listed, new_cost=None):
@@ -1103,7 +1062,7 @@ class MarketplaceDB:
             conn.close()
             return updated
         except Exception as e:
-            print(f"Error updating item listing: {e}")
+            logger.error(f"Error updating item listing: {e}")
             return False
 
     def update_asset_owner(self, asset_id, new_owner, new_owner_public_key=None):
@@ -1126,7 +1085,7 @@ class MarketplaceDB:
             conn.close()
             return updated
         except Exception as e:
-            print(f"Error updating asset owner: {e}")
+            logger.error(f"Error updating asset owner: {e}")
             return False
 
     def update_asset_owner_by_hash(self, asset_hash, new_owner, new_owner_public_key=None):
@@ -1149,7 +1108,7 @@ class MarketplaceDB:
             conn.close()
             return updated
         except Exception as e:
-            print(f"Error updating asset owner by hash: {e}")
+            logger.error(f"Error updating asset owner by hash: {e}")
             return False
 
     def create_notification(self, username, title, body, notif_type="system", asset_id=None, tx_id=None):
@@ -1178,7 +1137,7 @@ class MarketplaceDB:
                 'tx_id': tx_id,
             }
         except Exception as e:
-            print(f"Error creating notification: {e}")
+            logger.error(f"Error creating notification: {e}")
             return None
 
     def get_notifications(self, username, limit=50):
@@ -1211,7 +1170,7 @@ class MarketplaceDB:
                 for row in rows
             ]
         except Exception as e:
-            print(f"Error getting notifications: {e}")
+            logger.error(f"Error getting notifications: {e}")
             return []
 
     def get_unread_notifications_count(self, username):
@@ -1227,7 +1186,7 @@ class MarketplaceDB:
             conn.close()
             return int(row[0]) if row else 0
         except Exception as e:
-            print(f"Error getting unread notification count: {e}")
+            logger.error(f"Error getting unread notification count: {e}")
             return 0
 
     def mark_all_notifications_read(self, username):
@@ -1243,7 +1202,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error marking notifications read: {e}")
+            logger.error(f"Error marking notifications read: {e}")
             return False
 
     # ---- Device token management (push notifications) ----
@@ -1273,7 +1232,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error upserting device token: {e}")
+            logger.error(f"Error upserting device token: {e}")
             return False
 
     def get_device_tokens(self, username):
@@ -1289,7 +1248,7 @@ class MarketplaceDB:
             conn.close()
             return [r[0] for r in rows]
         except Exception as e:
-            print(f"Error getting device tokens: {e}")
+            logger.error(f"Error getting device tokens: {e}")
             return []
 
     def delete_device_token(self, token):
@@ -1302,5 +1261,7 @@ class MarketplaceDB:
             conn.close()
             return True
         except Exception as e:
-            print(f"Error deleting device token: {e}")
+            logger.error(f"Error deleting device token: {e}")
             return False
+
+

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import threading
 from typing import TYPE_CHECKING
 
@@ -10,7 +9,6 @@ from .theme import (
     AUREX_BG,
     AUREX_CARD,
     AUREX_GOLD,
-    AUREX_GOLD_SOFT,
     AUREX_MUTED,
     AUREX_SLATE,
     AUREX_SURFACE,
@@ -27,12 +25,12 @@ def build_my_assets_view(app: "AurexFletApp") -> ft.View:
     page = app.page
     username = app.session.user_data.username if app.session.user_data else ""
 
-    # ── state ─────────────────────────────────────────────────────────────────
+    # Mutable refs keep worker thread updates simple without global state.
     assets_ref: list = []        # filled by _load_worker
     loading_ref: list = [True]   # [0] = bool
     error_ref:   list = [None]   # [0] = str|None
 
-    # ── image helper ──────────────────────────────────────────────────────────
+    # Image helper prefers cache first, then triggers async prefetch.
     def _mime(url: str) -> str:
         return "image/png" if url.endswith(".png") else "image/jpeg"
 
@@ -58,7 +56,7 @@ def build_my_assets_view(app: "AurexFletApp") -> ft.View:
             content=ft.ProgressRing(width=24, height=24, stroke_width=2, color=AUREX_GOLD),
         )
 
-    # ── body placeholder (mutated after load) ─────────────────────────────────
+    # Placeholder body is rebuilt as load state changes.
     body = ft.Column(
         spacing=16,
         controls=[
@@ -364,7 +362,7 @@ def build_my_assets_view(app: "AurexFletApp") -> ft.View:
 
     _start_load()
 
-    # ── nav row ───────────────────────────────────────────────────────────────
+    # Header row with back navigation and primary action.
     nav_row = ft.Row(
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,

@@ -6,13 +6,10 @@ from typing import TYPE_CHECKING
 import flet as ft
 
 from .theme import (
-    AUREX_BG,
-    AUREX_CARD,
     AUREX_GOLD,
     AUREX_GOLD_SOFT,
     AUREX_MUTED,
     AUREX_SLATE,
-    AUREX_TEXT,
 )
 
 if TYPE_CHECKING:

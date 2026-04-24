@@ -87,7 +87,6 @@ def upload_marketplace_item_from_bytes(
 def build_upload_view(app: "AurexFletApp") -> ft.View:
     page = app.page
 
-    from . import wallet as _wallet
     current_username = app.session.user_data.username if app.session.user_data else None
     if not get_key_file_path(current_username).exists():
         return ft.View(
@@ -156,7 +155,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
             ],
         )
 
-    # ── file state (dict so closures share one mutable object) ─────────────────
+    # Shared mutable state for picker callbacks and upload worker.
     selected: dict = {"bytes": None, "name": "", "ext": ""}
     max_upload_bytes = 10 * 1024 * 1024  # 10MB safety cap for web + mobile
 
@@ -181,7 +180,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
     progress = ft.ProgressBar(value=0, visible=False, color=AUREX_GOLD)
 
     def set_status(message: str, *, error: bool = False, show: bool = True) -> None:
-        # Safe to call from any thread — schedules on the event loop.
+        # This may run from worker threads, so updates are marshaled to the UI loop.
         async def _apply() -> None:
             status_text.value = message
             status_text.color = "#EF4444" if error else AUREX_MUTED
@@ -190,7 +189,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
         page.run_task(_apply)
 
     def set_busy(is_busy: bool) -> None:
-        # Safe to call from any thread — schedules on the event loop.
+        # Same pattern as set_status: UI mutation must happen on the page loop.
         async def _apply() -> None:
             for control in (name_field, description_field, price_field, pick_button, upload_button):
                 control.disabled = is_busy
@@ -200,7 +199,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
 
     import base64 as _b64
 
-    # ── FilePicker: pick → upload → on_upload reads bytes from temp file ─────
+    # FilePicker flow uses Flet's upload server to avoid web-mode pick timeout.
     # Avoids await pick_files(with_data=True) which times out in Flet web.
     # Flow: pick_files() opens dialog → we validate and upload() to Flet's
     # local upload server → on_upload fires with temp path → we read raw bytes.
@@ -211,7 +210,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
             return
         if e.progress is not None and e.progress < 1.0:
             return  # still uploading
-        # File is fully uploaded — read from project-root/uploads/ which
+        # File is fully uploaded; read from the shared uploads directory.
         # matches the upload_dir passed to ft.run() in main.py.
         upload_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "uploads"
@@ -223,7 +222,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
         with open(file_path, "rb") as fh:
             raw = fh.read()
         if not raw:
-            set_status("Could not read file — try again", error=True)
+            set_status("Could not read file - try again", error=True)
             return
         if len(raw) > max_upload_bytes:
             set_status("File too large (max 10MB)", error=True)
@@ -298,14 +297,14 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
         def worker() -> None:
             try:
                 set_busy(True)
-                set_status("Connecting to server…")
+                set_status("Connecting to server...")
                 app.connect_if_needed(discover_first=False)
-                set_status(f"Uploading {len(file_bytes_snap):,} bytes…")
+                set_status(f"Uploading {len(file_bytes_snap):,} bytes...")
 
                 def on_progress(value: float) -> None:
                     progress.value = value
                     pct = int(value * 100)
-                    set_status(f"Uploading… {pct}%")
+                    set_status(f"Uploading... {pct}%")
 
                 result = upload_marketplace_item_from_bytes(
                     app,
@@ -319,7 +318,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
                     on_progress=on_progress,
                 )
                 if result == "success":
-                    set_status("Upload complete! ✓")
+                    set_status("Upload complete! OK")
                     app.load_marketplace_async(reset=True)
                     _notif.push_notification(
                         title="Asset sent to blockchain",
@@ -374,13 +373,13 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
                 content=ft.Column(
                     spacing=0,
                     controls=[
-                        # ── top accent strip ──────────────────────────────
+                        # Accent strip matches the marketplace highlight color.
                         ft.Container(
                             height=6,
                             border_radius=ft.border_radius.only(top_left=24, top_right=24),
                             bgcolor=AUREX_GOLD,
                         ),
-                        # ── body ─────────────────────────────────────────
+                        # Modal body explains blockchain confirmation timing.
                         ft.Container(
                             padding=ft.padding.symmetric(horizontal=32, vertical=28),
                             content=ft.Column(
@@ -508,7 +507,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
     inner = ft.Column(
         spacing=20,
         controls=[
-            # ── top bar ──────────────────────────────────────────────────────
+            # Top bar with title and back navigation.
             ft.Row(
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -529,7 +528,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
                     ),
                 ],
             ),
-            # ── form card ────────────────────────────────────────────────────
+            # Main form card for metadata and file selection.
             ft.Container(
                 padding=ft.padding.symmetric(horizontal=24, vertical=20),
                 border_radius=20,
@@ -572,7 +571,7 @@ def build_upload_view(app: "AurexFletApp") -> ft.View:
                     ],
                 ),
             ),
-            # ── info strip ───────────────────────────────────────────────────
+            # Info strip explains constraints and expected upload behavior.
             ft.Container(
                 padding=ft.padding.symmetric(horizontal=16, vertical=12),
                 border_radius=14,

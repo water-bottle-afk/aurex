@@ -184,7 +184,10 @@ $env:AUREX_WALLET_DIR = "D:\my_keys"
 ```
 
 ### TLS certificates
-Certs are loaded from `Server/cert.pem` and `Server/key.pem`. Replace these with your own for production.
+Backend WSS certs are loaded from `HTTPS/server.crt` and `HTTPS/server.key`.
+Flet browser HTTPS uses the same files by default (`AUREX_FLET_CERT_FILE`, `AUREX_FLET_KEY_FILE` can override).
+Client trust uses `HTTPS/rootCA.crt` by default (`AUREX_CA_CERT_FILE` can override).
+UDP broadcast discovery is disabled by default; enable only if needed with `AUREX_ENABLE_UDP_DISCOVERY=1`.
 
 ---
 
@@ -199,12 +202,12 @@ aurex/
 │   ├── settings.py       # Settings: wallet keygen, server config, logout
 │   ├── login.py / signup.py / forgot.py
 │   ├── wallet.py         # Ed25519 keygen, PEM storage, sign/verify
-│   ├── protocol_client.py# Binary-framed TLS TCP client
+│   ├── protocol_client.py# WSS client (TLS + CA validation)
 │   ├── session.py        # UserSession, UserData
 │   ├── models.py         # MarketplaceItem, ItemOffering, etc.
 │   └── theme.py          # Color constants
 ├── Server/
-│   ├── server_module.py  # Marketplace TCP server (auth, upload, buy)
+│   ├── server_module.py  # Marketplace WSS server (auth, upload, buy)
 │   └── DB_ORM.py         # SQLite ORM (users, wallets, items, notifications)
 ├── blockchain/
 │   ├── gateway_server.py # Gateway: signature verify + node broadcast

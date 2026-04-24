@@ -1,26 +1,34 @@
 __author__ = "Nadav Cohen"
 
-"""
-The classes.py stores classes being used through the project.
-"""
+"""Transport and logging utilities used by the server runtime."""
 
-import socket
-import threading
-import struct
+import asyncio
 import logging
+import sys
+import threading
+from pathlib import Path
+
+try:
+    from aurex_logging import AurexLogger
+    from protocol_definitions import UPLOAD_CHUNK_PREFIX
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from aurex_logging import AurexLogger
+    from protocol_definitions import UPLOAD_CHUNK_PREFIX
+from websockets.exceptions import ConnectionClosed
 
 
 class PROTO:
-    # Known binary prefixes — logged as <binary N bytes> without crashing.
+    # Keep logs readable: these frames are expected binary payloads, not text commands.
     _BINARY_PREFIXES = (
         b"\xff\xd8",   # JPEG
         b"\x89PNG",   # PNG
     )
 
-    def log(self, dirct, data):
+    def log(self, direction, data):
         try:
             decoded = data.decode()
-            if decoded.startswith("UPLOAD_CHUNK|"):
+            if decoded.startswith(UPLOAD_CHUNK_PREFIX.decode("utf-8")):
                 parts = decoded.split("|", 4)
                 if len(parts) >= 4:
                     decoded = f"{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|<chunk>"
@@ -28,89 +36,94 @@ class PROTO:
                 decoded = "UPLOAD_INIT|<payload>"
             data = decoded
         except Exception:
-            # Binary frame — check for known image signatures first so we
-            # don't try to decode raw JPEG/PNG bytes (0xff / 0x89 are not
-            # valid UTF-8 start bytes and would raise a UnicodeDecodeError).
+            # Avoid decoding unknown bytes; keep enough context for debugging.
             if any(data.startswith(sig) for sig in self._BINARY_PREFIXES):
                 data = f"<binary image {len(data)} bytes>"
             elif data[:5] == b'GETKY':
                 data = data[:6].hex() + data[6:].hex()
             else:
-                # Safe hex fallback — never call .decode() on unknown binary.
                 data = f"<binary {len(data)} bytes> [{data[:8].hex()}...]"
-        if dirct == '1':
+        if direction == '1':
             self.Print("got <<<<< " + data, 10)
         else:
             self.Print("sent >>>>> " + data, 10)
 
-    def __init__(self, who_get, logging_level, tid=None, cln_sock=None):
+    def __init__(self, who_get, logging_level, tid=None, cln_sock=None, loop=None):
         self.who_get = who_get
         self.logging_level = logging_level
         self.tid = tid
-        if cln_sock is not None:
-            self.sock = cln_sock
-        else:
-            self.sock = socket.socket()
+        self.sock = cln_sock
+        self.loop = loop
         self.lock = threading.Lock()
         self.logger = CustomLogger(f"PROTO for: {self.who_get}", logging_level)
         self.Print = self.logger.Print
         self.logging_level = logging_level
-
+        self._async_send_lock = None
         self.name = ""
 
-    def connect(self, ip, port):
-        self.sock.connect((ip, port))
+    def _coerce_payload(self, data: bytes):
+        if isinstance(data, str):
+            return data
+        if data.startswith(UPLOAD_CHUNK_PREFIX):
+            return data
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data
 
-    def send_one_message(self, data: bytes, encryption=False):
-        """Send message with 4-byte length prefix (TLS handles encryption)"""
-        message = data
-        with self.lock:
-            self.sock.send(struct.pack('!I', len(message)) + message)
+    async def _send_payload(self, payload):
+        if self.sock is None:
+            raise RuntimeError("WebSocket is not connected")
+        if self._async_send_lock is None:
+            self._async_send_lock = asyncio.Lock()
+        async with self._async_send_lock:
+            await self.sock.send(payload)
+
+    async def async_send_one_message(self, data: bytes, encryption=False):
+        """Send a full WebSocket frame."""
+        payload = self._coerce_payload(data)
+        await self._send_payload(payload)
         self.log("2", data)
 
-    def recv_one_message(self, encryption=False):
-        """Receive message with 4-byte length prefix (TLS handles decryption)"""
-        len_section = self.__recv_amount(4)
-        if not len_section:
+    def send_one_message(self, data: bytes, encryption=False):
+        """Send a full WebSocket frame from non-async code."""
+        if self.loop is None:
+            raise RuntimeError("WebSocket loop is not configured")
+        future = asyncio.run_coroutine_threadsafe(
+            self.async_send_one_message(data, encryption=encryption),
+            self.loop,
+        )
+        future.result()
+
+    async def async_recv_one_message(self, encryption=False):
+        """Receive a full WebSocket frame."""
+        if self.sock is None:
             return None
-        len_int, = struct.unpack('!I', len_section)
-        data = self.__recv_amount(len_int)
-
-        if len_int != len(data):
-            data = b''
-
+        try:
+            payload = await self.sock.recv()
+        except ConnectionClosed:
+            return None
+        data = payload.encode("utf-8") if isinstance(payload, str) else payload
         self.log("1", data)
         return data
 
-    def __recv_amount(self, size):
-        buffer = b''
-        while size:
-            try:
-                new_buffer = self.sock.recv(size)
-                if not new_buffer:
-                    # Socket closed by peer
-                    return buffer if buffer else None
-                buffer += new_buffer
-                size -= len(new_buffer)
-            except socket.timeout:
-                # Timeout - return what we have so far
-                return buffer if buffer else None
-            except Exception as e:
-                # Other socket errors
-                self.Print(f"Socket receive error: {e}", 40)
-                return buffer if buffer else None
-        return buffer
+    def recv_one_message(self, encryption=False):
+        """Receive a full WebSocket frame from non-async code."""
+        if self.loop is None:
+            raise RuntimeError("WebSocket loop is not configured")
+        future = asyncio.run_coroutine_threadsafe(
+            self.async_recv_one_message(encryption=encryption),
+            self.loop,
+        )
+        return future.result()
 
     def close(self):
         self.Print(f"Closes {self.who_get} socket!", 10)
-        self.sock.close()
 
 
 class ColoredFormatter(logging.Formatter):
-    """
-    A custom formatter that adds color to log messages based on their level.
-    """
-    # Define ANSI escape codes for colors
+    """Formatter that colorizes output by severity for local debugging."""
+
     BLACK = '\033[30m'
     RED = '\033[31m'
     GREEN = '\033[32m'
@@ -137,21 +150,8 @@ class ColoredFormatter(logging.Formatter):
 
 class CustomLogger:
     def __init__(self, name, logging_level=logging.DEBUG):
-        self.logger = logging.getLogger(name)
+        self.logger = AurexLogger.get_logger(name)
         self.logger.setLevel(logging_level)
-        self.logger.propagate = False
-
-        # Only add handler if none exist
-        if not self.logger.handlers:
-            ch = logging.StreamHandler() # output direction: console
-            ch.setLevel(logging_level)
-
-            colored_formatter = ColoredFormatter(
-                fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                datefmt='%H:%M:%S'
-            )
-            ch.setFormatter(colored_formatter)
-            self.logger.addHandler(ch)
 
         self.dict_of_logs = {
             10: self.logger.debug,

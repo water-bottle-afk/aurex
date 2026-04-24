@@ -19,7 +19,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
     current_username = user.username if user else None
     key_file = _wallet.get_key_file_path(current_username)
 
-    # ── server connection ────────────────────────────────────────────────────
+    # Connection fields are editable so the same build can target local or remote servers.
     host_field = ft.TextField(
         label="Server IP",
         border_radius=16,
@@ -44,7 +44,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
         app.client.set_server_address(host, port)
         app.show_message("Server settings updated")
 
-    # ── wallet section state ─────────────────────────────────────────────────
+    # Wallet section tracks availability and status text independently from profile data.
     has_key = key_file.exists()
 
     pubkey_display = ft.TextField(
@@ -89,7 +89,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
         disabled=not has_key,
     )
 
-    # ── inline status label shown inside the wallet section ─────────────────
+    # Inline status keeps wallet feedback close to the action buttons.
     wallet_status_label = ft.Text(
         "",
         size=12,
@@ -285,7 +285,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
             dest = Path.home() / "Downloads" / "aurex_keys_backup.json"
             dest.write_text(payload, encoding="utf-8")
             _set_wallet_status(f"Backup saved: {dest}")
-            app.show_message(f"Keys saved to Downloads/aurex_keys_backup.json")
+            app.show_message("Keys saved to Downloads/aurex_keys_backup.json")
         except Exception as exc:
             _set_wallet_status(f"Save failed: {exc}", error=True)
             app.show_message(f"Save failed: {exc}", error=True)
@@ -329,7 +329,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
             _set_wallet_status(f"Key generation failed: {exc}", error=True)
             app.show_message(f"Key generation failed: {exc}", error=True)
 
-    # ── danger dialog for key regeneration ───────────────────────────────────
+    # Regeneration gets a dedicated warning dialog because it can orphan old assets.
     _regen_dialog_ref: list[ft.Control] = []
 
     def _dismiss_regen_dialog() -> None:
@@ -498,7 +498,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
     inner = ft.Column(
         spacing=20,
         controls=[
-            # ── top bar ──────────────────────────────────────────────────────
+            # Page header.
             ft.Row(
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -519,7 +519,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
                     ),
                 ],
             ),
-            # ── Profile ──────────────────────────────────────────────────────
+            # Profile section.
             _section(
                 "User Profile", ft.Icons.PERSON_OUTLINE,
                 [
@@ -554,12 +554,12 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
                     ),
                 ],
             ),
-            # ── Wallet ───────────────────────────────────────────────────────
+            # Wallet section.
             _section(
                 "Wallet & Identity", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED,
                 wallet_controls,
             ),
-            # ── Connection ───────────────────────────────────────────────────
+            # Connection section.
             _section(
                 "Server Connection", ft.Icons.DNS_OUTLINED,
                 [
@@ -577,7 +577,7 @@ def build_settings_view(app: "AurexFletApp") -> ft.View:
                     ),
                 ],
             ),
-            # ── Session ──────────────────────────────────────────────────────
+            # Session controls.
             _section(
                 "Session", ft.Icons.MANAGE_ACCOUNTS_OUTLINED,
                 [

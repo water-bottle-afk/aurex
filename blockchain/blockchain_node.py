@@ -74,7 +74,7 @@ class BlockchainNode:
         self.running = False
         print(f" {self.node_name} stopped")
 
-    # ── Direct gateway submission helpers ─────────────────────────────────
+    # These wrappers keep node callers unaware of gateway transport details.
 
     def _send_to_gateway(self, payload, timeout=10):
         """

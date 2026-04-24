@@ -79,7 +79,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
             content=ft.ProgressRing(width=26, height=26, stroke_width=2, color=AUREX_GOLD),
         )
 
-    # ── modal helpers ─────────────────────────────────────────────────────────
+    # Modal helpers keep overlay lifecycle logic in one place.
     def _show_modal(content: ft.Control, overlay_ref: list) -> None:
         modal = ft.Container(
             expand=True, bgcolor="#000000CC",
@@ -100,7 +100,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
             overlay_ref.clear()
             page.update()
 
-    # ── buy worker ────────────────────────────────────────────────────────────
+    # Run purchase + tx polling in a worker thread so the UI stays responsive.
     def _buy_item(item: MarketplaceItem) -> None:
         if not app.session.is_authenticated:
             app.show_message("Please log in to buy", error=True)
@@ -146,7 +146,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
                 app.show_message(f"Purchase failed: {exc}", error=True)
         threading.Thread(target=_worker, daemon=True).start()
 
-    # ── detail popup ──────────────────────────────────────────────────────────
+    # Detailed modal view for one marketplace item.
     def show_item_detail(item: MarketplaceItem) -> None:
         overlay_ref: list[ft.Control] = []
         cached = app.session.image_cache.get(item.image_url)
@@ -267,7 +267,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
         )
         _show_modal(card, overlay_ref)
 
-    # ── card builder ──────────────────────────────────────────────────────────
+    # Compact card used inside the responsive marketplace grid.
     def build_item_card(item: MarketplaceItem) -> ft.Control:
         image_stack = ft.Stack(
             controls=[
@@ -382,7 +382,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
     _bal = app.session.wallet_balance
     _balance_text = f"${_bal:.2f}" if isinstance(_bal, (int, float)) else "—"
 
-    # ── grid / state area ─────────────────────────────────────────────────────
+    # Switch view based on loading/error/empty/data state.
     if app.market_error and not app.session.market_items:
         grid: ft.Control = ft.Container(
             padding=40,
@@ -489,7 +489,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
             ],
         )
 
-    # ── top navbar ────────────────────────────────────────────────────────────
+    # Top navigation and quick actions.
     unread = _notif.unread_count()
     notif_bell = ft.Stack(
         width=40, height=40,
@@ -561,7 +561,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
                         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
                         on_click=lambda _: page.run_task(page.push_route, "/my_assets"),
                     ),
-                    # ── wallet balance chip ───────────────────────────────────
+                    # Keep balance visible near buy actions to reduce purchase mistakes.
                     ft.Container(
                         height=36,
                         padding=ft.padding.symmetric(horizontal=12, vertical=0),
@@ -619,7 +619,7 @@ def build_marketplace_view(app: "AurexFletApp") -> ft.View:
         ],
     )
 
-    # ── stats bar ─────────────────────────────────────────────────────────────
+    # Status strip for item counts and live loading feedback.
     stats_bar = ft.Container(
         padding=ft.padding.symmetric(horizontal=20, vertical=12),
         border_radius=14,

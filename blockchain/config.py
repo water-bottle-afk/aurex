@@ -1,10 +1,6 @@
-"""
-Blockchain Configuration and Constants
-"""
+"""Shared configuration for blockchain nodes and gateway services."""
 
-# ============================================================================
-# NETWORK CONFIGURATION
-# ============================================================================
+# Network configuration
 POW_DEFAULT_PORT = 13245
 POA_DEFAULT_PORT = 13246
 # Five node ports for PoW race (RPC broadcasts to all)
@@ -29,24 +25,18 @@ GOSSIP_FANOUT = 3  # max peers a sender contacts per tx (gateway + nodes)
 MAX_NEIGHBORS = 3  # per-node outgoing neighbor limit
 ENABLE_MINING_SPINNER = False
 
-# ============================================================================
-# CONSENSUS CONFIGURATION
-# ============================================================================
+# Consensus configuration
 POW_MODE = "POW"
 POA_MODE = "POA"
 DEFAULT_POW_DIFFICULTY = 2
 MINING_PROGRESS_INTERVAL = 100000  # Log progress every N attempts
 
-# ============================================================================
-# MESSAGE TYPES
-# ============================================================================
+# Message types
 MSG_TYPE_BLOCK_FOUND = "BLOCK_FOUND"
 MSG_TYPE_BLOCK_COMMITTED = "BLOCK_COMMITTED"
 MSG_TYPE_NEW_TRANSACTION = "NEW_TRANSACTION"
 
-# ============================================================================
-# BLOCK FIELDS
-# ============================================================================
+# Block payload fields
 BLOCK_FIELD_INDEX = 'index'
 BLOCK_FIELD_TIMESTAMP = 'timestamp'
 BLOCK_FIELD_DATA = 'data'
@@ -57,9 +47,7 @@ BLOCK_FIELD_MINER = 'miner'
 BLOCK_FIELD_SIGNER_ID = 'signer_id'
 BLOCK_FIELD_SIGNATURE = 'signature'
 
-# ============================================================================
-# MESSAGE FIELDS
-# ============================================================================
+# Generic message fields
 MSG_FIELD_TYPE = 'type'
 MSG_FIELD_CONTENT = 'content'
 MSG_FIELD_SENDER = 'sender'
@@ -68,9 +56,7 @@ MSG_FIELD_TIMESTAMP = 'timestamp'
 MSG_FIELD_ID = 'id'
 MSG_FIELD_SIG = 'sig'
 
-# ============================================================================
-# VALIDATION CONSTANTS
-# ============================================================================
+# Validation constants
 MIN_NONCE = 0
 HASH_ALGORITHM = 'sha256'
 SIGNATURE_PREFIX = "SIG_"
@@ -79,9 +65,7 @@ TX_TIME_WINDOW_SECONDS = 300
 ENFORCE_MINER_ALLOWLIST = False
 ALLOWED_MINER_KEY_FINGERPRINTS = set()
 
-# ============================================================================
-# ERROR MESSAGES
-# ============================================================================
+# Error messages
 ERROR_INVALID_DATA = "Invalid or missing data"
 ERROR_INVALID_BLOCK = "Invalid block format"
 ERROR_MISSING_BLOCK_FIELD = "Block missing required field"

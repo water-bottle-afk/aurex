@@ -3,7 +3,15 @@ Aurex Server Configuration
 Update these settings when you change physical locations or network configuration
 """
 
+import logging
 import os
+
+from aurex_logging import AurexLogger
+
+
+def _env_flag(name: str, default: str = "1") -> bool:
+    value = os.getenv(name, default).strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 # Server Configuration
 SERVER_HOST = os.getenv("AUREX_SERVER_HOST", "0.0.0.0")  # Bind address
@@ -20,10 +28,11 @@ GATEWAY_PORT = 5000
 # Broadcast Discovery Configuration
 BROADCAST_PORT = 12345   # UDP port for WHRSRV discovery
 BROADCAST_TIMEOUT = 5    # Seconds to wait for discovery response
+ENABLE_UDP_DISCOVERY = os.getenv("AUREX_ENABLE_UDP_DISCOVERY", "0") == "1"
 
 # SSL/TLS Configuration
-SSL_CERT_FILE = 'cert.pem'
-SSL_KEY_FILE = 'key.pem'
+SSL_CERT_FILE = '../HTTPS/server.crt'
+SSL_KEY_FILE = '../HTTPS/server.key'
 
 # Database Configuration (ORM: DB/marketplace.db)
 DATABASE_FOLDER = '../DB'
@@ -60,10 +69,18 @@ FCM_ENABLED = False
 FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
 
 # Logging
-LOGGING_LEVEL = 10  # 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL
+DEBUG_MODE = _env_flag("AUREX_DEBUG_MODE", os.getenv("DEBUG_MODE", "1"))
+LOGGING_LEVEL = logging.DEBUG if DEBUG_MODE else logging.WARNING
+LOG_FORMAT = "%(asctime)s | %(filename)s | %(levelname)s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-print(" Config loaded: Server running on {server_host}:{server_port} (broadcast ip: {server_ip})".format(
-    server_host=SERVER_HOST,
-    server_port=SERVER_PORT,
-    server_ip=SERVER_IP or "auto",
-))
+AurexLogger.configure(DEBUG_MODE)
+
+logger = AurexLogger.get_logger(__name__)
+
+logger.info(
+    "Config loaded: Server running on %s:%s (broadcast ip: %s)",
+    SERVER_HOST,
+    SERVER_PORT,
+    SERVER_IP or "auto",
+)

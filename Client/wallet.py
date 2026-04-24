@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from aurex_logging import AurexLogger
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.serialization import (
@@ -28,6 +29,8 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
+
+logger = AurexLogger.get_logger(__name__)
 
 
 def _default_wallet_dir() -> Path:
@@ -145,13 +148,9 @@ def generate_user_keys(
     pub_b64 = base64.b64encode(pub_raw).decode("ascii")
     pub_file.write_text(pub_b64 + "\n", encoding="utf-8")
 
-    print(
-        "\n"
-        "============================================================\n"
-        "  KEY GENERATED - CRITICAL SECURITY NOTICE\n"
-        f"  Private key saved to: {str(key_file)}\n"
-        "  Back up this file now.\n"
-        "============================================================\n"
+    logger.warning(
+        "KEY GENERATED - CRITICAL SECURITY NOTICE | Private key saved to: %s | Back up this file now.",
+        str(key_file),
     )
     return pub_b64, str(key_file)
 
@@ -216,3 +215,4 @@ def generate_tx_id(prefix: str, username: str, asset_id: str | None = None) -> s
     parts.extend([str(now_ms), rand])
     raw = "_".join(parts)
     return "".join(ch for ch in raw if ch.isalnum() or ch == "_")
+

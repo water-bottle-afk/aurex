@@ -385,7 +385,7 @@ def _record_block_confirmation(confirmation):
             action = data.get('action', '')
             tx_id = data.get('tx_id', '')
 
-            # ── MINT: new asset registered on-chain ───────────────────────────
+            # MINT: register a new asset and move it from pending to listed.
             if action == 'asset_mint':
                 asset_hash = data.get('asset_hash', '')
                 asset_name = data.get('asset_name', '')
@@ -414,7 +414,7 @@ def _record_block_confirmation(confirmation):
                 )
                 continue
 
-            # ── PURCHASE: buyer pays seller, buyer gets asset ownership ────────
+            # PURCHASE: transfer funds and ownership atomically when possible.
             if action in ('asset_purchase', 'purchase'):
                 buyer = data.get('from') or tx.get('sender', '')  # buyer pays
                 seller = data.get('to') or ''                      # seller receives money
@@ -463,7 +463,7 @@ def _record_block_confirmation(confirmation):
                     )
                 continue
 
-            # ── ASSET_TRANSFER: non-monetary ownership transfer ────────────────
+            # ASSET_TRANSFER: ownership change without payment flow.
             if action == 'asset_transfer':
                 from_user = data.get('from') or tx.get('sender', '')
                 to_user = data.get('to') or ''
@@ -493,7 +493,7 @@ def _record_block_confirmation(confirmation):
                 )
                 continue
 
-            # ── Generic fallback ──────────────────────────────────────────────
+            # Generic fallback for plain wallet transfers.
             from_user = data.get('from') or tx.get('sender') or ''
             to_user = data.get('to') or data.get('seller') or ''
             amount = data.get('amount') if data.get('amount') is not None else data.get('price') or 0
@@ -509,7 +509,7 @@ def _record_block_confirmation(confirmation):
         conn.commit()
         conn.close()
 
-        # ── Write a human-readable snapshot to gateway_ledger.json ───────────
+        # Keep a readable ledger snapshot for audit/debug workflows.
         _append_gateway_ledger({
             'block_index': block_index,
             'block_hash': block_hash,

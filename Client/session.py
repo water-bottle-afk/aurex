@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import ssl
 import threading
 import uuid
+from typing import Any
 
 from .models import ItemOffering, MarketplaceItem, NotificationItem, ServerEvent
 
@@ -17,7 +17,7 @@ class UserData:
 @dataclass
 class UserSession:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    socket: ssl.SSLSocket | None = None
+    socket: Any | None = None
     host: str | None = None
     port: int | None = None
     user_data: UserData | None = None
