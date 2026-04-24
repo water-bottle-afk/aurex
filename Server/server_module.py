@@ -62,7 +62,7 @@ try:
     from Server.config import (
         SERVER_HOST, SERVER_PORT, SERVER_IP,
         BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
-        LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
+        BLOCK_CONFIRMATION_PORT,
         GATEWAY_HOST, GATEWAY_PORT,
         ENABLE_UDP_DISCOVERY,
         UPLOADS_DIR,
@@ -70,7 +70,7 @@ try:
         TX_TIME_WINDOW_SECONDS,
         FCM_ENABLED, FCM_SERVER_KEY,
     )
-    from Server.classes import PROTO, CustomLogger
+    from Server.classes import PROTO
     from Server.DB_ORM import MarketplaceDB, send_reset_email
 except ModuleNotFoundError:
     # Allow running this file directly from the Server folder:
@@ -78,7 +78,7 @@ except ModuleNotFoundError:
     from config import (
         SERVER_HOST, SERVER_PORT, SERVER_IP,
         BROADCAST_PORT, SSL_CERT_FILE, SSL_KEY_FILE,
-        LOGGING_LEVEL, BLOCK_CONFIRMATION_PORT,
+        BLOCK_CONFIRMATION_PORT,
         GATEWAY_HOST, GATEWAY_PORT,
         ENABLE_UDP_DISCOVERY,
         UPLOADS_DIR,
@@ -86,14 +86,14 @@ except ModuleNotFoundError:
         TX_TIME_WINDOW_SECONDS,
         FCM_ENABLED, FCM_SERVER_KEY,
     )
-    from classes import PROTO, CustomLogger
+    from classes import PROTO
     from DB_ORM import MarketplaceDB, send_reset_email
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 _UPLOADS_DIR_PATH = (Path(__file__).parent / UPLOADS_DIR).resolve()
 _UPLOADS_DIR_PATH.mkdir(parents=True, exist_ok=True)
 
-server_logger = AurexLogger.get_logger("server")
+server_logger = AurexLogger.get_logger(__name__)
 
 
 def _read_image_bytes(filename: str, max_width: int = 400) -> bytes | None:
@@ -242,15 +242,13 @@ class UploadSession:
 
 class ClientSession:
     """Represents one authenticated client connection"""
-    def __init__(self, sock, addr, logging_level, server, loop):
+    def __init__(self, sock, addr, server, loop):
         self.socket = sock
         self.address = addr
         self.server = server
         
-        self.proto = PROTO("ClientSession", logging_level=logging_level, cln_sock=sock, loop=loop)
-        
-        self.logger = CustomLogger(f"Session-{addr[0]}:{addr[1]}", logging_level)
-        self.Print = self.logger.Print
+        self.proto = PROTO(cln_sock=sock, loop=loop)
+        self.logger = AurexLogger.get_logger(__name__)
         
         self.username = None
         self.server.unregister_session(self)
@@ -303,20 +301,20 @@ class ClientSession:
             tail = list(parsed.parts)
             
             if command not in self.handlers:
-                self.Print(f" Unknown command: {command}", 40)
-                self.Print(f"   Available commands: {', '.join(self.handlers.keys())}", 30)
+                self.logger.error(f" Unknown command: {command}")
+                self.logger.warning(f"   Available commands: {', '.join(self.handlers.keys())}")
                 return f"ERR02|Unknown command: {command}"
             
             handler = self.handlers[command]
-            self.Print(f" Processing command: {command}", 10)
+            self.logger.debug(f" Processing command: {command}")
             return handler(tail)
         except Exception as e:
-            self.Print(f" Error processing message: {e}", 40)
+            self.logger.error(f" Error processing message: {e}")
             return f"ERR99|{str(e)}"
     
     def handle_start(self, params):
         """Protocol Message 1: START - Initialize connection"""
-        self.Print(" START message received - accepting connection", 20)
+        self.logger.info(" START message received - accepting connection")
         return serialize_response(ProtocolPrefix.ACCEPT, "Connection accepted")
     
     def handle_login(self, params):
@@ -325,7 +323,7 @@ class ClientSession:
         Returns: OK|username or ERR|error_message
         """
         if len(params) < 2:
-            self.Print(" Invalid login format", 40)
+            self.logger.error(" Invalid login format")
             return "ERR01|Invalid login format"
         
         username = params[0].strip()
@@ -333,7 +331,7 @@ class ClientSession:
         
         # Validate username format
         if not username or '|' in username or ' ' in username:
-            self.Print(f" Invalid username format: {username}", 40)
+            self.logger.error(f" Invalid username format: {username}")
             return "ERR01|Invalid username format"
         
         try:
@@ -342,13 +340,13 @@ class ClientSession:
                 self.username = username
                 self.is_authenticated = True
                 self.server.register_authenticated_session(self)
-                self.Print(f" [RECV] LOGIN|{username}|***", 20)
-                self.Print(f" User {username} logged in", 20)
+                self.logger.info(f" [RECV] LOGIN|{username}|***")
+                self.logger.info(f" User {username} logged in")
                 return f"OK|{username}"
-            self.Print(f" Invalid credentials for {username}", 40)
+            self.logger.error(f" Invalid credentials for {username}")
             return "ERR01|user not found"
         except Exception as e:
-            self.Print(f" Login error: {e}", 40)
+            self.logger.error(f" Login error: {e}")
             return f"ERR99|{str(e)}"
     
     def handle_signup(self, params):
@@ -356,13 +354,12 @@ class ClientSession:
         Format: SIGNUP|username|password|email
         Returns: OK|username or ERR|error_message
         """
-        self.Print(
+        self.logger.info(
             f" [SIGNUP] handler entered params_count={len(params)} "
-            f"has_public_key={len(params) >= 4}",
-            20,
+            f"has_public_key={len(params) >= 4}"
         )
         if len(params) < 3:
-            self.Print(" Invalid signup format", 40)
+            self.logger.error(" Invalid signup format")
             return "ERR10|Invalid signup format: SIGNUP|username|password|email"
         
         username = params[0].strip()
@@ -371,27 +368,27 @@ class ClientSession:
         
         # Validate fields - no pipes or spaces
         if '|' in username or '|' in password or '|' in email:
-            self.Print(" Invalid characters in signup fields", 40)
+            self.logger.error(" Invalid characters in signup fields")
             return "ERR10|Fields cannot contain '|'"
         
         if username != params[0] or password != params[1]:
-            self.Print(" Fields have leading/trailing spaces", 40)
+            self.logger.error(" Fields have leading/trailing spaces")
             return "ERR10|Fields cannot have leading/trailing spaces"
         
         # Validate inputs
         if not username or not password or not email:
-            self.Print(" Missing required fields for signup", 40)
+            self.logger.error(" Missing required fields for signup")
             return "ERR10|Missing required fields"
         
         # Username validation: 3-20 chars, alphanumeric + underscore
         import re
         if not re.match(r'^[a-zA-Z0-9_]{3,20}$', username):
-            self.Print(f" Invalid username format: {username}", 40)
+            self.logger.error(f" Invalid username format: {username}")
             return "ERR10|Username: 3-20 chars, alphanumeric + underscore only"
         
         # Password validation: min 6 chars
         if len(password) < 6:
-            self.Print(" Password too short", 40)
+            self.logger.error(" Password too short")
             return "ERR10|Password must be at least 6 characters"
         
         if ' ' in email or '@' not in email:
@@ -399,26 +396,25 @@ class ClientSession:
 
         # Explicit duplicate checks before insertion.
         if self.db.get_user(username):
-            self.Print(f" Signup blocked: username already exists ({username})", 40)
+            self.logger.error(f" Signup blocked: username already exists ({username})")
             return "ERR10|Username already exists"
         if self.db.get_user_by_email(email):
-            self.Print(f" Signup blocked: email already exists ({email})", 40)
+            self.logger.error(f" Signup blocked: email already exists ({email})")
             return "ERR10|Email already exists"
 
         public_key = params[3].strip() if len(params) >= 4 else None
         if public_key and "|" in public_key:
             return "ERR10|Invalid public key"
-        self.Print(
+        self.logger.info(
             f" [SIGNUP] username={username} email={email} "
-            f"public_key_len={len(public_key) if public_key else 0}",
-            20,
+            f"public_key_len={len(public_key) if public_key else 0}"
         )
 
         success, message = self.db.add_user(username, password, email, public_key=public_key)
         if success:
-            self.Print(f" User {username} signed up", 20)
+            self.logger.info(f" User {username} signed up")
             return f"OK|{username}"
-        self.Print(f" Signup failed: {message}", 40)
+        self.logger.error(f" Signup failed: {message}")
         return f"ERR10|{message}"
 
     def handle_send_code(self, params):
@@ -427,24 +423,24 @@ class ClientSession:
         Returns: OK|otp_sent or ERR|error_message
         """
         if len(params) < 1:
-            self.Print(" Invalid SEND_CODE format", 40)
+            self.logger.error(" Invalid SEND_CODE format")
             return "ERR04|Invalid format: SEND_CODE|email"
         
         email = params[0].strip()
         
         if not email or '|' in email or ' ' in email:
-            self.Print(" Invalid email format", 40)
+            self.logger.error(" Invalid email format")
             return "ERR04|Invalid email format"
         user_obj = self.db.get_user_by_email(email)
         if not user_obj:
-            self.Print(f" Email {email} not registered", 40)
+            self.logger.error(f" Email {email} not registered")
             return "ERR04|Email not found in system"
         now = datetime.datetime.now()
         if user_obj.verification_code and user_obj.reset_time:
             try:
                 expiry = datetime.datetime.fromisoformat(user_obj.reset_time)
                 if now < expiry:
-                    self.Print(f" Reusing existing reset code for {email}", 20)
+                    self.logger.info(f" Reusing existing reset code for {email}")
                     # Re-send the existing OTP via email (don't expose it in the response)
                     otp_to_send = user_obj.verification_code
                     import threading as _t
@@ -460,7 +456,7 @@ class ClientSession:
         user_obj.set_verification_code(otp)
         user_obj.set_reset_time((datetime.datetime.now() + datetime.timedelta(minutes=5)).isoformat())
         self.db.update_user(user_obj.username, user_obj)
-        self.Print(f" Generated reset code for {email}", 20)
+        self.logger.info(f" Generated reset code for {email}")
         # Send OTP via email in background thread — never expose it in the protocol response.
         import threading as _t
         _t.Thread(target=send_reset_email, args=(email, otp), daemon=True).start()
@@ -472,25 +468,25 @@ class ClientSession:
         Returns: OK|token or ERR|error_message
         """
         if len(params) < 2:
-            self.Print(" Invalid VERIFY_CODE format", 40)
+            self.logger.error(" Invalid VERIFY_CODE format")
             return "ERR08|Invalid format: VERIFY_CODE|email|otp_code"
         
         email = params[0].strip()
         otp_code = params[1].strip()
         
         if not email or not otp_code or '|' in email or '|' in otp_code:
-            self.Print(" Invalid verify code inputs", 40)
+            self.logger.error(" Invalid verify code inputs")
             return "ERR08|Invalid input format"
         user_obj = self.db.get_user_by_email(email)
         if not user_obj:
-            self.Print(f" Email {email} not found", 40)
+            self.logger.error(f" Email {email} not found")
             return "ERR08|Email not found"
         if user_obj.is_code_match_and_available(datetime.datetime.now(), otp_code):
             user_obj.is_verified = True
             self.db.update_user(user_obj.username, user_obj)
-            self.Print(f" OTP verified for {email}", 20)
+            self.logger.info(f" OTP verified for {email}")
             return f"OK|RESET_{user_obj.username}_{int(time.time())}"
-        self.Print(f" Invalid or expired OTP for {email}", 40)
+        self.logger.error(f" Invalid or expired OTP for {email}")
         return "ERR08|Invalid or expired OTP"
 
     def handle_update_password(self, params):
@@ -499,25 +495,25 @@ class ClientSession:
         Returns: OK or ERR|error_message
         """
         if len(params) < 2:
-            self.Print(" Invalid UPDATE_PASSWORD format", 40)
+            self.logger.error(" Invalid UPDATE_PASSWORD format")
             return "ERR07|Invalid format: UPDATE_PASSWORD|email|new_password"
         
         email = params[0].strip()
         new_password = params[1].strip()
         
         if not email or not new_password or '|' in email or '|' in new_password:
-            self.Print(" Invalid password update inputs", 40)
+            self.logger.error(" Invalid password update inputs")
             return "ERR07|Invalid input format"
         if len(new_password) < 6:
-            self.Print(" New password too short", 40)
+            self.logger.error(" New password too short")
             return "ERR07|Password must be at least 6 characters"
         user_obj = self.db.get_user_by_email(email)
         if not user_obj:
-            self.Print(f" Email {email} not found", 40)
+            self.logger.error(f" Email {email} not found")
             return "ERR07|Email not found"
         user_obj.set_password(new_password)
         self.db.update_user(user_obj.username, user_obj)
-        self.Print(f" Password updated for {email}", 20)
+        self.logger.info(f" Password updated for {email}")
         return "OK|Password updated successfully"
 
     def handle_logout(self, params):
@@ -529,7 +525,7 @@ class ClientSession:
         self.is_authenticated = False
         username = self.username
         self.username = None
-        self.Print(f" User {username} logged out", 20)
+        self.logger.info(f" User {username} logged out")
         return "OK|logged_out"
 
     def _normalize_file_type(self, file_type: str) -> str:
@@ -570,7 +566,7 @@ class ClientSession:
             return "ERR03|Not authenticated"
         
         if len(params) < 5:
-            self.Print(f"[RECV] UPLOAD - Invalid format, got {len(params)} params", 40)
+            self.logger.error(f"[RECV] UPLOAD - Invalid format, got {len(params)} params")
             return "ERR01|Invalid format: UPLOAD|asset_name|username|url|file_type|cost"
         
         try:
@@ -603,7 +599,7 @@ class ClientSession:
             )
             
             if success:
-                self.Print(f" Asset uploaded: {asset_name} by {username} - \\${cost}", 20)
+                self.logger.info(f" Asset uploaded: {asset_name} by {username} - \\${cost}")
                 self.create_and_push_notification(
                     username=username,
                     title="Asset uploaded",
@@ -613,13 +609,13 @@ class ClientSession:
                 )
                 return f"OK|Asset '{asset_name}' uploaded successfully"
             else:
-                self.Print(f" Failed to upload asset: {message}", 40)
+                self.logger.error(f" Failed to upload asset: {message}")
                 return f"ERR03|{message}"
                 
         except ValueError:
             return "ERR01|Invalid cost format"
         except Exception as e:
-            self.Print(f" Error processing UPLOAD: {e}", 40)
+            self.logger.error(f" Error processing UPLOAD: {e}")
             return f"ERR99|{str(e)}"
 
     def handle_upload_init(self, params):
@@ -734,7 +730,7 @@ class ClientSession:
         with self.server.upload_sessions_lock:
             session = self.server.upload_sessions.get(upload_id)
         if not session:
-            self.Print(f" ERR04: upload_id={upload_id!r} not found", 40)
+            self.logger.error(f" ERR04: upload_id={upload_id!r} not found")
             return "ERR|INVALID_ID"
         if session.username != self.username:
             return "ERR02|Unauthorized"
@@ -852,7 +848,7 @@ class ClientSession:
         self._cleanup_upload(upload_id)
         if not success:
             return f"ERR03|{message}"
-        self.Print(f" Asset uploaded: {session.asset_name} by {session.username} - ${session.cost}", 20)
+        self.logger.info(f" Asset uploaded: {session.asset_name} by {session.username} - ${session.cost}")
         # Queue mint transaction to blockchain
 
         mint_job = {
@@ -913,10 +909,10 @@ class ClientSession:
             import json
             items = self.db.get_all_items()
             response = f"OK|{json.dumps(items)}"
-            self.Print(f" GET_ITEMS: returned {len(items)} items", 20)
+            self.logger.info(f" GET_ITEMS: returned {len(items)} items")
             return response
         except Exception as e:
-            self.Print(f"? Error processing GET_ITEMS: {e}", 40)
+            self.logger.error(f"? Error processing GET_ITEMS: {e}")
             return f"ERR03|Error getting items: {str(e)}"
 
     def handle_get_items_paginated(self, params):
@@ -926,14 +922,14 @@ class ClientSession:
         import json
         
         if len(params) < 1:
-            self.Print("[RECV] GET_ITEMS_PAGINATED - Invalid format", 40)
+            self.logger.error("[RECV] GET_ITEMS_PAGINATED - Invalid format")
             return "ERR01|Invalid format"
         
         try:
             limit = int(params[0].strip())
             lastTimestamp = params[1].strip() if len(params) > 1 and params[1].strip() else None
             
-            self.Print(f"[RECV] GET_ITEMS_PAGINATED|{limit}|{lastTimestamp}", 20)
+            self.logger.info(f"[RECV] GET_ITEMS_PAGINATED|{limit}|{lastTimestamp}")
             
             try:
                 db = MarketplaceDB()
@@ -950,19 +946,19 @@ class ClientSession:
                         for r in items
                     ]
                     response = f"OK|{json.dumps(items_list)}"
-                    self.Print(f"[SEND] OK|{len(items_list)} items", 20)
+                    self.logger.info(f"[SEND] OK|{len(items_list)} items")
                     return response
                 response = "OK|[]"
-                self.Print("[SEND] OK|0 items (no more items)", 20)
+                self.logger.info("[SEND] OK|0 items (no more items)")
                 return response
             except Exception as db_error:
-                self.Print(f" Database error: {db_error}", 40)
+                self.logger.error(f" Database error: {db_error}")
                 return f"ERR03|Database error: {str(db_error)}"
         except ValueError as ve:
-            self.Print(f"[RECV] GET_ITEMS_PAGINATED - Invalid parameters: {ve}", 40)
+            self.logger.error(f"[RECV] GET_ITEMS_PAGINATED - Invalid parameters: {ve}")
             return "ERR01|Invalid parameters"
         except Exception as e:
-            self.Print(f" Error processing GET_ITEMS_PAGINATED: {e}", 40)
+            self.logger.error(f" Error processing GET_ITEMS_PAGINATED: {e}")
             return f"ERR99|{str(e)}"
 
     def handle_buy_asset(self, params):
@@ -973,7 +969,7 @@ class ClientSession:
         if not self.is_authenticated:
             return "ERR03|Not authenticated"
         if len(params) < 7:
-            self.Print("[RECV] BUY - Invalid format", 40)
+            self.logger.error("[RECV] BUY - Invalid format")
             return "ERR01|Invalid format: BUY|asset_id|username|amount|tx_id|timestamp|public_key|signature"
 
         try:
@@ -986,10 +982,9 @@ class ClientSession:
             public_key = params[5].strip()
             signature = params[6].strip()
 
-            self.Print(
+            self.logger.info(
                 f" Processing purchase: session_user={username} requested_user={requested_username} "
-                f"asset={asset_id} amount={amount}",
-                20,
+                f"asset={asset_id} amount={amount}"
             )
 
             if requested_username and requested_username != username:
@@ -1000,7 +995,7 @@ class ClientSession:
                 return "ERR02|Asset not found"
 
             seller = (item.get('username') or "").strip()
-            self.Print(f" BUY ownership check: buyer={username} seller={seller} asset={asset_id}", 20)
+            self.logger.info(f" BUY ownership check: buyer={username} seller={seller} asset={asset_id}")
             if seller == username:
                 return "ERR02|Cannot buy your own asset"
 
@@ -1073,14 +1068,14 @@ class ClientSession:
                 }
             self.server.tx_queue.put(purchase)
 
-            self.Print(f" Purchase queued for PoW: {tx_id}", 20)
+            self.logger.info(f" Purchase queued for PoW: {tx_id}")
             return f"OK|PENDING|{tx_id}"
 
         except ValueError as ve:
-            self.Print(f"[RECV] BUY - Invalid parameters: {ve}", 40)
+            self.logger.error(f"[RECV] BUY - Invalid parameters: {ve}")
             return "ERR01|Invalid amount format"
         except Exception as e:
-            self.Print(f" Error processing BUY: {e}", 40)
+            self.logger.error(f" Error processing BUY: {e}")
             return f"ERR99|{str(e)}"
 
     def handle_send_asset(self, params):
@@ -1091,7 +1086,7 @@ class ClientSession:
         if not self.is_authenticated:
             return "ERR02|Not authenticated"
         if len(params) < 7:
-            self.Print("[RECV] SEND - Invalid format", 40)
+            self.logger.error("[RECV] SEND - Invalid format")
             return "ERR01|Invalid format: SEND|asset_id|sender|receiver|tx_id|timestamp|public_key|signature"
         
         try:
@@ -1146,7 +1141,7 @@ class ClientSession:
             if not _verify_ed25519_signature(public_key, msg_bytes, signature):
                 return "ERR02|Invalid signature"
 
-            self.Print(f" Processing asset send: {sender_username} -> {receiver_username} (asset: {asset_id})", 20)
+            self.logger.info(f" Processing asset send: {sender_username} -> {receiver_username} (asset: {asset_id})")
 
             transfer = {
                 'tx_id': tx_id,
@@ -1177,11 +1172,11 @@ class ClientSession:
                 }
             self.server.tx_queue.put(transfer)
 
-            self.Print(f" Asset transfer queued for PoW: {tx_id}", 20)
+            self.logger.info(f" Asset transfer queued for PoW: {tx_id}")
             return f"OK|PENDING|{tx_id}"
             
         except Exception as e:
-            self.Print(f" Error processing SEND: {e}", 40)
+            self.logger.error(f" Error processing SEND: {e}")
             return f"ERR99|{str(e)}"
 
     def handle_get_profile(self, params):
@@ -1191,21 +1186,21 @@ class ClientSession:
         Returns: OK|username|email|created_at or ERR|error_message
         """
         if len(params) < 1:
-            self.Print("[RECV] GET_PROFILE - Invalid format", 40)
+            self.logger.error("[RECV] GET_PROFILE - Invalid format")
             return "ERR01|Invalid format: GET_PROFILE|username"
         try:
             username = params[0].strip()
             if not username or '|' in username:
-                self.Print(" Invalid username format", 40)
+                self.logger.error(" Invalid username format")
                 return "ERR01|Invalid username"
             user_obj = self.db.get_user(username)
             if not user_obj:
-                self.Print(f" User {username} not found", 40)
+                self.logger.error(f" User {username} not found")
                 return "ERR02|User not found"
-            self.Print(f" Profile retrieved for {username}", 20)
+            self.logger.info(f" Profile retrieved for {username}")
             return f"OK|{username}|{user_obj.email}|{user_obj.created_at}"
         except Exception as e:
-            self.Print(f" Error processing GET_PROFILE: {e}", 40)
+            self.logger.error(f" Error processing GET_PROFILE: {e}")
             return f"ERR99|{str(e)}"
 
     def handle_get_tx_status(self, params):
@@ -1384,7 +1379,7 @@ class ClientSession:
         try:
             ok = self.db.set_user_public_key_force(username, new_pk)
             if ok:
-                self.Print(f" Public key updated for {username}", 20)
+                self.logger.info(f" Public key updated for {username}")
                 return "OK|updated"
             return "ERR03|Failed to update public key"
         except Exception as e:
@@ -1463,13 +1458,11 @@ class ClientSession:
 class Server:
     """Main server that handles all client connections"""
     
-    def __init__(self, host=SERVER_HOST, port=SERVER_PORT, logging_level=LOGGING_LEVEL):
+    def __init__(self, host=SERVER_HOST, port=SERVER_PORT):
         self.host = host
         self.port = port
         self.server_ip = _resolve_server_ip(SERVER_IP, host)  # Broadcast response IP
-        self.logging_level = logging_level
-        self.logger = CustomLogger("Server", logging_level)
-        self.Print = self.logger.Print
+        self.logger = AurexLogger.get_logger(__name__)
         
         self.clients_lock = threading.Lock()
         self.clients = {}  # addr -> ClientSession
@@ -1759,7 +1752,7 @@ class Server:
                 broadcast_sock.settimeout(1.0)  # 1 second timeout to allow checking is_running
                 broadcast_sock.bind(('0.0.0.0', BROADCAST_PORT))
                 
-                self.Print(f" Broadcast listener started on port {BROADCAST_PORT}", 20)
+                self.logger.info(f" Broadcast listener started on port {BROADCAST_PORT}")
                 
                 while self.is_running:
                     try:
@@ -1769,15 +1762,15 @@ class Server:
                         if DiscoveryRequest.matches(message):
                             response = DiscoveryResponse(host=self.server_ip, port=self.port).to_text()
                             broadcast_sock.sendto(response.encode("utf-8"), addr)
-                            self.Print(f" Broadcast response sent to {addr}: {response}", 10)
+                            self.logger.debug(f" Broadcast response sent to {addr}: {response}")
                     except socket.timeout:
                         continue
                     except Exception as e:
-                        self.Print(f" Broadcast listener error: {e}", 10)
+                        self.logger.debug(f" Broadcast listener error: {e}")
                 
                 broadcast_sock.close()
             except Exception as e:
-                self.Print(f" Failed to start broadcast listener: {e}", 10)
+                self.logger.debug(f" Failed to start broadcast listener: {e}")
         
         # Start broadcast listener in a separate thread
         thread = threading.Thread(target=broadcast_loop, daemon=True)
@@ -1792,7 +1785,7 @@ class Server:
                 sock.bind(('0.0.0.0', BLOCK_CONFIRMATION_PORT))
                 sock.listen(5)
                 sock.settimeout(1.0)
-                self.Print(" Block confirmation listener on port %s" % BLOCK_CONFIRMATION_PORT, 20)
+                self.logger.info(" Block confirmation listener on port %s" % BLOCK_CONFIRMATION_PORT)
                 while self.is_running:
                     try:
                         client, addr = sock.accept()
@@ -1813,8 +1806,11 @@ class Server:
                                         "block_confirmation block_index=%s block_hash=%s miner_id=%s",
                                         msg.get('block_index'), msg.get('block_hash', '')[:16], msg.get('miner_id')
                                     )
-                                    self.Print(" Block confirmed: index=%s hash=%s..." % (
-                                        msg.get('block_index'), (msg.get('block_hash') or '')[:16]), 20)
+                                    self.logger.info(
+                                        " Block confirmed: index=%s hash=%s...",
+                                        msg.get('block_index'),
+                                        (msg.get('block_hash') or '')[:16],
+                                    )
                                     for tx in msg.get('transactions', []):
                                         tx_data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
                                         action = tx_data.get('action')
@@ -2025,7 +2021,7 @@ class Server:
                                                 ok, res = self.db.transfer(from_user, to_user, amt_val)
                                                 if ok:
                                                     server_logger.info("wallet transfer: %s -> %s amount=%s: %s", from_user, to_user, amt_val, res)
-                                                    self.Print(" Saved: %s" % res, 20)
+                                                    self.logger.info(" Saved: %s" % res)
                                                     wa, wb = self.db.get_wallet(from_user), self.db.get_wallet(to_user)
                                                     if wa and wb:
                                                         server_logger.info("balances: %s=%.2f %s=%.2f", from_user, wa['balance'], to_user, wb['balance'])
@@ -2092,7 +2088,7 @@ class Server:
         if asset_hash:
             deleted = self.db.delete_pending_asset_by_hash(asset_hash)
         if deleted:
-            self.Print(f" Mint failed; removed pending asset {asset_id or asset_hash}", 30)
+            self.logger.warning(f" Mint failed; removed pending asset {asset_id or asset_hash}")
         if metadata_link:
             try:
                 path = _resolve_upload_file(metadata_link)
@@ -2264,16 +2260,16 @@ class Server:
     
     def start(self):
         """Start the WSS server."""
-        self.Print(f" Server starting on {self.host}:{self.port}...", 20)
+        self.logger.info(f" Server starting on {self.host}:{self.port}...")
         try:
             asyncio.run(self._run_server_async())
         except KeyboardInterrupt:
-            self.Print(" Server shutting down...", 20)
+            self.logger.info(" Server shutting down...")
         except Exception as e:
-            self.Print(f" Critical server error: {e}", 40)
+            self.logger.error(f" Critical server error: {e}")
         finally:
             self.is_running = False
-            self.Print(" Server shutdown complete", 20)
+            self.logger.info(" Server shutdown complete")
 
     async def _run_server_async(self):
         self.is_running = True
@@ -2295,7 +2291,7 @@ class Server:
             ping_interval=20,
             ping_timeout=20,
         ):
-            self.Print(f" Server listening on wss://{self.server_ip}:{self.port}", 20)
+            self.logger.info(f" Server listening on wss://{self.server_ip}:{self.port}")
             await asyncio.Future()
 
     async def _handle_upload_chunk_message(self, session, addr, message):
@@ -2317,9 +2313,9 @@ class Server:
                         chunk_data,
                     )
         except Exception as chunk_err:
-            self.Print(f" Malformed binary chunk from {addr[0]}:{addr[1]}: {chunk_err}", 40)
+            self.logger.error(f" Malformed binary chunk from {addr[0]}:{addr[1]}: {chunk_err}")
 
-        self.Print(f" {addr[0]}:{addr[1]} -> {response[:80]}", 10)
+        self.logger.debug(f" {addr[0]}:{addr[1]} -> {response[:80]}")
         await session.proto.async_send_one_message(response.encode())
         return True
 
@@ -2328,12 +2324,11 @@ class Server:
             return False
 
         rel_path = message.split(b"|", 1)[1].decode("utf-8").strip()
-        self.Print(
+        self.logger.info(
             f" {addr[0]}:{addr[1]} <- "
-            f"{serialize_command(ProtocolCommand.GET_ASSET_BINARY, rel_path)}",
-            20,
+            f"{serialize_command(ProtocolCommand.GET_ASSET_BINARY, rel_path)}"
         )
-        self.Print(f" Processing command: {ProtocolCommand.GET_ASSET_BINARY.value}", 10)
+        self.logger.debug(f" Processing command: {ProtocolCommand.GET_ASSET_BINARY.value}")
 
         image_data = await asyncio.to_thread(_read_image_bytes, rel_path)
         if image_data is None:
@@ -2358,13 +2353,13 @@ class Server:
 
     async def _dispatch_text_message(self, session, addr, message):
         message_text, log_text = self._sanitize_for_wire_log(message)
-        self.Print(f" {addr[0]}:{addr[1]} <- {log_text}", 20)
+        self.logger.info(f" {addr[0]}:{addr[1]} <- {log_text}")
 
         response = await asyncio.to_thread(session.process_message, message_text)
         if response is None:
             return
         response_preview = response if len(response) < 200 else f"{response[:197]}..."
-        self.Print(f" {addr[0]}:{addr[1]} -> {response_preview}", 20)
+        self.logger.info(f" {addr[0]}:{addr[1]} -> {response_preview}")
         await session.proto.async_send_one_message(response.encode())
 
     async def _process_client_message(self, session, addr, message):
@@ -2385,10 +2380,10 @@ class Server:
         with self.clients_lock:
             if addr in self.clients:
                 del self.clients[addr]
-                self.Print(f" Client session removed for {addr[0]}:{addr[1]}", 20)
+                self.logger.info(f" Client session removed for {addr[0]}:{addr[1]}")
 
         await websocket.close()
-        self.Print(f" Connection closed for {addr[0]}:{addr[1]}", 20)
+        self.logger.info(f" Connection closed for {addr[0]}:{addr[1]}")
 
     async def handle_client(self, websocket):
         """Handle a single WebSocket client connection."""
@@ -2396,10 +2391,10 @@ class Server:
         addr = _normalize_remote_address(getattr(websocket, "remote_address", None))
         loop = asyncio.get_running_loop()
         try:
-            self.Print(f" Connection attempt from {addr[0]}:{addr[1]}", 20)
-            self.Print(f" Client connected {addr[0]}:{addr[1]} (session ready)", 20)
+            self.logger.info(f" Connection attempt from {addr[0]}:{addr[1]}")
+            self.logger.info(f" Client connected {addr[0]}:{addr[1]} (session ready)")
 
-            session = ClientSession(websocket, addr, self.logging_level, server=self, loop=loop)
+            session = ClientSession(websocket, addr, server=self, loop=loop)
             with self.clients_lock:
                 self.clients[addr] = session
 
@@ -2407,36 +2402,36 @@ class Server:
                 try:
                     message = await session.proto.async_recv_one_message()
                     if message is None:
-                        self.Print(f" Client {addr[0]}:{addr[1]} disconnected", 20)
+                        self.logger.info(f" Client {addr[0]}:{addr[1]} disconnected")
                         session.is_connected = False
                         break
 
                     try:
                         await self._process_client_message(session, addr, message)
                     except Exception as e:
-                        self.Print(f" Error processing message from {addr[0]}:{addr[1]}: {e}", 40)
+                        self.logger.error(f" Error processing message from {addr[0]}:{addr[1]}: {e}")
                         try:
                             await session.proto.async_send_one_message(f"ERR99|{str(e)}".encode())
                         except Exception:
-                            self.Print(f" Failed to send error response to {addr[0]}:{addr[1]}", 40)
+                            self.logger.error(f" Failed to send error response to {addr[0]}:{addr[1]}")
                             session.is_connected = False
                             break
 
                 except ConnectionClosed:
-                    self.Print(f" Client {addr[0]}:{addr[1]} closed connection", 20)
+                    self.logger.info(f" Client {addr[0]}:{addr[1]} closed connection")
                     session.is_connected = False
                 except Exception as e:
-                    self.Print(f" Error in message loop for {addr[0]}:{addr[1]}: {e}", 40)
+                    self.logger.error(f" Error in message loop for {addr[0]}:{addr[1]}: {e}")
                     session.is_connected = False
 
         except Exception as e:
-            self.Print(f" Critical error in handle_client for {addr[0]}:{addr[1]}: {e}", 40)
+            self.logger.error(f" Critical error in handle_client for {addr[0]}:{addr[1]}: {e}")
 
         finally:
             try:
                 await self._cleanup_client_session(session, addr, websocket)
             except Exception as cleanup_err:
-                self.Print(f" Error during cleanup for {addr[0]}:{addr[1]}: {cleanup_err}", 40)
+                self.logger.error(f" Error during cleanup for {addr[0]}:{addr[1]}: {cleanup_err}")
 
 
 # Entry point
@@ -2444,7 +2439,7 @@ if __name__ == "__main__":
     server = Server(
         host=SERVER_HOST,
         port=SERVER_PORT,
-        logging_level=LOGGING_LEVEL,
     )
     
     server.start()
+

@@ -3,9 +3,7 @@ __author__ = "Nadav Cohen"
 """Transport and logging utilities used by the server runtime."""
 
 import asyncio
-import logging
 import sys
-import threading
 from pathlib import Path
 
 try:
@@ -19,6 +17,8 @@ from websockets.exceptions import ConnectionClosed
 
 
 class PROTO:
+    logger = AurexLogger.get_logger(__name__)
+
     # Keep logs readable: these frames are expected binary payloads, not text commands.
     _BINARY_PREFIXES = (
         b"\xff\xd8",   # JPEG
@@ -44,20 +44,14 @@ class PROTO:
             else:
                 data = f"<binary {len(data)} bytes> [{data[:8].hex()}...]"
         if direction == '1':
-            self.Print("got <<<<< " + data, 10)
+            self.logger.debug("got <<<<< %s", data)
         else:
-            self.Print("sent >>>>> " + data, 10)
+            self.logger.debug("sent >>>>> %s", data)
 
-    def __init__(self, who_get, logging_level, tid=None, cln_sock=None, loop=None):
-        self.who_get = who_get
-        self.logging_level = logging_level
+    def __init__(self, tid=None, cln_sock=None, loop=None):
         self.tid = tid
         self.sock = cln_sock
         self.loop = loop
-        self.lock = threading.Lock()
-        self.logger = CustomLogger(f"PROTO for: {self.who_get}", logging_level)
-        self.Print = self.logger.Print
-        self.logging_level = logging_level
         self._async_send_lock = None
         self.name = ""
 
@@ -118,48 +112,4 @@ class PROTO:
         return future.result()
 
     def close(self):
-        self.Print(f"Closes {self.who_get} socket!", 10)
-
-
-class ColoredFormatter(logging.Formatter):
-    """Formatter that colorizes output by severity for local debugging."""
-
-    BLACK = '\033[30m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
-    CYAN = '\033[36m'
-    WHITE = '\033[0m'
-
-    def format(self, record):
-        log_message = super().format(record)
-
-        if record.levelno == logging.WARNING:
-            return f"{self.YELLOW}{log_message}{self.WHITE}"
-        elif record.levelno in (logging.ERROR, logging.CRITICAL):
-            return f"{self.RED}{log_message}{self.WHITE}"
-        elif record.levelno == logging.INFO:
-            return f"{self.CYAN}{log_message}{self.WHITE}"
-        elif record.levelno == logging.DEBUG:
-            return f"{self.GREEN}{log_message}{self.WHITE}"
-        else:
-            return log_message
-
-
-class CustomLogger:
-    def __init__(self, name, logging_level=logging.DEBUG):
-        self.logger = AurexLogger.get_logger(name)
-        self.logger.setLevel(logging_level)
-
-        self.dict_of_logs = {
-            10: self.logger.debug,
-            20: self.logger.info,
-            30: self.logger.warning,
-            40: self.logger.error,
-            50: self.logger.critical
-        }
-
-    def Print(self, msg, level):  # instead of print()
-        self.dict_of_logs[level](msg)
+        self.logger.debug("Closes socket")
