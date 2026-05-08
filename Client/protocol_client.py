@@ -41,6 +41,15 @@ from .wallet import (
     sign_message,
 )
 
+try:
+    from blockchain.networking import build_protocol_message as build_encrypted_protocol_message
+    from blockchain.networking import discover_gateway as discover_encrypted_gateway
+    from blockchain.networking import EncryptedClient as AurexEncryptedClient
+except Exception:  # pragma: no cover - fallback for environments without blockchain module path
+    build_encrypted_protocol_message = None
+    discover_encrypted_gateway = None
+    AurexEncryptedClient = None
+
 
 class ProtocolError(RuntimeError):
     pass
@@ -64,6 +73,9 @@ class AurexProtocolClient:
         self.port = port or int(os.getenv("AUREX_SERVER_PORT", "23456"))
         self.discovery_port = discovery_port
         self.enable_udp_discovery = os.getenv("AUREX_ENABLE_UDP_DISCOVERY", "0") == "1"
+        self.enable_encrypted_gateway = os.getenv("AUREX_UI_ENCRYPTED_GATEWAY", "0") == "1"
+        self.encrypted_gateway_host = os.getenv("AUREX_GATEWAY_HOST", "").strip()
+        self.encrypted_gateway_port = int(os.getenv("AUREX_GATEWAY_PORT", "5000"))
         self.on_server_event: Callable[[ServerEvent], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
@@ -163,10 +175,6 @@ class AurexProtocolClient:
     def signup(self, username: str, password: str, email: str, public_key_b64: str | None = None) -> str:
         username = username.strip()
         email = email.strip()
-        logger.debug(
-            f"[aurex][client] signup called username={username!r} "
-            f"email={email!r} has_public_key={bool(public_key_b64)}"
-        )
         if not username or "|" in username or username != username.strip():
             raise ProtocolError("Invalid username")
         if len(password) < 6 or "|" in password or password != password.strip():
@@ -177,12 +185,7 @@ class AurexProtocolClient:
         if public_key_b64:
             request_parts.append(public_key_b64)
         request = serialize_command(ProtocolCommand.SIGNUP, *request_parts)
-        logger.debug(
-            f"[aurex][client] sending SIGNUP username={username!r} "
-            f"request_parts={len(request.split('|'))}"
-        )
         response = self._request_text(request)
-        logger.debug("[aurex][client] signup response for %r: %r", username, response)
         head, parts = self._split_response(response)
         if head == ProtocolPrefix.OK.value:
             return parts[0] if parts else username
@@ -515,6 +518,15 @@ class AurexProtocolClient:
             "timestamp": timestamp,
         }
         signature = sign_message(canonical_tx_message(username, payload), username)
+        encrypted_response = self._submit_encrypted_gateway_transaction(
+            tx_type="ASSET_PURCHASE",
+            payload=payload,
+            public_key=public_key,
+            signature=signature,
+            tx_id=tx_id,
+        )
+        if encrypted_response is not None and encrypted_response.get("status") in {"submitted", "ok"}:
+            return encrypted_response
         response = self._request_command(
             ProtocolCommand.BUY,
             asset_id,
@@ -556,6 +568,15 @@ class AurexProtocolClient:
             "timestamp": timestamp,
         }
         signature = sign_message(canonical_tx_message(sender_username, payload), sender_username)
+        encrypted_response = self._submit_encrypted_gateway_transaction(
+            tx_type="ASSET_TRANSFER",
+            payload=payload,
+            public_key=public_key,
+            signature=signature,
+            tx_id=tx_id,
+        )
+        if encrypted_response is not None and encrypted_response.get("status") in {"submitted", "ok"}:
+            return tx_id
         response = self._request_command(
             ProtocolCommand.SEND,
             asset_id,
@@ -572,6 +593,55 @@ class AurexProtocolClient:
             returned_tx_id = parts[1] if len(parts) > 1 else tx_id
             return returned_tx_id
         raise ProtocolError(self._extract_error_message(response))
+
+    def _resolve_encrypted_gateway(self) -> tuple[str, int] | None:
+        if self.encrypted_gateway_host:
+            return self.encrypted_gateway_host, self.encrypted_gateway_port
+        if discover_encrypted_gateway is None:
+            return None
+        try:
+            return discover_encrypted_gateway(timeout=2.5)
+        except Exception:
+            return None
+
+    def _submit_encrypted_gateway_transaction(
+        self,
+        *,
+        tx_type: str,
+        payload: dict[str, Any],
+        public_key: str,
+        signature: str,
+        tx_id: str,
+    ) -> dict[str, Any] | None:
+        if not self.enable_encrypted_gateway:
+            return None
+        if AurexEncryptedClient is None or build_encrypted_protocol_message is None:
+            return None
+        endpoint = self._resolve_encrypted_gateway()
+        if endpoint is None:
+            return None
+        host, port = endpoint
+        tx_obj = {
+            "tx_type": tx_type,
+            "payload": payload,
+            "public_key": public_key,
+            "signature": signature,
+            "timestamp": datetime.now(timezone.utc).timestamp(),
+        }
+        try:
+            response = AurexEncryptedClient(host, port, timeout=8.0).request(
+                build_encrypted_protocol_message("SUBMIT_TRANSACTION", {"transaction": tx_obj}),
+                expect_response=True,
+            )
+            if not response:
+                return {"status": "failed", "tx_id": tx_id}
+            if response.get("type") == "TX_SUBMIT_RESULT":
+                details = response.get("payload") or {}
+                status = "submitted" if details.get("ok") else "failed"
+                return {"status": status, "tx_id": tx_id, "details": details}
+            return {"status": "failed", "tx_id": tx_id}
+        except Exception:
+            return {"status": "failed", "tx_id": tx_id}
 
     def get_transaction_status(self, tx_id: str) -> dict[str, str]:
         response = self._request_command(ProtocolCommand.GET_TX_STATUS, tx_id)
@@ -807,6 +877,10 @@ class AurexProtocolClient:
 
     async def _connect_async(self, host: str, port: int):
         ssl_context = ssl.create_default_context()
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            # Python/OpenSSL strict chain checks may reject older local cert chains
+            # with "Missing Authority Key Identifier"; keep CA validation enabled.
+            ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
         ca_cert_path = self._resolve_ca_cert_path()
         if not ca_cert_path.exists():
             raise ProtocolError(f"CA certificate not found: {ca_cert_path}")

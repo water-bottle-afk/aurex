@@ -9,14 +9,13 @@ import socket
 import sys
 import os
 import threading
-import struct
+import argparse
 import logging
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
 import time
-import random
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -27,16 +26,15 @@ from config import (
     RPC_LISTEN_PORT,
     SERVER_NOTIFY_HOST,
     SERVER_NOTIFY_PORT,
-    DEFAULT_SOCKET_TIMEOUT,
-    SOCKET_BUFFER_SIZE,
     DEFAULT_POW_DIFFICULTY,
     TX_TIME_WINDOW_SECONDS,
+    CHAIN_CONFIRMATIONS_REQUIRED,
     NODE_REGISTRY_STALE_SECONDS,
     NODE_REGISTRY_REAP_INTERVAL_SECONDS,
-    GOSSIP_FANOUT,
 )
 from models import Transaction
 from db_init import get_db_connection, init_database
+from classes import StateManager
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from protocol import Protocol
 
@@ -51,12 +49,37 @@ logger = logging.getLogger('gateway_server')
 SOCKET_TIMEOUT = 3
 SEEN_TX_IDS = {}
 SEEN_TX_LOCK = threading.Lock()
-SEEN_BLOCK_INDEXES = set()
-SEEN_BLOCK_LOCK = threading.Lock()
+CONFIRMATION_LOCK = threading.Lock()
+BLOCK_CONFIRMATIONS = {}  # (index, hash) -> {'nodes': set(), 'confirmation': dict}
+COMMITTED_BY_INDEX = {}   # index -> hash
+GATEWAY_STATE = StateManager()
+STATE_LOCK = threading.Lock()
 
 # (host, port) -> {'node_id': str, 'last_seen': monotonic time}
 NODE_REGISTRY = {}
 NODE_REGISTRY_LOCK = threading.Lock()
+GUI_BRIDGE = None
+
+
+def set_gui_bridge(bridge):
+    global GUI_BRIDGE
+    GUI_BRIDGE = bridge
+
+
+def _emit_gui_event(node_id='', message='', event_type='system', direction='system', status='info', **extra):
+    if GUI_BRIDGE is None:
+        return
+    try:
+        GUI_BRIDGE.log_event(
+            node_id=node_id or '',
+            message=message,
+            event_type=event_type,
+            direction=direction,
+            status=status,
+            **extra,
+        )
+    except Exception:
+        pass
 
 
 def _normalize_peer_host(host):
@@ -81,6 +104,14 @@ def register_peer(host, port, node_id=''):
             'last_seen': time.monotonic(),
         }
     logger.debug("node registry update %s:%s id=%s", h, p, nid)
+    _emit_gui_event(
+        node_id=nid,
+        message=f"Node registered from {h}:{p}",
+        event_type='node_status',
+        direction='inbound',
+        status='connected',
+        address=f"{h}:{p}",
+    )
     return True
 
 
@@ -89,7 +120,16 @@ def _prune_stale_peers():
     with NODE_REGISTRY_LOCK:
         dead = [k for k, v in NODE_REGISTRY.items() if v.get('last_seen', 0) < cutoff]
         for k in dead:
-            NODE_REGISTRY.pop(k, None)
+            stale_info = NODE_REGISTRY.pop(k, None)
+            if stale_info:
+                _emit_gui_event(
+                    node_id=stale_info.get('node_id', ''),
+                    message=f"Node disconnected from {k[0]}:{k[1]}",
+                    event_type='node_status',
+                    direction='system',
+                    status='disconnected',
+                    address=f"{k[0]}:{k[1]}",
+                )
         if dead:
             logger.info("node registry: pruned %s stale peer(s); active=%s", len(dead), len(NODE_REGISTRY))
 
@@ -112,15 +152,6 @@ def get_broadcast_targets():
         return endpoints, 'registry'
     return [(RPC_HOST, p) for p in NODE_PORTS], 'config_fallback'
 
-
-
-
-def _select_fanout(endpoints):
-    if not endpoints:
-        return []
-    if GOSSIP_FANOUT and len(endpoints) > GOSSIP_FANOUT:
-        return random.sample(endpoints, GOSSIP_FANOUT)
-    return endpoints
 def _canonical_tx_message(sender, data):
     payload = {"sender": sender, "data": data}
     return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
@@ -198,10 +229,9 @@ def broadcast_transaction(transaction_data):
     }
     raw = json.dumps(message).encode()
     endpoints_all, source = get_broadcast_targets()
-    endpoints = _select_fanout(endpoints_all)
     success = 0
     failures = []
-    for host, port in endpoints:
+    for host, port in endpoints_all:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(SOCKET_TIMEOUT)
@@ -209,12 +239,32 @@ def broadcast_transaction(transaction_data):
             sock.send(raw)
             sock.close()
             success += 1
+            tx_id = transaction_data.get('data', {}).get('tx_id') if isinstance(transaction_data.get('data'), dict) else transaction_data.get('tx_id')
+            _emit_gui_event(
+                node_id=f"node_{port}",
+                message=f"Outbound NEW_TRANSACTION to {host}:{port}",
+                event_type='tx_broadcast',
+                direction='outbound',
+                status='sent',
+                address=f"{host}:{port}",
+                tx_id=tx_id,
+            )
         except Exception as e:
             failures.append((host, port, str(e)))
+            tx_id = transaction_data.get('data', {}).get('tx_id') if isinstance(transaction_data.get('data'), dict) else transaction_data.get('tx_id')
+            _emit_gui_event(
+                node_id=f"node_{port}",
+                message=f"Broadcast failed to {host}:{port}: {e}",
+                event_type='tx_broadcast',
+                direction='outbound',
+                status='error',
+                address=f"{host}:{port}",
+                tx_id=tx_id,
+            )
     logger.info(
         "broadcast tx: %s/%s peer(s) ok active=%s source=%s",
         success,
-        len(endpoints),
+        len(endpoints_all),
         len(endpoints_all),
         source,
     )
@@ -241,6 +291,15 @@ def broadcast_stop_mining(block_index=None, block_hash=None):
             sock.connect((host, port))
             sock.send(raw)
             sock.close()
+            _emit_gui_event(
+                node_id=f"node_{port}",
+                message=f"Outbound STOP_MINING to {host}:{port}",
+                event_type='stop_mining',
+                direction='outbound',
+                status='sent',
+                address=f"{host}:{port}",
+                hash_value=block_hash,
+            )
         except Exception:
             pass
 
@@ -274,84 +333,177 @@ def notify_server(confirmation):
         logger.warning("notify server failed: %s", e)
 
 
-def _finalize_asset_purchase(cursor, *, buyer, seller, asset_id, asset_hash, amount, timestamp):
-    """Finalize marketplace DB state for a confirmed asset purchase."""
-    if not buyer or not seller:
-        return False, "missing buyer/seller", None, None
-    if buyer == seller:
-        return False, "buyer cannot equal seller", None, None
+def _is_ed25519_public_key_b64(value):
+    if not value or not isinstance(value, str):
+        return False
     try:
-        amt = float(amount)
-    except (TypeError, ValueError):
-        return False, "invalid amount", None, None
-    if amt <= 0:
-        return False, "amount must be positive", None, None
+        return len(base64.b64decode(value.encode())) == 32
+    except Exception:
+        return False
 
-    item_row = None
-    if asset_id not in (None, ''):
-        cursor.execute(
-            '''SELECT id, username, cost, is_listed, asset_hash
-               FROM marketplace_items
-               WHERE id = ?
-               LIMIT 1''',
-            (str(asset_id),),
+
+def _resolve_identity_public_key(cursor, identity, fallback_public_key=''):
+    if identity and _is_ed25519_public_key_b64(identity):
+        return identity
+    if identity:
+        try:
+            cursor.execute('SELECT wallet_public_key FROM users WHERE username = ? LIMIT 1', (str(identity),))
+            row = cursor.fetchone()
+            if row and row['wallet_public_key'] and _is_ed25519_public_key_b64(row['wallet_public_key']):
+                return row['wallet_public_key']
+        except Exception:
+            pass
+        try:
+            cursor.execute('SELECT public_key_hex FROM wallets WHERE username = ? LIMIT 1', (str(identity),))
+            row = cursor.fetchone()
+            if row and row['public_key_hex'] and _is_ed25519_public_key_b64(row['public_key_hex']):
+                return row['public_key_hex']
+        except Exception:
+            pass
+    if fallback_public_key and _is_ed25519_public_key_b64(fallback_public_key):
+        return fallback_public_key
+    return ''
+
+
+def _lookup_username_by_public_key(cursor, public_key):
+    if not public_key:
+        return ''
+    try:
+        cursor.execute('SELECT username FROM users WHERE wallet_public_key = ? LIMIT 1', (public_key,))
+        row = cursor.fetchone()
+        if row and row['username']:
+            return str(row['username'])
+    except Exception:
+        pass
+    try:
+        cursor.execute('SELECT username FROM wallets WHERE public_key_hex = ? LIMIT 1', (public_key,))
+        row = cursor.fetchone()
+        if row and row['username']:
+            return str(row['username'])
+    except Exception:
+        pass
+    return ''
+
+
+def _normalize_tx_type(data):
+    if not isinstance(data, dict):
+        return ''
+    raw = str(data.get('type') or data.get('action') or '').strip().upper()
+    if raw in ('MINT', 'ASSET_MINT', 'UPLOAD'):
+        return 'MINT'
+    if raw in ('TRADE', 'BUY', 'ASSET_PURCHASE', 'PURCHASE'):
+        return 'TRADE'
+    return raw
+
+
+def _normalize_state_tx(cursor, tx, state_snapshot):
+    sender = tx.get('sender', '') if isinstance(tx, dict) else ''
+    data = tx.get('data', {}) if isinstance(tx.get('data'), dict) else {}
+    tx_id = data.get('tx_id', '')
+    tx_ts = data.get('timestamp')
+    public_key = tx.get('public_key', '') if isinstance(tx, dict) else ''
+    signature = tx.get('signature', '') if isinstance(tx, dict) else ''
+    if not tx_id or not tx_ts:
+        return None, None, "missing tx_id/timestamp"
+    if not public_key or not signature:
+        return None, None, "missing tx signature/public_key"
+    msg_bytes = _canonical_tx_message(sender, data)
+    if not _verify_ed25519_signature(public_key, msg_bytes, signature):
+        return None, None, "invalid tx signature"
+    tx_type = _normalize_tx_type(data)
+    image_hash = data.get('image_hash') or data.get('asset_hash')
+
+    if tx_type == 'MINT':
+        owner_hint = data.get('initial_owner') or data.get('owner_pub') or data.get('owner') or sender
+        owner_pk = _resolve_identity_public_key(cursor, owner_hint, fallback_public_key=public_key)
+        if not owner_pk:
+            return None, None, "mint owner public key not resolved"
+        state_tx = {'type': 'MINT', 'image_hash': image_hash, 'owner': owner_pk}
+        meta = {
+            'tx_type': 'MINT',
+            'tx_id': tx_id,
+            'image_hash': image_hash,
+            'asset_name': data.get('asset_name') or '',
+            'from_pk': owner_pk,
+            'to_pk': owner_pk,
+            'amount': 0.0,
+        }
+        return state_tx, meta, "ok"
+
+    if tx_type == 'TRADE':
+        buyer_hint = data.get('buyer') or data.get('buyer_pub') or data.get('from') or sender
+        seller_hint = data.get('seller') or data.get('seller_pub') or data.get('to')
+        buyer_pk = _resolve_identity_public_key(cursor, buyer_hint, fallback_public_key=public_key)
+        seller_pk = _resolve_identity_public_key(cursor, seller_hint)
+        if not seller_pk and image_hash:
+            seller_pk = state_snapshot.ownership.get(image_hash, '')
+        if not buyer_pk or not seller_pk:
+            return None, None, "trade buyer/seller public key not resolved"
+        amount_raw = data.get('price') if data.get('price') is not None else data.get('amount')
+        try:
+            price_int = StateManager.amount_to_int(amount_raw)
+        except Exception:
+            return None, None, "trade invalid price"
+        state_tx = {
+            'type': 'TRADE',
+            'image_hash': image_hash,
+            'buyer': buyer_pk,
+            'seller': seller_pk,
+            'price_int': price_int,
+        }
+        meta = {
+            'tx_type': 'TRADE',
+            'tx_id': tx_id,
+            'image_hash': image_hash,
+            'asset_name': data.get('asset_name') or '',
+            'from_pk': buyer_pk,
+            'to_pk': seller_pk,
+            'amount': float(price_int) / 100.0,
+        }
+        return state_tx, meta, "ok"
+
+    return None, None, f"unsupported tx type '{tx_type}'"
+
+
+def _apply_state_tx(state_snapshot, state_tx):
+    tx_type = state_tx.get('type')
+    if tx_type == 'MINT':
+        return state_snapshot.apply_mint(state_tx.get('image_hash'), state_tx.get('owner'))
+    if tx_type == 'TRADE':
+        return state_snapshot.apply_trade(
+            state_tx.get('image_hash'),
+            state_tx.get('buyer'),
+            state_tx.get('seller'),
+            state_tx.get('price_int'),
         )
-        item_row = cursor.fetchone()
-    if item_row is None and asset_hash:
-        cursor.execute(
-            '''SELECT id, username, cost, is_listed, asset_hash
-               FROM marketplace_items
-               WHERE asset_hash = ?
-               LIMIT 1''',
-            (asset_hash,),
-        )
-        item_row = cursor.fetchone()
-    if item_row is None:
-        return False, "asset not found", None, None
-
-    resolved_asset_id = str(item_row['id'])
-    resolved_asset_hash = item_row['asset_hash']
-    current_owner = item_row['username']
-    listed = item_row['is_listed']
-    listed_price = float(item_row['cost'] or 0)
-
-    if current_owner != seller:
-        return False, f"seller mismatch (expected owner={current_owner})", resolved_asset_id, resolved_asset_hash
-    if listed is not None and int(listed) == 0:
-        return False, "asset is not listed", resolved_asset_id, resolved_asset_hash
-    if abs(listed_price - amt) > 0.01:
-        return False, "price mismatch", resolved_asset_id, resolved_asset_hash
-
-    cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (buyer,))
-    buyer_row = cursor.fetchone()
-    cursor.execute('SELECT wallet_balance FROM users WHERE username = ?', (seller,))
-    seller_row = cursor.fetchone()
-    if buyer_row is None:
-        return False, "buyer wallet not found", resolved_asset_id, resolved_asset_hash
-    if seller_row is None:
-        return False, "seller wallet not found", resolved_asset_id, resolved_asset_hash
-
-    buyer_balance = float(buyer_row['wallet_balance'] or 0)
-    seller_balance = float(seller_row['wallet_balance'] or 0)
-    if buyer_balance < amt:
-        return False, "insufficient balance", resolved_asset_id, resolved_asset_hash
-
-    cursor.execute(
-        'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
-        (buyer_balance - amt, timestamp, buyer),
-    )
-    cursor.execute(
-        'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE username = ?',
-        (seller_balance + amt, timestamp, seller),
-    )
-    cursor.execute(
-        'UPDATE marketplace_items SET username = ?, is_listed = 0, timestamp = ? WHERE id = ?',
-        (buyer, timestamp, resolved_asset_id),
-    )
-    return True, "ok", resolved_asset_id, resolved_asset_hash
+    return False, "unsupported state tx"
 
 
-def _record_block_confirmation(confirmation):
+def _sync_sql_balances_from_state(cursor, state_snapshot, timestamp):
+    for public_key, amount_int in state_snapshot.balances.items():
+        amount = float(amount_int) / 100.0
+        try:
+            cursor.execute(
+                'UPDATE users SET wallet_balance = ?, wallet_updated_at = ? WHERE wallet_public_key = ?',
+                (amount, timestamp, public_key),
+            )
+            cursor.execute(
+                '''
+                UPDATE users
+                SET wallet_balance = ?, wallet_updated_at = ?
+                WHERE username IN (
+                    SELECT username FROM wallets WHERE public_key_hex = ?
+                )
+                ''',
+                (amount, timestamp, public_key),
+            )
+        except Exception:
+            continue
+
+
+def _record_block_confirmation(confirmation, confirmations_count):
+    global GATEWAY_STATE
+    conn = None
     try:
         block_hash = confirmation.get('block_hash') or ''
         block_index = confirmation.get('block_index')
@@ -361,6 +513,19 @@ def _record_block_confirmation(confirmation):
 
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        with STATE_LOCK:
+            staged_state = GATEWAY_STATE.copy()
+        tx_meta_list = []
+        for tx in tx_list:
+            state_tx, meta, reason = _normalize_state_tx(cursor, tx, staged_state)
+            if not state_tx:
+                return False, reason
+            ok, reason = _apply_state_tx(staged_state, state_tx)
+            if not ok:
+                return False, reason
+            tx_meta_list.append(meta)
+
         cursor.execute(
             '''INSERT OR IGNORE INTO blocks
                (block_hash, previous_hash, nonce, timestamp, miner_id, difficulty, transactions_count, data)
@@ -373,157 +538,145 @@ def _record_block_confirmation(confirmation):
                 miner_id,
                 DEFAULT_POW_DIFFICULTY,
                 len(tx_list),
-                json.dumps({'block_index': block_index, 'transactions': tx_list}),
+                json.dumps(
+                    {
+                        'block_index': block_index,
+                        'confirmations': confirmations_count,
+                        'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+                        'transactions': tx_list,
+                    }
+                ),
             ),
         )
         cursor.execute('SELECT id FROM blocks WHERE block_hash = ?', (block_hash,))
         row = cursor.fetchone()
         block_id = row['id'] if row else None
 
-        for tx in tx_list:
-            data = tx.get('data') if isinstance(tx.get('data'), dict) else {}
-            action = data.get('action', '')
-            tx_id = data.get('tx_id', '')
-
-            # MINT: register a new asset and move it from pending to listed.
-            if action == 'asset_mint':
-                asset_hash = data.get('asset_hash', '')
-                asset_name = data.get('asset_name', '')
-                initial_owner = data.get('owner') or tx.get('sender', '')
-                initial_owner_pk = data.get('owner_pub', '')
-                tx_hash_src = f"MINT|{block_hash}|{asset_hash}|{initial_owner}|{tx_id}"
-                tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
-                cursor.execute(
-                    '''INSERT OR IGNORE INTO transactions
-                       (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (tx_hash, initial_owner, initial_owner, 0.0, timestamp, block_id, 'confirmed'),
-                )
-                if asset_hash and asset_name and initial_owner:
-                    cursor.execute(
-                        '''INSERT OR IGNORE INTO assets
-                           (asset_id, asset_name, owner, block_hash, timestamp)
-                           VALUES (?, ?, ?, ?, ?)''',
-                        (asset_hash, asset_name, initial_owner, block_hash, timestamp),
-                    )
-                logger.info(
-                    "MINT confirmed: asset_hash=%s owner=%s pk=%s...",
-                    asset_hash[:16] if asset_hash else '?',
-                    initial_owner,
-                    initial_owner_pk[:16] if initial_owner_pk else '?',
-                )
-                continue
-
-            # PURCHASE: transfer funds and ownership atomically when possible.
-            if action in ('asset_purchase', 'purchase'):
-                buyer = data.get('from') or tx.get('sender', '')  # buyer pays
-                seller = data.get('to') or ''                      # seller receives money
-                amount = float(data.get('amount') or data.get('price') or 0)
-                asset_id = data.get('asset_id', '')
-                asset_hash = data.get('asset_hash', '')
-                asset_name = data.get('asset_name', '')
-                ok, finalize_msg, resolved_asset_id, resolved_asset_hash = _finalize_asset_purchase(
-                    cursor,
-                    buyer=buyer,
-                    seller=seller,
-                    asset_id=asset_id,
-                    asset_hash=asset_hash,
-                    amount=amount,
-                    timestamp=timestamp,
-                )
-                if isinstance(tx, dict):
-                    tx['gateway_status'] = 'confirmed' if ok else 'failed'
-                    if not ok:
-                        tx['gateway_message'] = finalize_msg
-                tx_hash_src = f"ASSET_PURCHASE|{block_hash}|{buyer}|{seller}|{amount}|{tx_id}"
-                tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
-                cursor.execute(
-                    '''INSERT OR IGNORE INTO transactions
-                       (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (tx_hash, buyer, seller, amount, timestamp, block_id, 'confirmed' if ok else 'failed'),
-                )
-                # buyer becomes the new asset owner in blockchain assets index.
-                if ok and buyer and (resolved_asset_hash or asset_hash):
-                    ref = resolved_asset_hash or asset_hash
-                    cursor.execute(
-                        '''UPDATE assets SET owner = ?, block_hash = ?, timestamp = ?
-                           WHERE asset_id = ?''',
-                        (buyer, block_hash, timestamp, ref),
-                    )
-                if ok:
-                    logger.info(
-                        "ASSET_PURCHASE confirmed: buyer=%s seller=%s asset=%s amount=%.2f",
-                        buyer, seller, resolved_asset_id or asset_id or resolved_asset_hash or asset_hash, amount,
-                    )
-                else:
-                    logger.warning(
-                        "ASSET_PURCHASE finalize failed: buyer=%s seller=%s asset=%s reason=%s",
-                        buyer, seller, asset_id or asset_hash, finalize_msg,
-                    )
-                continue
-
-            # ASSET_TRANSFER: ownership change without payment flow.
-            if action == 'asset_transfer':
-                from_user = data.get('from') or tx.get('sender', '')
-                to_user = data.get('to') or ''
-                amount = float(data.get('amount') or data.get('price') or 0)
-                asset_id = data.get('asset_id', '')
-                asset_hash = data.get('asset_hash', '')
-                asset_name = data.get('asset_name', '')
-                tx_hash_src = f"TRANSFER|{block_hash}|{from_user}|{to_user}|{amount}|{tx_id}"
-                tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
-                cursor.execute(
-                    '''INSERT OR IGNORE INTO transactions
-                       (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                    (tx_hash, from_user, to_user, amount, timestamp, block_id, 'confirmed'),
-                )
-                # to_user becomes new owner
-                if to_user and (asset_id or asset_hash):
-                    ref = asset_hash or asset_id
-                    cursor.execute(
-                        '''UPDATE assets SET owner = ?, block_hash = ?, timestamp = ?
-                           WHERE asset_id = ?''',
-                        (to_user, block_hash, timestamp, ref),
-                    )
-                logger.info(
-                    "ASSET_TRANSFER confirmed: from=%s to=%s asset=%s",
-                    from_user, to_user, asset_id or asset_hash,
-                )
-                continue
-
-            # Generic fallback for plain wallet transfers.
-            from_user = data.get('from') or tx.get('sender') or ''
-            to_user = data.get('to') or data.get('seller') or ''
-            amount = data.get('amount') if data.get('amount') is not None else data.get('price') or 0
-            tx_hash_src = f"{block_hash}|{from_user}|{to_user}|{amount}|{tx_id}"
+        for meta in tx_meta_list:
+            tx_hash_src = f"{meta['tx_type']}|{block_hash}|{meta['tx_id']}|{meta['image_hash']}"
             tx_hash = hashlib.sha256(tx_hash_src.encode()).hexdigest()
             cursor.execute(
-                '''INSERT OR IGNORE INTO transactions
-                   (tx_hash, from_user, to_user, amount, timestamp, block_id, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (tx_hash, from_user, to_user, float(amount), timestamp, block_id, 'confirmed'),
+                '''INSERT INTO transactions
+                   (tx_hash, from_user, to_user, amount, timestamp, block_id, status, is_confirmed_on_chain)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(tx_hash) DO UPDATE SET
+                       from_user = excluded.from_user,
+                       to_user = excluded.to_user,
+                       amount = excluded.amount,
+                       timestamp = excluded.timestamp,
+                       block_id = excluded.block_id,
+                       status = 'confirmed',
+                       is_confirmed_on_chain = 1''',
+                (
+                    tx_hash,
+                    meta['from_pk'],
+                    meta['to_pk'],
+                    float(meta['amount']),
+                    timestamp,
+                    block_id,
+                    'confirmed',
+                    1,
+                ),
             )
 
-        conn.commit()
-        conn.close()
+            image_hash = meta.get('image_hash') or ''
+            if not image_hash:
+                continue
 
-        # Keep a readable ledger snapshot for audit/debug workflows.
+            if meta['tx_type'] == 'MINT':
+                owner_pk = meta['to_pk']
+                cursor.execute(
+                    '''INSERT INTO assets (asset_id, asset_name, owner, block_hash, timestamp, is_confirmed_on_chain)
+                       VALUES (?, ?, ?, ?, ?, 1)
+                       ON CONFLICT(asset_id) DO UPDATE SET
+                           owner = excluded.owner,
+                           block_hash = excluded.block_hash,
+                           timestamp = excluded.timestamp,
+                           is_confirmed_on_chain = 1''',
+                    (image_hash, meta.get('asset_name') or image_hash, owner_pk, block_hash, timestamp),
+                )
+                owner_username = _lookup_username_by_public_key(cursor, owner_pk)
+                try:
+                    cursor.execute(
+                        '''
+                        UPDATE marketplace_items
+                        SET owner_public_key = ?, username = COALESCE(NULLIF(?, ''), username)
+                        WHERE asset_hash = ?
+                        ''',
+                        (owner_pk, owner_username, image_hash),
+                    )
+                except Exception:
+                    pass
+                try:
+                    cursor.execute(
+                        '''
+                        UPDATE not_approved_assets
+                        SET owner_public_key = ?, username = COALESCE(NULLIF(?, ''), username)
+                        WHERE asset_hash = ?
+                        ''',
+                        (owner_pk, owner_username, image_hash),
+                    )
+                except Exception:
+                    pass
+
+            if meta['tx_type'] == 'TRADE':
+                buyer_pk = meta['from_pk']
+                cursor.execute(
+                    '''INSERT INTO assets (asset_id, asset_name, owner, block_hash, timestamp, is_confirmed_on_chain)
+                       VALUES (?, ?, ?, ?, ?, 1)
+                       ON CONFLICT(asset_id) DO UPDATE SET
+                           owner = excluded.owner,
+                           block_hash = excluded.block_hash,
+                           timestamp = excluded.timestamp,
+                           is_confirmed_on_chain = 1''',
+                    (image_hash, meta.get('asset_name') or image_hash, buyer_pk, block_hash, timestamp),
+                )
+                buyer_username = _lookup_username_by_public_key(cursor, buyer_pk)
+                try:
+                    cursor.execute(
+                        '''
+                        UPDATE marketplace_items
+                        SET owner_public_key = ?, username = COALESCE(NULLIF(?, ''), username), is_listed = 0, timestamp = ?
+                        WHERE asset_hash = ?
+                        ''',
+                        (buyer_pk, buyer_username, timestamp, image_hash),
+                    )
+                except Exception:
+                    pass
+
+        _sync_sql_balances_from_state(cursor, staged_state, timestamp)
+        conn.commit()
+        with STATE_LOCK:
+            GATEWAY_STATE = staged_state
+
         _append_gateway_ledger({
             'block_index': block_index,
             'block_hash': block_hash,
             'miner_id': miner_id,
             'timestamp': timestamp,
+            'confirmations': confirmations_count,
+            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
             'transactions': tx_list,
         })
-
+        return True, "ok"
     except Exception as e:
+        try:
+            if conn is not None:
+                conn.rollback()
+        except Exception:
+            pass
         logger.warning("record block_confirmation failed: %s", e)
+        return False, str(e)
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def _append_gateway_ledger(block_entry):
-    """Append a confirmed block summary to BLOCKCHAIN_DB/gateway/gateway_ledger.json."""
+    """Append a committed block summary to BLOCKCHAIN_DB/gateway/gateway_ledger.json."""
     try:
         ledger_path = Path(__file__).parent / "BLOCKCHAIN_DB" / "gateway" / "gateway_ledger.json"
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
@@ -539,16 +692,42 @@ def _append_gateway_ledger(block_entry):
         logger.warning("_append_gateway_ledger failed: %s", e)
 
 
-def _block_index_seen(block_index):
+def _register_block_confirmation(msg):
+    """Collect confirmations per (index,hash). Commit only after N confirmations."""
     try:
-        idx = int(block_index)
+        block_index = int(msg.get('block_index'))
     except (TypeError, ValueError):
-        return False
-    with SEEN_BLOCK_LOCK:
-        if idx in SEEN_BLOCK_INDEXES:
-            return True
-        SEEN_BLOCK_INDEXES.add(idx)
-    return False
+        return 'invalid', 0
+    block_hash = msg.get('block_hash') or ''
+    if not block_hash:
+        return 'invalid', 0
+    confirmer = msg.get('node_id') or msg.get('miner_id') or f"anon:{time.monotonic()}"
+
+    with CONFIRMATION_LOCK:
+        committed_hash = COMMITTED_BY_INDEX.get(block_index)
+        if committed_hash:
+            if committed_hash == block_hash:
+                return 'already_committed', CHAIN_CONFIRMATIONS_REQUIRED
+            return 'fork_rejected', 0
+
+        key = (block_index, block_hash)
+        bucket = BLOCK_CONFIRMATIONS.setdefault(key, {'nodes': set(), 'confirmation': msg})
+        existing_txs = bucket.get('confirmation', {}).get('transactions') or []
+        incoming_txs = msg.get('transactions') or []
+        if json.dumps(existing_txs, sort_keys=True) != json.dumps(incoming_txs, sort_keys=True):
+            return 'conflict', len(bucket['nodes'])
+        bucket['confirmation'] = msg
+        bucket['nodes'].add(confirmer)
+        confirmations_count = len(bucket['nodes'])
+        if confirmations_count < CHAIN_CONFIRMATIONS_REQUIRED:
+            return 'pending', confirmations_count
+
+        COMMITTED_BY_INDEX[block_index] = block_hash
+        for other_key in list(BLOCK_CONFIRMATIONS.keys()):
+            if other_key[0] == block_index and other_key != key:
+                BLOCK_CONFIRMATIONS.pop(other_key, None)
+        BLOCK_CONFIRMATIONS.pop(key, None)
+        return 'ready', confirmations_count
 
 
 def _ensure_gateway_ledger_dir():
@@ -561,9 +740,125 @@ def _ensure_gateway_ledger_dir():
     logger.info("Gateway ledger dir: %s", base)
 
 
-def main():
+def _bootstrap_gateway_state_from_sql():
+    """Initialize gateway read-cache state from current SQL snapshot."""
+    global GATEWAY_STATE
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        boot_state = StateManager()
+        try:
+            cursor.execute(
+                '''
+                SELECT wallet_public_key, wallet_balance
+                FROM users
+                WHERE wallet_public_key IS NOT NULL AND wallet_public_key != ''
+                '''
+            )
+            for row in cursor.fetchall() or []:
+                pk = row['wallet_public_key']
+                if not pk or not _is_ed25519_public_key_b64(pk):
+                    continue
+                balance_raw = row['wallet_balance']
+                try:
+                    bal_int = StateManager.amount_to_int(StateManager.INITIAL_COINS if balance_raw is None else balance_raw)
+                except Exception:
+                    base = StateManager.INITIAL_COINS if balance_raw is None else balance_raw
+                    bal_int = int(float(base) * 100)
+                boot_state.set_balance(pk, bal_int)
+        except Exception:
+            pass
+        try:
+            cursor.execute(
+                '''
+                SELECT w.public_key_hex, u.wallet_balance
+                FROM wallets w
+                LEFT JOIN users u ON u.username = w.username
+                WHERE w.public_key_hex IS NOT NULL AND w.public_key_hex != ''
+                '''
+            )
+            for row in cursor.fetchall() or []:
+                pk = row['public_key_hex']
+                if not pk or not _is_ed25519_public_key_b64(pk):
+                    continue
+                if pk in boot_state.balances:
+                    continue
+                balance_raw = row['wallet_balance']
+                if balance_raw in (None, ''):
+                    bal_int = StateManager.INITIAL_BALANCE_INT
+                else:
+                    try:
+                        bal_int = StateManager.amount_to_int(balance_raw)
+                    except Exception:
+                        bal_int = int(float(balance_raw) * 100)
+                boot_state.set_balance(pk, bal_int)
+        except Exception:
+            pass
+        try:
+            cursor.execute(
+                '''
+                SELECT asset_hash, owner_public_key
+                FROM marketplace_items
+                WHERE asset_hash IS NOT NULL AND asset_hash != ''
+                '''
+            )
+            for row in cursor.fetchall() or []:
+                asset_hash = row['asset_hash']
+                owner_pk = row['owner_public_key']
+                if asset_hash and owner_pk and _is_ed25519_public_key_b64(owner_pk):
+                    boot_state.ownership[asset_hash] = owner_pk
+        except Exception:
+            pass
+        with STATE_LOCK:
+            GATEWAY_STATE = boot_state
+        logger.info(
+            "gateway state bootstrap complete balances=%s ownership=%s",
+            len(boot_state.balances),
+            len(boot_state.ownership),
+        )
+    except Exception as e:
+        logger.warning("gateway state bootstrap failed: %s", e)
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _bootstrap_committed_indexes_from_ledger():
+    """Load already-committed block indexes so confirmations stay idempotent across restarts."""
+    global COMMITTED_BY_INDEX
+    ledger_path = Path(__file__).parent / "BLOCKCHAIN_DB" / "gateway" / "gateway_ledger.json"
+    committed = {}
+    try:
+        entries = json.loads(ledger_path.read_text(encoding='utf-8'))
+        if not isinstance(entries, list):
+            entries = []
+    except Exception:
+        entries = []
+    for entry in entries:
+        try:
+            idx = int(entry.get('block_index'))
+            h = str(entry.get('block_hash') or '')
+            if h:
+                committed[idx] = h
+        except Exception:
+            continue
+    with CONFIRMATION_LOCK:
+        COMMITTED_BY_INDEX = committed
+    logger.info("loaded committed indexes from gateway ledger: %s", len(committed))
+
+
+def run_server(stop_event=None, gui_bridge=None):
+    if gui_bridge is not None:
+        set_gui_bridge(gui_bridge)
     _ensure_gateway_ledger_dir()
+    _bootstrap_committed_indexes_from_ledger()
     init_database()
+    _bootstrap_gateway_state_from_sql()
+    _emit_gui_event(message="Gateway server starting", event_type='gateway', direction='system', status='starting')
     logger.info(
         "Gateway starting; NODE_PORTS fallback=%s (used until peers register)",
         NODE_PORTS,
@@ -575,10 +870,18 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((RPC_LISTEN_HOST, RPC_LISTEN_PORT))
     server.listen(5)
+    server.settimeout(1.0)
     logger.info(
         "Gateway listening on %s:%s (clients: submit_transaction,/buy,health; nodes: block_confirmation)",
         RPC_LISTEN_HOST,
         RPC_LISTEN_PORT,
+    )
+    _emit_gui_event(
+        message=f"Gateway listening on {RPC_LISTEN_HOST}:{RPC_LISTEN_PORT}",
+        event_type='gateway',
+        direction='system',
+        status='listening',
+        address=f"{RPC_LISTEN_HOST}:{RPC_LISTEN_PORT}",
     )
 
     def handle(conn, addr):
@@ -589,27 +892,92 @@ def main():
                 conn.close()
                 return
             if msg.get('type') == 'block_confirmation':
-                block_index = msg.get('block_index')
-                if _block_index_seen(block_index):
-                    _send_json(conn, {'status': 'rejected', 'reason': 'already_confirmed'})
+                status, confirmations_count = _register_block_confirmation(msg)
+
+                # Stop miners as soon as first valid block candidate appears.
+                if status in ('pending', 'ready', 'already_committed'):
+                    broadcast_stop_mining(
+                        block_index=msg.get('block_index'),
+                        block_hash=msg.get('block_hash'),
+                    )
+
+                if status == 'invalid':
+                    _send_json(conn, {'status': 'failed', 'reason': 'invalid block_confirmation payload'})
                     conn.close()
                     return
+                if status == 'fork_rejected':
+                    _send_json(conn, {'status': 'rejected', 'reason': 'fork index already committed'})
+                    conn.close()
+                    return
+                if status == 'conflict':
+                    _send_json(conn, {'status': 'rejected', 'reason': 'confirmation payload conflict'})
+                    conn.close()
+                    return
+                if status == 'pending':
+                    _send_json(
+                        conn,
+                        {
+                            'status': 'pending',
+                            'confirmations': confirmations_count,
+                            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+                        },
+                    )
+                    conn.close()
+                    return
+                if status == 'already_committed':
+                    _send_json(
+                        conn,
+                        {
+                            'status': 'ok',
+                            'message': 'already committed',
+                            'confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+                            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+                        },
+                    )
+                    conn.close()
+                    return
+
                 logger.info(
-                    "=== TRANSACTION CONFIRMED (block committed) === block_index=%s block_hash=%s miner_id=%s node_id=%s timestamp=%s",
+                    "=== BLOCK COMMITTED === block_index=%s block_hash=%s miner_id=%s node_id=%s confirmations=%s/%s timestamp=%s",
                     msg.get('block_index'),
                     msg.get('block_hash'),
                     msg.get('miner_id'),
                     msg.get('node_id'),
+                    confirmations_count,
+                    CHAIN_CONFIRMATIONS_REQUIRED,
                     msg.get('timestamp'),
                 )
-                logger.info("Saved to ledger: block_index=%s", msg.get('block_index'))
-                _record_block_confirmation(msg)
-                notify_server(msg)
-                broadcast_stop_mining(
-                    block_index=msg.get('block_index'),
-                    block_hash=msg.get('block_hash'),
+                _emit_gui_event(
+                    node_id=msg.get('node_id') or msg.get('miner_id') or '',
+                    message=f"Block committed index={msg.get('block_index')} hash={msg.get('block_hash', '')}",
+                    event_type='block_confirmation',
+                    direction='inbound',
+                    status='confirmed',
+                    tx_id=((msg.get('transactions') or [{}])[0].get('data', {}) or {}).get('tx_id') if msg.get('transactions') else '',
+                    hash_value=msg.get('block_hash'),
                 )
-                _send_json(conn, {'status': 'ok'})
+
+                ok, reason = _record_block_confirmation(msg, confirmations_count)
+                if not ok:
+                    try:
+                        idx = int(msg.get('block_index'))
+                        with CONFIRMATION_LOCK:
+                            COMMITTED_BY_INDEX.pop(idx, None)
+                    except Exception:
+                        pass
+                    _send_json(conn, {'status': 'failed', 'reason': reason})
+                    conn.close()
+                    return
+
+                notify_server(msg)
+                _send_json(
+                    conn,
+                    {
+                        'status': 'ok',
+                        'confirmations': confirmations_count,
+                        'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+                    },
+                )
                 conn.close()
                 return
             mtype = msg.get('type')
@@ -647,15 +1015,18 @@ def main():
                 return
             if action in ('/buy', 'buy', 'submit_purchase'):
                 body = msg.get('body') or {}
-                required = ['buyer', 'seller', 'asset_id', 'price', 'timestamp', 'tx_id', 'public_key', 'signature']
+                required = ['buyer', 'price', 'timestamp', 'tx_id', 'public_key', 'signature']
                 missing = [k for k in required if k not in body or body.get(k) in (None, '')]
                 if missing:
                     _send_json(conn, {'status': 'failed', 'message': f"Missing fields: {', '.join(missing)}"})
                     conn.close()
                     return
+                if not body.get('asset_id') and not body.get('asset_hash'):
+                    _send_json(conn, {'status': 'failed', 'message': 'Missing asset_id/asset_hash'})
+                    conn.close()
+                    return
 
                 buyer = body.get('buyer')
-                seller = body.get('seller')
                 asset_id = body.get('asset_id')
                 asset_name = body.get('asset_name') or ''
                 try:
@@ -669,6 +1040,9 @@ def main():
                 signature = body.get('signature')
                 public_key = body.get('public_key')
                 asset_hash = body.get('asset_hash')
+                buyer_pub = body.get('buyer_pub') or public_key
+                seller_pub = body.get('seller_pub') or ''
+                seller_name = body.get('seller') or ''
 
                 if not _is_timestamp_valid(ts):
                     _send_json(conn, {'status': 'failed', 'message': 'Invalid or stale timestamp'})
@@ -679,27 +1053,91 @@ def main():
                     _send_json(conn, {'status': 'failed', 'message': reason})
                     conn.close()
                     return
+
+                db_conn = None
+                try:
+                    db_conn = get_db_connection()
+                    cursor = db_conn.cursor()
+
+                    row = None
+                    if asset_id not in (None, ''):
+                        cursor.execute(
+                            '''
+                            SELECT id, asset_hash, owner_public_key, username
+                            FROM marketplace_items
+                            WHERE id = ?
+                            LIMIT 1
+                            ''',
+                            (str(asset_id),),
+                        )
+                        row = cursor.fetchone()
+                    if row is None and asset_hash:
+                        cursor.execute(
+                            '''
+                            SELECT id, asset_hash, owner_public_key, username
+                            FROM marketplace_items
+                            WHERE asset_hash = ?
+                            LIMIT 1
+                            ''',
+                            (asset_hash,),
+                        )
+                        row = cursor.fetchone()
+
+                    resolved_asset_id = str(row['id']) if row and row['id'] is not None else (str(asset_id) if asset_id not in (None, '') else '')
+                    resolved_asset_hash = (row['asset_hash'] if row and row['asset_hash'] else asset_hash) or ''
+                    if not resolved_asset_hash:
+                        _send_json(conn, {'status': 'failed', 'message': 'Asset hash not found'})
+                        conn.close()
+                        return
+
+                    buyer_pk = _resolve_identity_public_key(cursor, buyer_pub or buyer, fallback_public_key=public_key)
+                    seller_pk = _resolve_identity_public_key(cursor, seller_pub or seller_name)
+                    if not seller_pk and row is not None:
+                        seller_pk = _resolve_identity_public_key(cursor, row['owner_public_key'] or row['username'])
+                    if not buyer_pk or not seller_pk:
+                        _send_json(conn, {'status': 'failed', 'message': 'Unable to resolve buyer/seller public keys'})
+                        conn.close()
+                        return
+                finally:
+                    try:
+                        if db_conn is not None:
+                            db_conn.close()
+                    except Exception:
+                        pass
+
                 tx_payload = {
+                    'type': 'TRADE',
                     'action': 'asset_purchase',
                     'tx_id': tx_id,
-                    'asset_id': asset_id,
-                    'asset_hash': asset_hash,
+                    'asset_id': resolved_asset_id,
+                    'image_hash': resolved_asset_hash,
+                    'asset_hash': resolved_asset_hash,
                     'asset_name': asset_name,
-                    'buyer_pub': body.get('buyer_pub') or public_key,
+                    'buyer': buyer_pk,
+                    'seller': seller_pk,
+                    'buyer_pub': buyer_pk,
+                    'seller_pub': seller_pk,
                     'price': price,
-                    'from': buyer,
-                    'to': seller,
                     'amount': price,
                     'timestamp': ts,
                 }
 
-                msg_bytes = _canonical_tx_message(buyer, tx_payload)
+                sender_identity = buyer_pk
+                msg_bytes = _canonical_tx_message(sender_identity, tx_payload)
                 if not _verify_ed25519_signature(public_key, msg_bytes, signature):
                     _send_json(conn, {'status': 'failed', 'message': 'Invalid signature'})
                     conn.close()
                     return
 
-                tx = Transaction(sender=buyer, data=tx_payload, signature=signature, public_key=public_key)
+                tx = Transaction(sender=sender_identity, data=tx_payload, signature=signature, public_key=public_key)
+                _emit_gui_event(
+                    node_id='gateway',
+                    message=f"Inbound purchase request from {buyer}",
+                    event_type='purchase',
+                    direction='inbound',
+                    status='received',
+                    tx_id=tx_id,
+                )
                 count, _ = make_transaction(tx)
                 status_msg = "Transaction submitted. Broadcast to %s node(s). Pending confirmation." % count
                 if count == 0:
@@ -711,7 +1149,7 @@ def main():
                         'nodes_reached': count,
                         'message': status_msg,
                         'timestamp': ts,
-                        'transaction': {'sender': buyer, 'data': tx_payload},
+                        'transaction': {'sender': sender_identity, 'data': tx_payload},
                     },
                 )
                 conn.close()
@@ -755,6 +1193,14 @@ def main():
                         conn.close()
                         return
 
+                    _emit_gui_event(
+                        node_id='gateway',
+                        message=f"Inbound submit_transaction from {sender}",
+                        event_type='submit_transaction',
+                        direction='inbound',
+                        status='received',
+                        tx_id=tx_id,
+                    )
                     count, _ = make_transaction(body)
                     # Don't say "3/5 nodes" - say tx submitted and how many nodes got it
                     status_msg = "Transaction submitted. Broadcast to %s node(s). Pending confirmation." % count
@@ -781,16 +1227,38 @@ def main():
             except Exception:
                 pass
 
-    while True:
+    while stop_event is None or not stop_event.is_set():
         try:
             client, addr = server.accept()
             threading.Thread(target=handle, args=(client, addr), daemon=True).start()
         except KeyboardInterrupt:
             break
+        except socket.timeout:
+            continue
         except Exception as e:
             logger.error("accept: %s", e)
     server.close()
+    _emit_gui_event(message="Gateway server stopped", event_type='gateway', direction='system', status='stopped')
     logger.info("Gateway server stopped")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Aurex Gateway Server")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run gateway server without the Tk dashboard.",
+    )
+    args = parser.parse_args()
+    if args.headless:
+        run_server()
+        return
+    try:
+        from gateway_dashboard import GatewayDashboard
+        GatewayDashboard().run()
+    except Exception as e:
+        logger.warning("Dashboard launch failed (%s). Falling back to headless mode.", e)
+        run_server()
 
 
 if __name__ == '__main__':

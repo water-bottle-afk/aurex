@@ -52,7 +52,27 @@ def init_database():
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            verified INTEGER DEFAULT 0
+            verified INTEGER DEFAULT 0,
+            wallet_balance REAL DEFAULT 0,
+            wallet_updated_at TEXT,
+            wallet_public_key TEXT
+        )
+    ''')
+    cursor.execute("PRAGMA table_info(users)")
+    user_cols = {row[1] for row in cursor.fetchall()}
+    if 'wallet_balance' not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN wallet_balance REAL DEFAULT 0")
+    if 'wallet_updated_at' not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN wallet_updated_at TEXT")
+    if 'wallet_public_key' not in user_cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN wallet_public_key TEXT")
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS wallets (
+            username TEXT PRIMARY KEY NOT NULL,
+            public_key_hex TEXT NOT NULL,
+            key_type TEXT NOT NULL DEFAULT 'ED25519',
+            registered_at TEXT NOT NULL
         )
     ''')
     
@@ -96,9 +116,14 @@ def init_database():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             block_id INTEGER,
             status TEXT DEFAULT 'pending',
+            is_confirmed_on_chain INTEGER DEFAULT 0,
             FOREIGN KEY (block_id) REFERENCES blocks(id)
         )
     ''')
+    cursor.execute("PRAGMA table_info(transactions)")
+    tx_cols = {row[1] for row in cursor.fetchall()}
+    if 'is_confirmed_on_chain' not in tx_cols:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN is_confirmed_on_chain INTEGER DEFAULT 0")
     
     # Assets table (user assets on blockchain)
     cursor.execute('''
@@ -109,9 +134,14 @@ def init_database():
             owner TEXT NOT NULL,
             block_hash TEXT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_confirmed_on_chain INTEGER DEFAULT 0
         )
     ''')
+    cursor.execute("PRAGMA table_info(assets)")
+    asset_cols = {row[1] for row in cursor.fetchall()}
+    if 'is_confirmed_on_chain' not in asset_cols:
+        cursor.execute("ALTER TABLE assets ADD COLUMN is_confirmed_on_chain INTEGER DEFAULT 0")
     
     # Mining pool table
     cursor.execute('''

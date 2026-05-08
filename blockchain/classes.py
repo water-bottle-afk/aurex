@@ -7,6 +7,7 @@ import json
 import pickle
 from datetime import datetime
 from pathlib import Path
+from decimal import Decimal
 
 
 class Transaction:
@@ -51,6 +52,93 @@ class Transaction:
             'signature': self.signature,
             'public_key': self.public_key,
         }
+
+
+class StateManager:
+    """
+    Deterministic chain state for a node.
+    balances: Public_Key -> int (minor units; 1 token = 100 units)
+    ownership: Image_Hash -> Owner_Public_Key
+    """
+
+    MINOR_UNITS = Decimal("100")
+    INITIAL_COINS = Decimal("100")
+    INITIAL_BALANCE_INT = int(INITIAL_COINS * MINOR_UNITS)
+
+    def __init__(self, balances=None, ownership=None):
+        self.balances = dict(balances or {})
+        self.ownership = dict(ownership or {})
+
+    def copy(self):
+        return StateManager(self.balances.copy(), self.ownership.copy())
+
+    @staticmethod
+    def amount_to_int(value):
+        """Convert user-facing amount to deterministic int minor units."""
+        if value in (None, ''):
+            raise ValueError("missing amount")
+        dec = Decimal(str(value))
+        scaled = dec * StateManager.MINOR_UNITS
+        if scaled != scaled.to_integral_value():
+            raise ValueError("amount precision unsupported")
+        return int(scaled)
+
+    def get_balance(self, public_key):
+        if not public_key:
+            return 0
+        return int(self.balances.get(public_key, self.INITIAL_BALANCE_INT))
+
+    def _ensure_account(self, public_key):
+        if public_key and public_key not in self.balances:
+            self.balances[public_key] = self.INITIAL_BALANCE_INT
+
+    def set_balance(self, public_key, amount_int):
+        self.balances[public_key] = int(amount_int)
+
+    def validate_mint(self, image_hash, owner_public_key):
+        if not image_hash:
+            return False, "mint missing image_hash"
+        if not owner_public_key:
+            return False, "mint missing owner key"
+        if image_hash in self.ownership:
+            return False, "image already minted"
+        return True, "ok"
+
+    def validate_trade(self, image_hash, buyer_public_key, seller_public_key, price_int):
+        if not image_hash:
+            return False, "trade missing image_hash"
+        if not buyer_public_key or not seller_public_key:
+            return False, "trade missing buyer/seller key"
+        if buyer_public_key == seller_public_key:
+            return False, "buyer cannot equal seller"
+        if int(price_int) <= 0:
+            return False, "trade price must be positive"
+        owner = self.ownership.get(image_hash)
+        if owner != seller_public_key:
+            return False, "seller does not own image"
+        if self.get_balance(buyer_public_key) < int(price_int):
+            return False, "insufficient balance"
+        return True, "ok"
+
+    def apply_mint(self, image_hash, owner_public_key):
+        ok, reason = self.validate_mint(image_hash, owner_public_key)
+        if not ok:
+            return False, reason
+        self._ensure_account(owner_public_key)
+        self.ownership[image_hash] = owner_public_key
+        return True, "ok"
+
+    def apply_trade(self, image_hash, buyer_public_key, seller_public_key, price_int):
+        ok, reason = self.validate_trade(image_hash, buyer_public_key, seller_public_key, price_int)
+        if not ok:
+            return False, reason
+        price_int = int(price_int)
+        self._ensure_account(buyer_public_key)
+        self._ensure_account(seller_public_key)
+        self.balances[buyer_public_key] = self.get_balance(buyer_public_key) - price_int
+        self.balances[seller_public_key] = self.get_balance(seller_public_key) + price_int
+        self.ownership[image_hash] = buyer_public_key
+        return True, "ok"
 
 
 class Block:

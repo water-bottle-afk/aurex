@@ -24,7 +24,6 @@ logger = AurexLogger.get_logger(__name__)
 
 def build_signup_view(app: "AurexFletApp") -> ft.View:
     page = app.page
-    logger.debug("[aurex][signup] build_signup_view")
     username_field = ft.TextField(label="Username", border_radius=16)
     email_field = ft.TextField(label="Email", keyboard_type=ft.KeyboardType.EMAIL, border_radius=16)
     password_field = ft.TextField(
@@ -43,7 +42,6 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
         page.update()
 
     def set_busy(is_busy: bool, message: str = "") -> None:
-        logger.debug("[aurex][signup] set_busy is_busy=%s message=%r", is_busy, message)
         async def _apply() -> None:
             username_field.disabled = is_busy
             email_field.disabled = is_busy
@@ -59,52 +57,38 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
         page.run_task(_apply)
 
     def handle_signup(_: ft.ControlEvent) -> None:
-        logger.debug("[aurex][signup] Create Account clicked")
         username = username_field.value.strip()
         email = email_field.value.strip().lower()
         password = password_field.value or ""
-        logger.debug(
-            f"[aurex][signup] form username={username!r} email={email!r} "
-            f"password_len={len(password)}"
-        )
 
         if not username or not email or not password:
-            logger.debug("[aurex][signup] validation failed: missing fields")
             show_status("Please fill in all fields", error=True)
             app.show_message("Please fill in all fields", error=True)
             return
         if "@" not in email:
-            logger.debug("[aurex][signup] validation failed: invalid email")
             show_status("Please enter a valid email", error=True)
             app.show_message("Please enter a valid email", error=True)
             return
         if " " in username or "|" in username:
-            logger.debug("[aurex][signup] validation failed: invalid username chars")
             show_status("Username cannot contain spaces or |", error=True)
             app.show_message("Username cannot contain spaces or |", error=True)
             return
         if len(password) < 6:
-            logger.debug("[aurex][signup] validation failed: password too short")
             show_status("Password must be at least 6 characters", error=True)
             app.show_message("Password must be at least 6 characters", error=True)
             return
 
         def worker() -> None:
             try:
-                logger.debug("[aurex][signup] worker start for username=%r", username)
                 set_busy(True, "Creating your Aurex account...")
-                logger.debug("[aurex][signup] connecting to server")
                 app.connect_if_needed(discover_first=True)
-                logger.debug("[aurex][signup] generating or loading local keys")
                 activate_wallet_user(username, password=password)
                 public_key_b64, _ = generate_user_keys(
                     username=username,
                     password_material=password,
                     force=True,
                 )
-                logger.debug("[aurex][signup] public key ready len=%s", len(public_key_b64))
                 app.client.signup(username, password, email, public_key_b64=public_key_b64)
-                logger.debug("[aurex][signup] signup request completed for %r", username)
                 show_status("Account created successfully!", error=False)
                 app.show_message("Account created successfully!")
                 page.run_task(page.push_route, "/login")
@@ -121,7 +105,6 @@ def build_signup_view(app: "AurexFletApp") -> ft.View:
                     show_status(msg, error=True)
                     app.show_message(f"Signup failed: {msg}", error=True)
             finally:
-                logger.debug("[aurex][signup] worker done for username=%r", username)
                 set_busy(False)
 
         threading.Thread(target=worker, daemon=True).start()

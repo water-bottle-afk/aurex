@@ -11,7 +11,7 @@ class AurexLogger:
 
     @classmethod
     def _env_debug_mode(cls) -> bool:
-        raw = os.getenv("AUREX_DEBUG_MODE", os.getenv("DEBUG_MODE", "1")).strip().lower()
+        raw = os.getenv("AUREX_DEBUG_MODE", os.getenv("DEBUG_MODE", "0")).strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
     @classmethod
@@ -28,6 +28,18 @@ class AurexLogger:
                 handler.setLevel(level)
                 handler.setFormatter(logging.Formatter(fmt=cls._format, datefmt=cls._datefmt))
         cls._configured = True
+        # Keep third-party client transport chatter out of normal logs.
+        for noisy_name in (
+            "flet",
+            "flet_core",
+            "flet_app",
+            "websockets",
+            "websockets.client",
+            "websockets.server",
+            "websockets.protocol",
+            "asyncio",
+        ):
+            logging.getLogger(noisy_name).setLevel(logging.WARNING)
         return level
 
     @classmethod
@@ -35,4 +47,3 @@ class AurexLogger:
         if not cls._configured:
             cls.configure()
         return logging.getLogger(name)
-

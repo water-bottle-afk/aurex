@@ -11,7 +11,6 @@ import time
 import threading
 import multiprocessing
 import logging
-import struct
 import sqlite3
 from datetime import datetime, timezone
 import sys
@@ -24,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 sys.path.insert(0, os.path.dirname(__file__))
 
 from key_manager import NodeKeyManager
-from classes import Ledger, Block, Transaction
+from classes import Ledger, Block, Transaction, StateManager
 from config import (
     NODE_PORTS,
     RPC_HOST,
@@ -117,6 +116,9 @@ class PoWNode:
         self.mempool = []
         self.mempool_lock = threading.Lock()
         self.marketplace_db_path = Path(__file__).parent.parent / "DB" / "marketplace.db"
+        self.state_manager = StateManager()
+        self.committed_tx_ids = set()
+        self.mempool_tx_ids = set()
 
         # Ledger — each node has its own subfolder BLOCKCHAIN_DB/node_{port}/
         ledger_dir = Path(__file__).parent / "BLOCKCHAIN_DB" / f"node_{self.port}"
@@ -127,17 +129,13 @@ class PoWNode:
         if not ledger_path.exists():
             self.ledger.save()
         logger.info("ledger ready path=%s blocks=%s", ledger_path, len(self.ledger.blocks))
-        self.seen_tx_ids = set()
         self.seen_block_hashes = set()
         self.inflight_tx_ids = set()
         for block in self.ledger.blocks:
-            for tx in getattr(block, 'transactions', []):
-                tx_data = getattr(tx, 'data', {}) if tx else {}
-                tx_id = tx_data.get('tx_id')
-                if tx_id:
-                    self.seen_tx_ids.add(tx_id)
             if getattr(block, 'current_hash', None):
                 self.seen_block_hashes.add(block.current_hash)
+        self._seed_balances_from_db()
+        self._rebuild_state_from_ledger()
 
         # Last block on our chain
         self.last_block_index = self.ledger.get_last_block().index if self.ledger.blocks else -1
@@ -258,103 +256,297 @@ class PoWNode:
         except Exception:
             return False
 
-    def _validate_incoming_tx(self, sender, data, signature, public_key_b64):
-        tx_id = data.get('tx_id') if isinstance(data, dict) else None
-        timestamp = data.get('timestamp') if isinstance(data, dict) else None
-        if tx_id:
-            logger.info("tx validate start tx_id=%s sender=%s", tx_id, sender)
-        if not tx_id or not timestamp:
-            return False, "missing tx_id/timestamp"
-        if tx_id in self.seen_tx_ids:
-            return False, "duplicate tx_id"
-        if not self._is_timestamp_valid(timestamp):
-            return False, "stale timestamp"
-        if not public_key_b64 or not signature:
-            return False, "missing signature"
-        message_bytes = _canonical_tx_message(sender, data)
-        if not _verify_ed25519_signature(public_key_b64, message_bytes, signature):
-            return False, "invalid signature"
-        tx_action = (data.get('action') or '') if isinstance(data, dict) else ''
-        if tx_action in ('asset_purchase', 'purchase'):
-            ok, reason = self._validate_asset_purchase_state(sender, data)
-            if not ok:
-                return False, reason
-        if tx_id:
-            logger.info("tx validate ok tx_id=%s", tx_id)
-        return True, "ok"
-
-    def _validate_asset_purchase_state(self, sender, data):
-        """Pre-mining validation for asset purchases against marketplace SQL state."""
-        buyer = data.get('from') or sender
-        seller = data.get('to')
-        asset_id = data.get('asset_id')
-        asset_hash = data.get('asset_hash')
-        amount_raw = data.get('amount') if data.get('amount') is not None else data.get('price')
-
-        if not buyer or not seller:
-            return False, "purchase missing buyer/seller"
-        if buyer == seller:
-            return False, "buyer cannot equal seller"
+    def _is_ed25519_public_key_b64(self, value):
+        if not value or not isinstance(value, str):
+            return False
         try:
-            amount = float(amount_raw)
-        except (TypeError, ValueError):
-            return False, "purchase invalid amount"
-        if amount <= 0:
-            return False, "purchase amount must be positive"
+            raw = base64.b64decode(value.encode())
+            return len(raw) == 32
+        except Exception:
+            return False
 
+    def _lookup_public_key_by_username(self, username):
+        if not username:
+            return ''
         conn = None
         try:
             conn = sqlite3.connect(str(self.marketplace_db_path))
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-
-            item = None
-            if asset_id not in (None, ''):
-                cur.execute(
-                    '''SELECT id, username, cost, is_listed, asset_hash
-                       FROM marketplace_items
-                       WHERE id = ?
-                       LIMIT 1''',
-                    (str(asset_id),),
-                )
-                item = cur.fetchone()
-            if item is None and asset_hash:
-                cur.execute(
-                    '''SELECT id, username, cost, is_listed, asset_hash
-                       FROM marketplace_items
-                       WHERE asset_hash = ?
-                       LIMIT 1''',
-                    (asset_hash,),
-                )
-                item = cur.fetchone()
-            if item is None:
-                return False, "asset not found"
-
-            if item['username'] != seller:
-                return False, "seller does not own asset"
-            if item['is_listed'] is not None and int(item['is_listed']) == 0:
-                return False, "asset not listed"
-
-            listed_price = float(item['cost'] or 0)
-            if abs(listed_price - amount) > 0.01:
-                return False, "price mismatch"
-
-            cur.execute('SELECT wallet_balance FROM users WHERE username = ?', (buyer,))
-            buyer_wallet = cur.fetchone()
-            if buyer_wallet is None:
-                return False, "buyer wallet not found"
-            buyer_balance = float(buyer_wallet['wallet_balance'] or 0)
-            if buyer_balance < amount:
-                return False, "insufficient balance"
-            return True, "ok"
-        except Exception as e:
-            return False, f"purchase DB validation error: {e}"
+            try:
+                cur.execute('SELECT wallet_public_key FROM users WHERE username = ? LIMIT 1', (username,))
+                row = cur.fetchone()
+                if row and row['wallet_public_key']:
+                    return str(row['wallet_public_key'])
+            except Exception:
+                pass
+            try:
+                cur.execute('SELECT public_key_hex FROM wallets WHERE username = ? LIMIT 1', (username,))
+                row = cur.fetchone()
+                if row and row['public_key_hex']:
+                    return str(row['public_key_hex'])
+            except Exception:
+                pass
+            return ''
+        except Exception:
+            return ''
         finally:
             try:
                 if conn is not None:
                     conn.close()
             except Exception:
                 pass
+
+    def _resolve_identity_public_key(self, identity, fallback_public_key=''):
+        if identity and self._is_ed25519_public_key_b64(identity):
+            return identity
+        if identity:
+            resolved = self._lookup_public_key_by_username(str(identity))
+            if resolved and self._is_ed25519_public_key_b64(resolved):
+                return resolved
+        if fallback_public_key and self._is_ed25519_public_key_b64(fallback_public_key):
+            return fallback_public_key
+        return ''
+
+    def _seed_balances_from_db(self):
+        """Seed balances from SQL once; chain replay applies deterministic deltas on top."""
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.marketplace_db_path))
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            rows = []
+            try:
+                cur.execute(
+                    '''
+                    SELECT username, wallet_public_key, wallet_balance
+                    FROM users
+                    WHERE wallet_public_key IS NOT NULL AND wallet_public_key != ''
+                    '''
+                )
+                rows.extend(cur.fetchall() or [])
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    '''
+                    SELECT w.username, w.public_key_hex AS wallet_public_key, u.wallet_balance
+                    FROM wallets w
+                    LEFT JOIN users u ON u.username = w.username
+                    WHERE w.public_key_hex IS NOT NULL AND w.public_key_hex != ''
+                    '''
+                )
+                rows.extend(cur.fetchall() or [])
+            except Exception:
+                pass
+
+            for row in rows:
+                pk = row['wallet_public_key'] if isinstance(row, sqlite3.Row) else None
+                if not pk or not self._is_ed25519_public_key_b64(pk):
+                    continue
+                bal = row['wallet_balance'] if isinstance(row, sqlite3.Row) else None
+                try:
+                    bal_int = StateManager.amount_to_int(StateManager.INITIAL_COINS if bal is None else bal)
+                except Exception:
+                    try:
+                        base = StateManager.INITIAL_COINS if bal is None else bal
+                        bal_int = int(float(base) * 100)
+                    except Exception:
+                        bal_int = StateManager.INITIAL_BALANCE_INT
+                self.state_manager.set_balance(pk, bal_int)
+        except Exception as e:
+            logger.warning("seed balances from DB failed: %s", e)
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def _normalize_tx_type(self, data):
+        if not isinstance(data, dict):
+            return ''
+        raw = str(data.get('type') or data.get('action') or '').strip().upper()
+        if raw in ('MINT', 'ASSET_MINT', 'UPLOAD'):
+            return 'MINT'
+        if raw in ('TRADE', 'BUY', 'ASSET_PURCHASE', 'PURCHASE'):
+            return 'TRADE'
+        return raw
+
+    def _normalize_state_tx(self, sender, data, public_key_b64, state_snapshot):
+        if not isinstance(data, dict):
+            return None, "tx data must be object"
+        tx_type = self._normalize_tx_type(data)
+        image_hash = data.get('image_hash') or data.get('asset_hash')
+
+        if tx_type == 'MINT':
+            owner_hint = data.get('initial_owner') or data.get('owner_pub') or data.get('owner') or sender
+            owner_pk = self._resolve_identity_public_key(owner_hint, fallback_public_key=public_key_b64)
+            if not owner_pk:
+                return None, "mint owner public key not resolved"
+            return {
+                'type': 'MINT',
+                'image_hash': image_hash,
+                'owner': owner_pk,
+            }, "ok"
+
+        if tx_type == 'TRADE':
+            buyer_hint = data.get('buyer') or data.get('buyer_pub') or data.get('from') or sender
+            seller_hint = data.get('seller') or data.get('seller_pub') or data.get('to')
+            buyer_pk = self._resolve_identity_public_key(buyer_hint, fallback_public_key=public_key_b64)
+            seller_pk = self._resolve_identity_public_key(seller_hint)
+            if not seller_pk and image_hash:
+                seller_pk = state_snapshot.ownership.get(image_hash, '')
+            if not buyer_pk:
+                return None, "trade buyer public key not resolved"
+            if not seller_pk:
+                return None, "trade seller public key not resolved"
+            amount_raw = data.get('price') if data.get('price') is not None else data.get('amount')
+            try:
+                price_int = StateManager.amount_to_int(amount_raw)
+            except Exception:
+                return None, "trade invalid price"
+            return {
+                'type': 'TRADE',
+                'image_hash': image_hash,
+                'buyer': buyer_pk,
+                'seller': seller_pk,
+                'price_int': price_int,
+            }, "ok"
+
+        return None, f"unsupported tx type '{tx_type}'"
+
+    def _validate_state_tx(self, state_tx, state_snapshot):
+        tx_type = state_tx.get('type')
+        if tx_type == 'MINT':
+            return state_snapshot.validate_mint(state_tx.get('image_hash'), state_tx.get('owner'))
+        if tx_type == 'TRADE':
+            return state_snapshot.validate_trade(
+                state_tx.get('image_hash'),
+                state_tx.get('buyer'),
+                state_tx.get('seller'),
+                state_tx.get('price_int'),
+            )
+        return False, "unsupported state tx"
+
+    def _apply_state_tx(self, state_tx, state_snapshot):
+        tx_type = state_tx.get('type')
+        if tx_type == 'MINT':
+            return state_snapshot.apply_mint(state_tx.get('image_hash'), state_tx.get('owner'))
+        if tx_type == 'TRADE':
+            return state_snapshot.apply_trade(
+                state_tx.get('image_hash'),
+                state_tx.get('buyer'),
+                state_tx.get('seller'),
+                state_tx.get('price_int'),
+            )
+        return False, "unsupported state tx"
+
+    def _extract_tx_fields(self, tx):
+        if isinstance(tx, Transaction):
+            return tx.sender, tx.data or {}, tx.signature or '', tx.public_key or ''
+        if isinstance(tx, dict):
+            return tx.get('sender', ''), tx.get('data', {}) or {}, tx.get('signature', ''), tx.get('public_key', '')
+        return '', {}, '', ''
+
+    def _build_state_with_mempool(self):
+        staged = self.state_manager.copy()
+        with self.mempool_lock:
+            pending = list(self.mempool)
+        for tx in pending:
+            sender, data, _sig, public_key = self._extract_tx_fields(tx)
+            state_tx, _ = self._normalize_state_tx(sender, data, public_key, staged)
+            if not state_tx:
+                continue
+            self._apply_state_tx(state_tx, staged)
+        return staged
+
+    def _validate_incoming_tx(
+        self,
+        sender,
+        data,
+        signature,
+        public_key_b64,
+        *,
+        state_snapshot=None,
+        enforce_timestamp=True,
+        check_duplicate_cache=True,
+    ):
+        tx_id = data.get('tx_id') if isinstance(data, dict) else None
+        timestamp = data.get('timestamp') if isinstance(data, dict) else None
+        if tx_id:
+            logger.info("tx validate start tx_id=%s sender=%s", tx_id, sender)
+        if not tx_id or not timestamp:
+            return False, "missing tx_id/timestamp"
+        if check_duplicate_cache and tx_id in self.committed_tx_ids:
+            return False, "duplicate tx_id"
+        if enforce_timestamp and not self._is_timestamp_valid(timestamp):
+            return False, "stale timestamp"
+        if not public_key_b64 or not signature:
+            return False, "missing signature"
+        message_bytes = _canonical_tx_message(sender, data)
+        if not _verify_ed25519_signature(public_key_b64, message_bytes, signature):
+            return False, "invalid signature"
+
+        state_snapshot = state_snapshot or self.state_manager
+        state_tx, reason = self._normalize_state_tx(sender, data, public_key_b64, state_snapshot)
+        if not state_tx:
+            return False, reason
+        ok, reason = self._validate_state_tx(state_tx, state_snapshot)
+        if not ok:
+            return False, reason
+        if tx_id:
+            logger.info("tx validate ok tx_id=%s", tx_id)
+        return True, "ok"
+
+    def apply_block(self, block):
+        """
+        Validate and apply every transaction in a block atomically.
+        State updates only commit after the full block passes.
+        """
+        staged_state = self.state_manager.copy()
+        staged_tx_ids = set(self.committed_tx_ids)
+        txs = list(getattr(block, 'transactions', []) or [])
+
+        for tx in txs:
+            sender, data, signature, public_key = self._extract_tx_fields(tx)
+            tx_id = data.get('tx_id') if isinstance(data, dict) else None
+            if tx_id and tx_id in staged_tx_ids:
+                return False, f"duplicate tx_id in chain ({tx_id})"
+            ok, reason = self._validate_incoming_tx(
+                sender,
+                data,
+                signature,
+                public_key,
+                state_snapshot=staged_state,
+                enforce_timestamp=False,
+                check_duplicate_cache=False,
+            )
+            if not ok:
+                return False, reason
+
+            state_tx, reason = self._normalize_state_tx(sender, data, public_key, staged_state)
+            if not state_tx:
+                return False, reason
+            ok, reason = self._apply_state_tx(state_tx, staged_state)
+            if not ok:
+                return False, reason
+            if tx_id:
+                staged_tx_ids.add(tx_id)
+
+        self.state_manager = staged_state
+        self.committed_tx_ids = staged_tx_ids
+        return True, "ok"
+
+    def _rebuild_state_from_ledger(self):
+        seed_balances = dict(self.state_manager.balances)
+        self.state_manager = StateManager(balances=seed_balances)
+        self.committed_tx_ids = set()
+        for block in self.ledger.blocks:
+            ok, reason = self.apply_block(block)
+            if not ok:
+                logger.warning("ledger replay halted at block=%s: %s", getattr(block, 'index', '?'), reason)
+                break
 
     def start_listening(self):
         self.is_running = True
@@ -484,41 +676,30 @@ class PoWNode:
             return
         logger.info("validation: chain ok prev_hash link")
 
-        # Validate transactions
-        for tx in tx_list:
-            sender = tx.get('sender', '')
-            data = tx.get('data', {})
-            sig = tx.get('signature', '')
-            pub = tx.get('public_key', '')
-            ok, reason = self._validate_incoming_tx(sender, data, sig, pub)
-            if not ok:
-                logger.warning("validation failed: tx rejected (%s)", reason)
-                return
+        # Validate/apply transactions atomically against node state.
+        transactions = [Transaction.from_dict(tx) for tx in tx_list]
+        block = Block(
+            index=block_index,
+            timestamp=timestamp,
+            prev_hash=prev_hash,
+            current_hash=current_hash,
+            nonce=nonce,
+            miner_id=miner_id,
+            signature=signature,
+            public_key_pem=public_key_pem,
+            transactions=transactions,
+        )
+        ok, reason = self.apply_block(block)
+        if not ok:
+            logger.warning("validation failed: block tx/state rejected (%s)", reason)
+            return
 
-        # Write to our ledger
         try:
-            transactions = [Transaction.from_dict(tx) for tx in tx_list]
-            block = Block(
-                index=block_index,
-                timestamp=timestamp,
-                prev_hash=prev_hash,
-                current_hash=current_hash,
-                nonce=nonce,
-                miner_id=miner_id,
-                signature=signature,
-                public_key_pem=public_key_pem,
-                transactions=transactions
-            )
             self.ledger.add_block(block)
             logger.info("ledger saved block_index=%s txs=%s", block_index, len(transactions))
         except Exception as e:
             logger.error("Ledger write failed: %s", e)
             return
-
-        for tx in tx_list:
-            tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
-            if tx_id:
-                self.seen_tx_ids.add(tx_id)
 
         self.last_block_index = block_index
         self.last_block_hash = current_hash
@@ -536,6 +717,7 @@ class PoWNode:
             with self.mempool_lock:
                 self.mempool = [t for t in self.mempool if (t.get('data', {}).get('tx_id') not in tx_ids)]
                 for tx_id in list(tx_ids):
+                    self.mempool_tx_ids.discard(tx_id)
                     if tx_id in self.inflight_tx_ids:
                         self.inflight_tx_ids.remove(tx_id)
 
@@ -543,6 +725,8 @@ class PoWNode:
         self._stop_mining("new_block")
         # Gossip onward to neighbors (exclude sender)
         self._broadcast_block(payload, relay_from=sender_node)
+        # Count this node's validation as a confirmation in the gateway.
+        self._send_block_confirmation(block_index, current_hash, timestamp, tx_list, miner_id=miner_id)
         logger.info("block validate done index=%s", block_index)
 
     def _handle_new_transaction(self, message, client_socket):
@@ -558,10 +742,7 @@ class PoWNode:
             # Early duplicate check to prevent double processing
             if tx_id:
                 with self.mempool_lock:
-                    in_mempool = any(
-                        (item.get('data', {}).get('tx_id') == tx_id) for item in self.mempool
-                    )
-                    if tx_id in self.seen_tx_ids or tx_id in self.inflight_tx_ids or in_mempool:
+                    if tx_id in self.committed_tx_ids or tx_id in self.inflight_tx_ids or tx_id in self.mempool_tx_ids:
                         logger.warning("tx rejected: duplicate tx_id (%s)", tx_id)
                         client_socket.close()
                         return
@@ -569,9 +750,9 @@ class PoWNode:
                     inflight_added = True
             
             start_timestamp = datetime.now(timezone.utc).isoformat()
-            tx_type = tx_data.get('action', 'unknown') if isinstance(tx_data, dict) else 'unknown'
+            tx_type = self._normalize_tx_type(tx_data) if isinstance(tx_data, dict) else 'unknown'
             relay = message.get('relay') or message.get('node_id') or ''
-            if tx_type == 'asset_mint' and isinstance(tx_data, dict):
+            if tx_type == 'MINT' and isinstance(tx_data, dict):
                 file_name = tx_data.get('file_name') or tx_data.get('metadata_link') or ''
                 if file_name:
                     logger.info("mint file received: %s", file_name)
@@ -580,7 +761,16 @@ class PoWNode:
             client_socket.send(json.dumps(ack).encode())
             client_socket.close()
 
-            ok, reason = self._validate_incoming_tx(sender, tx_data, signature, public_key)
+            state_for_validation = self._build_state_with_mempool()
+            ok, reason = self._validate_incoming_tx(
+                sender,
+                tx_data,
+                signature,
+                public_key,
+                state_snapshot=state_for_validation,
+                enforce_timestamp=True,
+                check_duplicate_cache=True,
+            )
             if not ok:
                 logger.warning("tx rejected (%s): %s", tx_type, reason)
                 return
@@ -594,7 +784,7 @@ class PoWNode:
                     'start_timestamp': start_timestamp,
                 })
                 if tx_id:
-                    self.seen_tx_ids.add(tx_id)
+                    self.mempool_tx_ids.add(tx_id)
                     if tx_id in self.inflight_tx_ids:
                         self.inflight_tx_ids.remove(tx_id)
 
@@ -666,6 +856,9 @@ class PoWNode:
             if not self.mempool:
                 return
             tx = self.mempool.pop(0)
+            tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+            if tx_id:
+                self.mempool_tx_ids.discard(tx_id)
 
         block_index = self.last_block_index + 1
         prev_hash = self.last_block_hash
@@ -693,8 +886,11 @@ class PoWNode:
                 public_key_pem=public_key_pem,
                 transactions=[transaction]
             )
+            ok, reason = self.apply_block(block)
+            if not ok:
+                logger.warning("local mined block rejected by state rules: %s", reason)
+                return
             self.ledger.add_block(block)
-            tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
             logger.info("ledger saved block_index=%s tx_id=%s", block_index, tx_id)
         except Exception as e:
             logger.error("Ledger write failed: %s", e)
@@ -702,11 +898,10 @@ class PoWNode:
 
         self.last_block_index = block_index
         self.last_block_hash = block_hash
-        tx_type = tx.get('data', {}).get('action', 'unknown') if isinstance(tx, dict) else 'unknown'
-        tx_id = tx.get('data', {}).get('tx_id') if isinstance(tx, dict) else None
+        if block_hash:
+            self.seen_block_hashes.add(block_hash)
+        tx_type = self._normalize_tx_type(tx.get('data', {})) if isinstance(tx, dict) else 'unknown'
         logger.info("block mined index=%s hash=%s... type=%s tx_id=%s", block_index, block_hash[:16], tx_type, tx_id)
-        if tx_id:
-            self.seen_tx_ids.add(tx_id)
 
         payload = {
             'index': block_index,
@@ -720,7 +915,7 @@ class PoWNode:
             'transactions': [tx]
         }
         self._broadcast_block(payload)
-        self._send_block_confirmation(block_index, block_hash, timestamp, [tx])
+        self._send_block_confirmation(block_index, block_hash, timestamp, [tx], miner_id=self.node_id)
         logger.info("block broadcast+confirm sent index=%s tx_id=%s", block_index, tx_id)
 
         # Start mining next tx if any
@@ -768,14 +963,14 @@ class PoWNode:
             except Exception:
                 pass
 
-    def _send_block_confirmation(self, block_index, block_hash, timestamp, transactions=None):
+    def _send_block_confirmation(self, block_index, block_hash, timestamp, transactions=None, miner_id=None):
         """Notify RPC server so it can forward to main server (with tx list for wallet updates)."""
         try:
             msg = {
                 'type': 'block_confirmation',
                 'block_index': block_index,
                 'block_hash': block_hash,
-                'miner_id': self.node_id,
+                'miner_id': miner_id or self.node_id,
                 'node_id': self.node_id,
                 'timestamp': timestamp,
                 'transactions': transactions or [],

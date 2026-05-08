@@ -10,7 +10,8 @@ import uvicorn
 
 from aurex_logging import AurexLogger
 
-SERVER_IP = "10.100.102.58"
+SERVER_IP = "localhost"
+#SERVER_IP = "nadav.cohen"
 BACKEND_PORT = 23456
 FLET_PORT = 8550
 
