@@ -1,22 +1,43 @@
 __author__ = "Nadav"
 from protocols import HTTPSServer,RSA_Server, UDPServer
+from config import SERVER_IP, SERVER_PORT, GATEWAY_IP, GATEWAY_PORT, SERVER_PORT_FOR_GATEWAY
 import threading
 
 class Server:
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
-        self.server = HTTPSServer(ip, port)
-        self.sock_for_gateway = RSA_Server("localhost", 23456, dir_for_keys="ServerKeys")
-        self.UDPServer = UDPServer("localhost", 44222, "localhost", 12345)
+    def __init__(self, ip=SERVER_IP, port=SERVER_PORT):
+        self.client_listener = RSA_Server(ip, port, dir_for_keys="ServerKeys", name="ClientListener")
+        self.client_listener.handle_client = self.communicate_with_client
+        
+        self.gateway_listener = RSA_Server(ip, SERVER_PORT_FOR_GATEWAY, dir_for_keys="ServerKeys", name="GatewayListener")
+        self.gateway_listener.handle_client = self.communicate_with_gateway
 
     def start(self):
-        threading.Thread(target=self.server.start).start()
-        threading.Thread(target=self.sock_for_gateway.contact_with_RSA).start()
-        threading.Thread(target=self.UDPServer.run).start()
+        # הפעלת שני השרתים בטרדים נפרדים כדי שלא יחסמו אחד את השני
+        threading.Thread(target=self.client_listener.start, daemon=True).start()
+        threading.Thread(target=self.gateway_listener.start, daemon=True).start()
+        
+        print("Main Server is running (Listening for Clients and Gateway)...")
 
-    def handle_client(client_sock, addr):
-        pass
+    def communicate_with_client(self, comm):
+        self.client_listener.contact_with_RSA(comm)
+        
+        while True:
+            msg = comm.recv_one_message()
+            if not msg: break
+            # כאן מטפלים ב-Login ובקשות מהאפליקציה
+            if msg.get("type") == "LOGIN":
+                # ביצוע הלוגיקה...
+                pass
+
+    def communicate_with_gateway(self, comm):
+
+        self.gateway_listener.contact_with_RSA(comm)
+        
+        while True:
+            msg = comm.recv_one_message()
+            if not msg: break
+            pass
+
 
     def login(self, username, password):
         pass
@@ -42,4 +63,8 @@ class Server:
     def notify_client(self):
         pass
 
-    
+if __name__ == "__main__":
+    server = Server()
+    print(f"[*] Starting server at {SERVER_IP}:{SERVER_PORT}...")
+    server.start()
+

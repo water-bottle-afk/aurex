@@ -2,7 +2,7 @@ AUREX_PROTOCOL (JSON envelope)
 ==============================
 
 All encrypted messages must use:
-{"type": "<MSG_TYPE>", "payload": {...}, "signature": "<OPTIONAL>"}
+{"type": "<MSG_TYPE>", "payload": {...}, "signature": "<OPTIONAL>": in base64}
 
 Discovery
 ---------

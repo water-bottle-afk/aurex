@@ -1,30 +1,3 @@
-__author__ = "Nadav"
-
-"""
-The protocols.py stores classes being used through the project.
-"""
-
-import socket
-import hashlib
-from hashlib import md5
-import random
-import pickle
-import threading
-import struct
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding as PADDING
-from cryptography.hazmat.primitives.ciphers.algorithms import AES
-from cryptography.hazmat.backends import default_backend
-import os
-import json
-import base64
-from cryptography.hazmat.primitives.asymmetric import dh, rsa, padding
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.serialization import load_pem_parameters, load_pem_public_key
-import logging
-
-PEPPER = "Aurex"
-
 class Communication:
     def log(self, dirct, data):
         
@@ -146,9 +119,7 @@ class RSA_Client:
         self.contact_with_RSA()
         # Now you can use proto to send/receive encrypted messages with the server
 
-        self.communicate_with_server()
 
-    def communicate_with_server(self):
         while True:
             msg = input("Enter message to send (or 'exit' to quit): ")
             if msg.lower() == 'exit':
@@ -200,29 +171,38 @@ class RSA_Client:
         self.sock.close()
 
 class RSA_Server:
-    def __init__(self, ip, port, dir_for_keys=None, Gateway=False,name="RSA_Server"):
+    def __init__(self, ip, port, dir_for_keys=None, Gateway=False,name="RSA_Server", role=""):
         self.ip = ip
         self.port = port
         self.dir_for_keys = dir_for_keys
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind((self.ip, self.port))
         self.sock.listen(5 if not Gateway else 10)
+        self.role = role
 
     def start(self):
-        while True:
-            self.client_sock, addr = self.sock.accept()
-            t = threading.Thread(target=self.communicate_with_client, daemon=True, args=(self.client_sock,))
-            t.start()
+        if self.role == "Gateway" or self.role == "Blockchain Node":
+            while True:
+                self.client_sock, addr = self.sock.accept()
+                t = threading.Thread(target=self.handle_client, daemon=True, args=(self.client_sock,))
+                t.start()
         
 
-    def communicate_with_client(self, client_socket):
+    def handle_client(self, client_socket):
         communication = Communication(client_socket, name="Server")
         self.contact_with_RSA(communication)
         
-        self.handle_client(communication)
+        if self.inside_server:
+            return
+            
+        while True:
+            msg = communication.recv_one_message()
+            if msg is None:
+                break
+            # Handle the received message (e.g., process transactions, etc.)
+            communication.send_one_message({"type": "ACK", "content": "Message received"})
 
-    def handle_client(self, communication): #will gonna be ovveridden
-        pass
+        communication.close()
         
     def contact_with_RSA(self, communication):
         answer =  communication.recv_one_message(False)
@@ -304,68 +284,3 @@ class RSA_Server:
         )
         communication.AES_key = decrypted_data
 
-
-# CLASS UDP SERVER
-
-class UDPServer:
-
-    def __init__(self, self_ip, self_port, srv_ip, srv_port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.ip = self_ip
-        self.port = self_port
-        self.srv_ip = srv_ip
-        self.srv_port = srv_port
-        self.message_to_send = f"SRVAT|{srv_ip}|{str(srv_port)}"
-        self.message_to_send = self.message_to_send.encode()
-        self.Print = print
-
-    def run(self):
-        try:
-            self.sock.bind((self.ip, self.port))
-            while True:
-                bin_data, addr = self.sock.recvfrom(1024)
-                if bin_data == b"WHRSV":
-                    self.Print(f"got a message from {addr}", 20)
-                    self.sock.sendto(self.message_to_send, addr)
-                    self.Print(f"sent a message to {addr}", 20)
-        except OSError as e:
-            self.Print(f"CONNECTION ERROR! {e}", 50)
-        except Exception as e:
-            self.Print(f"ERROR! {e}", 50)
-
-
-
-# CLASS UDP CLIENT
-
-class UDPClient:
-    def __init__(self, udp_srv_port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        # in order to send broadcast msgs (sol -> low level socket, so=socket option, val1  = enable)
-
-        self.udp_srv_port = udp_srv_port
-        self.broadcast_ip = "255.255.255.255"
-        self.tcp_ip = None
-        self.tcp_port = None
-        self.Print = print
-
-    def run(self):
-        while self.tcp_ip is None:
-            message = b"WHRSV"
-            self.sock.sendto(message, (self.broadcast_ip, self.udp_srv_port))  # broadcast msg
-            bin_data, addr = self.sock.recvfrom(1024)
-
-            self.Print(f"UDP client received raw info from {addr}", 20)
-            self.Print(bin_data, 10)
-            try:
-                query, tcp_ip, tcp_port = bin_data.decode().split('|')
-                tcp_port = int(tcp_port)
-                self.Print(f"Server's At {tcp_ip}:{tcp_port}", 20)
-                self.tcp_port = tcp_port
-                self.tcp_ip = tcp_ip
-                break
-            except Exception as e:
-                self.Print(f"UDP client Error: {e}", 40)
-        self.sock.close()
-        return self.tcp_ip, self.tcp_port
-    
