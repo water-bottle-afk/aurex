@@ -11,6 +11,10 @@ RPC_HOST = '127.0.0.1'
 RPC_PORT = 5000
 RPC_LISTEN_HOST = '0.0.0.0'
 RPC_LISTEN_PORT = 5000
+# Dedicated encrypted channel for node<->gateway traffic.
+RPC_NODE_SECURE_PORT = 5001
+# Each node listens for encrypted gateway control on (node_port + offset).
+NODE_GATEWAY_SECURE_PORT_OFFSET = 1000
 # Main server to notify when block is confirmed (marketplace server)
 SERVER_NOTIFY_HOST = '127.0.0.1'
 SERVER_NOTIFY_PORT = 23457

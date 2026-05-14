@@ -18,12 +18,15 @@ import base64
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import (
     NODE_PORTS,
     RPC_HOST,
     RPC_LISTEN_HOST,
     RPC_LISTEN_PORT,
+    RPC_NODE_SECURE_PORT,
+    NODE_GATEWAY_SECURE_PORT_OFFSET,
     SERVER_NOTIFY_HOST,
     SERVER_NOTIFY_PORT,
     DEFAULT_POW_DIFFICULTY,
@@ -37,6 +40,12 @@ from db_init import get_db_connection, init_database
 from classes import StateManager
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from protocol import Protocol
+from enryption_logic.rsa_encryption_sockets import (
+    EncryptedClient,
+    EncryptedServer,
+    build_proto_message,
+    validate_proto_message,
+)
 
 # Logging
 logging.basicConfig(
@@ -89,28 +98,38 @@ def _normalize_peer_host(host):
     return h
 
 
-def register_peer(host, port, node_id=''):
+def register_peer(host, port, node_id='', secure_port=None):
     """Record or refresh a PoW node that registered / heartbeats with the gateway."""
     try:
         p = int(port)
     except (TypeError, ValueError):
         return False
+    sp = None
+    if secure_port is not None:
+        try:
+            sp = int(secure_port)
+        except (TypeError, ValueError):
+            sp = None
+    if sp is None:
+        sp = p + NODE_GATEWAY_SECURE_PORT_OFFSET
     h = _normalize_peer_host(host)
     key = (h, p)
     nid = node_id or f'node_{p}'
     with NODE_REGISTRY_LOCK:
         NODE_REGISTRY[key] = {
             'node_id': nid,
+            'secure_port': sp,
             'last_seen': time.monotonic(),
         }
-    logger.debug("node registry update %s:%s id=%s", h, p, nid)
+    logger.debug("node registry update p2p=%s:%s secure=%s id=%s", h, p, sp, nid)
     _emit_gui_event(
         node_id=nid,
-        message=f"Node registered from {h}:{p}",
+        message=f"Node registered p2p={h}:{p} secure={h}:{sp}",
         event_type='node_status',
         direction='inbound',
         status='connected',
         address=f"{h}:{p}",
+        secure_address=f"{h}:{sp}",
     )
     return True
 
@@ -147,10 +166,16 @@ def get_broadcast_targets():
     """
     _prune_stale_peers()
     with NODE_REGISTRY_LOCK:
-        endpoints = list(NODE_REGISTRY.keys())
+        endpoints = []
+        for (host, port), info in NODE_REGISTRY.items():
+            secure_port = int(info.get('secure_port') or (int(port) + NODE_GATEWAY_SECURE_PORT_OFFSET))
+            endpoints.append((host, secure_port, info.get('node_id') or f'node_{port}'))
     if endpoints:
         return endpoints, 'registry'
-    return [(RPC_HOST, p) for p in NODE_PORTS], 'config_fallback'
+    return [
+        (RPC_HOST, int(p) + NODE_GATEWAY_SECURE_PORT_OFFSET, f'node_{p}')
+        for p in NODE_PORTS
+    ], 'config_fallback'
 
 def _canonical_tx_message(sender, data):
     payload = {"sender": sender, "data": data}
@@ -219,46 +244,50 @@ def _recv_json(sock, max_size=65536):
 
 def broadcast_transaction(transaction_data):
     """Send NEW_TRANSACTION to registered peers (or NODE_PORTS fallback)."""
-    message = {
-        'type': 'NEW_TRANSACTION',
-        'sender': transaction_data.get('sender', ''),
-        'data': transaction_data.get('data', transaction_data),
-        'signature': transaction_data.get('signature', ''),
-        'public_key': transaction_data.get('public_key', ''),
-        'relay': 'gateway',
-    }
-    raw = json.dumps(message).encode()
+    message = build_proto_message(
+        "NEW_TRANSACTION",
+        {
+            'sender': transaction_data.get('sender', ''),
+            'data': transaction_data.get('data', transaction_data),
+            'signature': transaction_data.get('signature', ''),
+            'public_key': transaction_data.get('public_key', ''),
+            'relay': 'gateway',
+        },
+    )
     endpoints_all, source = get_broadcast_targets()
     success = 0
     failures = []
-    for host, port in endpoints_all:
+    for host, secure_port, node_id in endpoints_all:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(SOCKET_TIMEOUT)
-            sock.connect((host, port))
-            sock.send(raw)
-            sock.close()
+            response = EncryptedClient(host, secure_port, timeout=SOCKET_TIMEOUT + 2).request(
+                message,
+                expect_response=True,
+            )
+            if response:
+                ok, _ = validate_proto_message(response)
+                if not ok:
+                    raise ValueError("invalid encrypted response envelope")
             success += 1
             tx_id = transaction_data.get('data', {}).get('tx_id') if isinstance(transaction_data.get('data'), dict) else transaction_data.get('tx_id')
             _emit_gui_event(
-                node_id=f"node_{port}",
-                message=f"Outbound NEW_TRANSACTION to {host}:{port}",
+                node_id=node_id,
+                message=f"Outbound NEW_TRANSACTION to {host}:{secure_port}",
                 event_type='tx_broadcast',
                 direction='outbound',
                 status='sent',
-                address=f"{host}:{port}",
+                address=f"{host}:{secure_port}",
                 tx_id=tx_id,
             )
         except Exception as e:
-            failures.append((host, port, str(e)))
+            failures.append((host, secure_port, str(e)))
             tx_id = transaction_data.get('data', {}).get('tx_id') if isinstance(transaction_data.get('data'), dict) else transaction_data.get('tx_id')
             _emit_gui_event(
-                node_id=f"node_{port}",
-                message=f"Broadcast failed to {host}:{port}: {e}",
+                node_id=node_id,
+                message=f"Broadcast failed to {host}:{secure_port}: {e}",
                 event_type='tx_broadcast',
                 direction='outbound',
                 status='error',
-                address=f"{host}:{port}",
+                address=f"{host}:{secure_port}",
                 tx_id=tx_id,
             )
     logger.info(
@@ -277,27 +306,27 @@ def broadcast_transaction(transaction_data):
 
 def broadcast_stop_mining(block_index=None, block_hash=None):
     """Tell all active peers to stop mining (same target set as transaction broadcast)."""
-    message = {
-        'type': 'STOP_MINING',
-        'block_index': block_index,
-        'block_hash': block_hash,
-    }
-    raw = json.dumps(message).encode()
+    message = build_proto_message(
+        "STOP_MINING",
+        {
+            'block_index': block_index,
+            'block_hash': block_hash,
+        },
+    )
     endpoints_all, _ = get_broadcast_targets()
-    for host, port in endpoints_all:
+    for host, secure_port, node_id in endpoints_all:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(SOCKET_TIMEOUT)
-            sock.connect((host, port))
-            sock.send(raw)
-            sock.close()
+            EncryptedClient(host, secure_port, timeout=SOCKET_TIMEOUT + 2).request(
+                message,
+                expect_response=True,
+            )
             _emit_gui_event(
-                node_id=f"node_{port}",
-                message=f"Outbound STOP_MINING to {host}:{port}",
+                node_id=node_id,
+                message=f"Outbound STOP_MINING to {host}:{secure_port}",
                 event_type='stop_mining',
                 direction='outbound',
                 status='sent',
-                address=f"{host}:{port}",
+                address=f"{host}:{secure_port}",
                 hash_value=block_hash,
             )
         except Exception:
@@ -851,6 +880,176 @@ def _bootstrap_committed_indexes_from_ledger():
     logger.info("loaded committed indexes from gateway ledger: %s", len(committed))
 
 
+def _handle_block_confirmation_message(msg):
+    """Handle a node block_confirmation payload and return response dict."""
+    status, confirmations_count = _register_block_confirmation(msg)
+
+    if status in ('pending', 'ready', 'already_committed'):
+        broadcast_stop_mining(
+            block_index=msg.get('block_index'),
+            block_hash=msg.get('block_hash'),
+        )
+
+    if status == 'invalid':
+        return {'status': 'failed', 'reason': 'invalid block_confirmation payload'}
+    if status == 'fork_rejected':
+        return {'status': 'rejected', 'reason': 'fork index already committed'}
+    if status == 'conflict':
+        return {'status': 'rejected', 'reason': 'confirmation payload conflict'}
+    if status == 'pending':
+        return {
+            'status': 'pending',
+            'confirmations': confirmations_count,
+            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+        }
+    if status == 'already_committed':
+        return {
+            'status': 'ok',
+            'message': 'already committed',
+            'confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+        }
+
+    logger.info(
+        "=== BLOCK COMMITTED === block_index=%s block_hash=%s miner_id=%s node_id=%s confirmations=%s/%s timestamp=%s",
+        msg.get('block_index'),
+        msg.get('block_hash'),
+        msg.get('miner_id'),
+        msg.get('node_id'),
+        confirmations_count,
+        CHAIN_CONFIRMATIONS_REQUIRED,
+        msg.get('timestamp'),
+    )
+    _emit_gui_event(
+        node_id=msg.get('node_id') or msg.get('miner_id') or '',
+        message=f"Block committed index={msg.get('block_index')} hash={msg.get('block_hash', '')}",
+        event_type='block_confirmation',
+        direction='inbound',
+        status='confirmed',
+        tx_id=((msg.get('transactions') or [{}])[0].get('data', {}) or {}).get('tx_id') if msg.get('transactions') else '',
+        hash_value=msg.get('block_hash'),
+    )
+
+    ok, reason = _record_block_confirmation(msg, confirmations_count)
+    if not ok:
+        try:
+            idx = int(msg.get('block_index'))
+            with CONFIRMATION_LOCK:
+                COMMITTED_BY_INDEX.pop(idx, None)
+        except Exception:
+            pass
+        return {'status': 'failed', 'reason': reason}
+
+    notify_server(msg)
+    return {
+        'status': 'ok',
+        'confirmations': confirmations_count,
+        'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
+    }
+
+
+def _handle_node_register_message(msg):
+    host = msg.get('host')
+    port = msg.get('port')
+    node_id = msg.get('node_id', '') or ''
+    secure_port = msg.get('secure_port')
+    if port is None:
+        return {'status': 'failed', 'message': 'missing port'}
+    if register_peer(host, port, node_id, secure_port=secure_port):
+        endpoints, src = get_broadcast_targets()
+        return {
+            'status': 'ok',
+            'registered': True,
+            'type': 'node_registered',
+            'active_peers': len(endpoints),
+            'peer_source': src,
+        }
+    return {'status': 'failed', 'message': 'invalid registration'}
+
+
+def _serve_secure_node_channel(stop_event=None):
+    """Dedicated encrypted listener for all node<->gateway traffic."""
+    key_dir = Path(__file__).parent / "keys"
+    secure_server = EncryptedServer(
+        RPC_LISTEN_HOST,
+        RPC_NODE_SECURE_PORT,
+        key_dir=key_dir,
+        key_name="gateway_node_channel",
+        timeout=15.0,
+    )
+    secure_server.bind_and_listen()
+    logger.info(
+        "Gateway encrypted node channel listening on %s:%s",
+        RPC_LISTEN_HOST,
+        RPC_NODE_SECURE_PORT,
+    )
+    _emit_gui_event(
+        message=f"Gateway secure node channel on {RPC_LISTEN_HOST}:{RPC_NODE_SECURE_PORT}",
+        event_type='gateway',
+        direction='system',
+        status='listening',
+        address=f"{RPC_LISTEN_HOST}:{RPC_NODE_SECURE_PORT}",
+    )
+
+    def handle_encrypted(conn, addr, aes_key):
+        try:
+            incoming = secure_server.recv_json(conn, aes_key)
+            valid, reason = validate_proto_message(incoming)
+            if not valid:
+                secure_server.send_json(
+                    conn,
+                    aes_key,
+                    build_proto_message("ERROR", {'status': 'failed', 'message': reason}),
+                )
+                return
+
+            msg_type = str(incoming.get('type') or '').upper()
+            payload = incoming.get('payload') or {}
+            if msg_type in ('NODE_REGISTER', 'NODE_PING'):
+                response = _handle_node_register_message(payload)
+                rtype = "NODE_REGISTERED" if response.get('status') == 'ok' else "ERROR"
+                secure_server.send_json(conn, aes_key, build_proto_message(rtype, response))
+                return
+
+            if msg_type == 'BLOCK_CONFIRMATION':
+                response = _handle_block_confirmation_message(payload)
+                rtype = "BLOCK_CONFIRMATION_RESULT" if response.get('status') in ('ok', 'pending') else "ERROR"
+                secure_server.send_json(conn, aes_key, build_proto_message(rtype, response))
+                return
+
+            secure_server.send_json(
+                conn,
+                aes_key,
+                build_proto_message("ERROR", {'status': 'failed', 'message': f'unsupported type {msg_type}'}),
+            )
+        except Exception as exc:
+            logger.debug("secure node handle %s failed: %s", addr, exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    try:
+        while stop_event is None or not stop_event.is_set():
+            try:
+                conn, addr, aes_key = secure_server.accept()
+                threading.Thread(
+                    target=handle_encrypted,
+                    args=(conn, addr, aes_key),
+                    daemon=True,
+                ).start()
+            except socket.timeout:
+                continue
+            except Exception as exc:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                logger.error("secure accept: %s", exc)
+    finally:
+        secure_server.close()
+        logger.info("Gateway encrypted node channel stopped")
+
+
 def run_server(stop_event=None, gui_bridge=None):
     if gui_bridge is not None:
         set_gui_bridge(gui_bridge)
@@ -865,16 +1064,18 @@ def run_server(stop_event=None, gui_bridge=None):
     )
     threading.Thread(target=_cleanup_seen_tx_ids, daemon=True).start()
     threading.Thread(target=_registry_reaper_loop, daemon=True).start()
-    # Single listener: clients send action=submit_transaction, /buy, or health; nodes send type=block_confirmation
+    threading.Thread(target=_serve_secure_node_channel, args=(stop_event,), daemon=True).start()
+    # Plain listener: clients/server legacy requests (submit_transaction, /buy, health).
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((RPC_LISTEN_HOST, RPC_LISTEN_PORT))
     server.listen(5)
     server.settimeout(1.0)
     logger.info(
-        "Gateway listening on %s:%s (clients: submit_transaction,/buy,health; nodes: block_confirmation)",
+        "Gateway plain listener on %s:%s (clients: submit_transaction,/buy,health). Encrypted node channel on %s.",
         RPC_LISTEN_HOST,
         RPC_LISTEN_PORT,
+        RPC_NODE_SECURE_PORT,
     )
     _emit_gui_event(
         message=f"Gateway listening on {RPC_LISTEN_HOST}:{RPC_LISTEN_PORT}",
@@ -892,114 +1093,12 @@ def run_server(stop_event=None, gui_bridge=None):
                 conn.close()
                 return
             if msg.get('type') == 'block_confirmation':
-                status, confirmations_count = _register_block_confirmation(msg)
-
-                # Stop miners as soon as first valid block candidate appears.
-                if status in ('pending', 'ready', 'already_committed'):
-                    broadcast_stop_mining(
-                        block_index=msg.get('block_index'),
-                        block_hash=msg.get('block_hash'),
-                    )
-
-                if status == 'invalid':
-                    _send_json(conn, {'status': 'failed', 'reason': 'invalid block_confirmation payload'})
-                    conn.close()
-                    return
-                if status == 'fork_rejected':
-                    _send_json(conn, {'status': 'rejected', 'reason': 'fork index already committed'})
-                    conn.close()
-                    return
-                if status == 'conflict':
-                    _send_json(conn, {'status': 'rejected', 'reason': 'confirmation payload conflict'})
-                    conn.close()
-                    return
-                if status == 'pending':
-                    _send_json(
-                        conn,
-                        {
-                            'status': 'pending',
-                            'confirmations': confirmations_count,
-                            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
-                        },
-                    )
-                    conn.close()
-                    return
-                if status == 'already_committed':
-                    _send_json(
-                        conn,
-                        {
-                            'status': 'ok',
-                            'message': 'already committed',
-                            'confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
-                            'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
-                        },
-                    )
-                    conn.close()
-                    return
-
-                logger.info(
-                    "=== BLOCK COMMITTED === block_index=%s block_hash=%s miner_id=%s node_id=%s confirmations=%s/%s timestamp=%s",
-                    msg.get('block_index'),
-                    msg.get('block_hash'),
-                    msg.get('miner_id'),
-                    msg.get('node_id'),
-                    confirmations_count,
-                    CHAIN_CONFIRMATIONS_REQUIRED,
-                    msg.get('timestamp'),
-                )
-                _emit_gui_event(
-                    node_id=msg.get('node_id') or msg.get('miner_id') or '',
-                    message=f"Block committed index={msg.get('block_index')} hash={msg.get('block_hash', '')}",
-                    event_type='block_confirmation',
-                    direction='inbound',
-                    status='confirmed',
-                    tx_id=((msg.get('transactions') or [{}])[0].get('data', {}) or {}).get('tx_id') if msg.get('transactions') else '',
-                    hash_value=msg.get('block_hash'),
-                )
-
-                ok, reason = _record_block_confirmation(msg, confirmations_count)
-                if not ok:
-                    try:
-                        idx = int(msg.get('block_index'))
-                        with CONFIRMATION_LOCK:
-                            COMMITTED_BY_INDEX.pop(idx, None)
-                    except Exception:
-                        pass
-                    _send_json(conn, {'status': 'failed', 'reason': reason})
-                    conn.close()
-                    return
-
-                notify_server(msg)
-                _send_json(
-                    conn,
-                    {
-                        'status': 'ok',
-                        'confirmations': confirmations_count,
-                        'required_confirmations': CHAIN_CONFIRMATIONS_REQUIRED,
-                    },
-                )
+                _send_json(conn, _handle_block_confirmation_message(msg))
                 conn.close()
                 return
             mtype = msg.get('type')
             if mtype in ('node_register', 'node_ping'):
-                host = msg.get('host')
-                port = msg.get('port')
-                node_id = msg.get('node_id', '') or ''
-                if port is None:
-                    _send_json(conn, {'status': 'failed', 'message': 'missing port'})
-                    conn.close()
-                    return
-                if register_peer(host, port, node_id):
-                    endpoints, src = get_broadcast_targets()
-                    _send_json(conn, {
-                        'status': 'ok',
-                        'registered': True,
-                        'type': 'node_registered',
-                        'active_peers': len(endpoints),
-                        'peer_source': src,
-                    })
-                else:
-                    _send_json(conn, {'status': 'failed', 'message': 'invalid registration'})
+                _send_json(conn, _handle_node_register_message(msg))
                 conn.close()
                 return
             action = msg.get('action')

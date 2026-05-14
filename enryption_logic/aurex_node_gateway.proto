@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package aurex.secure.v1;
+
+message Envelope {
+  string type = 1;
+  bytes payload_json = 2;
+  string signature = 3;
+}
+
+message NodeRegisterPayload {
+  string node_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  uint32 secure_port = 4;
+  uint32 ledger_length = 5;
+}
+
+message NodePingPayload {
+  string node_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  uint32 secure_port = 4;
+}
+
+message StopMiningPayload {
+  int64 block_index = 1;
+  string block_hash = 2;
+}
+
+message TransactionRelayPayload {
+  string sender = 1;
+  bytes transaction_json = 2;
+  string signature = 3;
+  string public_key = 4;
+  string relay = 5;
+}
+
+message BlockConfirmationPayload {
+  int64 block_index = 1;
+  string block_hash = 2;
+  string miner_id = 3;
+  string node_id = 4;
+  string timestamp = 5;
+  bytes transactions_json = 6;
+}

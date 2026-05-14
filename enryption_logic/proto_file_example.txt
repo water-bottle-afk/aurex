@@ -1,0 +1,31 @@
+AUREX Node<->Gateway Secure Proto (JSON envelope over encrypted socket)
+
+Envelope:
+{
+  "type": "<MSG_TYPE>",
+  "payload": { ... },
+  "signature": "<optional>"
+}
+
+Handshake (TCP):
+1) Server sends RSA public key (PEM) as framed bytes.
+2) Client generates AES key (32 bytes), encrypts with RSA-OAEP(SHA256), sends framed bytes.
+3) All next frames are AES-CBC encrypted.
+
+Cipher payload format:
+  frame_payload = ciphertext || iv
+  iv = last 16 bytes of frame_payload
+  ciphertext = all bytes before iv
+
+Core message types:
+- NODE_REGISTER
+- NODE_PING
+- NEW_TRANSACTION
+- STOP_MINING
+- BLOCK_CONFIRMATION
+- ACK
+- ERROR
+
+Important:
+- No private keys in payload.
+- Every connection is short-lived; close socket after request/response.

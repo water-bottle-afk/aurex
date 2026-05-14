@@ -21,6 +21,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from key_manager import NodeKeyManager
 from classes import Ledger, Block, Transaction, StateManager
@@ -28,6 +29,8 @@ from config import (
     NODE_PORTS,
     RPC_HOST,
     RPC_PORT,
+    RPC_NODE_SECURE_PORT,
+    NODE_GATEWAY_SECURE_PORT_OFFSET,
     DEFAULT_SOCKET_TIMEOUT,
     TX_TIME_WINDOW_SECONDS,
     ENFORCE_MINER_ALLOWLIST,
@@ -35,7 +38,12 @@ from config import (
     NODE_REGISTRY_STALE_SECONDS,
     MAX_NEIGHBORS,
 )
-from protocol import Protocol
+from enryption_logic.rsa_encryption_sockets import (
+    EncryptedClient,
+    EncryptedServer,
+    build_proto_message,
+    validate_proto_message,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,8 +117,11 @@ class PoWNode:
         self.difficulty = difficulty
         self.gateway_host = gateway_host if gateway_host is not None else RPC_HOST
         self.gateway_port = int(gateway_port if gateway_port is not None else RPC_PORT)
+        self.gateway_secure_port = int(gateway_port if gateway_port is not None else RPC_NODE_SECURE_PORT)
+        self.gateway_control_port = int(self.port) + NODE_GATEWAY_SECURE_PORT_OFFSET
         self.is_running = False
         self.key_manager = NodeKeyManager(self.node_id)
+        self.gateway_control_server = None
 
         self.known_nodes = {}
         self.mempool = []
@@ -157,40 +168,49 @@ class PoWNode:
         pass  # No DB
 
     def _register_with_gateway_once(self):
-        """Length-prefixed JSON handshake so the gateway adds this node to its broadcast set."""
+        """Encrypted registration so gateway can route encrypted control messages."""
         try:
             peer_host = '127.0.0.1' if self.host in ('0.0.0.0', '') else self.host
-            payload = {
-                'type': 'node_register',
-                'node_id': self.node_id,
-                'host': peer_host,
-                'port': self.port,
-            }
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(DEFAULT_SOCKET_TIMEOUT)
-            sock.connect((self.gateway_host, self.gateway_port))
-            Protocol.send_lp_json(sock, payload)
-            Protocol.recv_lp_json(sock)
-            sock.close()
+            envelope = build_proto_message(
+                "NODE_REGISTER",
+                {
+                    'node_id': self.node_id,
+                    'host': peer_host,
+                    'port': self.port,
+                    'secure_port': self.gateway_control_port,
+                },
+            )
+            response = EncryptedClient(
+                self.gateway_host,
+                self.gateway_secure_port,
+                timeout=DEFAULT_SOCKET_TIMEOUT,
+            ).request(envelope, expect_response=True)
+            if response:
+                valid, reason = validate_proto_message(response)
+                if not valid:
+                    raise ValueError(f"invalid register response: {reason}")
             if not self._gateway_handshake_logged:
                 logger.info(
-                    "gateway handshake ok -> %s:%s (this node %s:%s)",
+                    "secure gateway handshake ok -> %s:%s (node p2p %s:%s secure %s:%s)",
                     self.gateway_host,
-                    self.gateway_port,
+                    self.gateway_secure_port,
                     peer_host,
                     self.port,
+                    peer_host,
+                    self.gateway_control_port,
                 )
                 self._gateway_handshake_logged = True
             else:
                 logger.debug(
-                    "gateway heartbeat %s:%s node %s:%s",
+                    "secure gateway heartbeat %s:%s node %s:%s secure=%s",
                     self.gateway_host,
-                    self.gateway_port,
+                    self.gateway_secure_port,
                     peer_host,
                     self.port,
+                    self.gateway_control_port,
                 )
         except Exception as e:
-            logger.debug("gateway handshake failed: %s", e)
+            logger.debug("secure gateway handshake failed: %s", e)
 
     def _start_gateway_heartbeat(self):
         """Re-register periodically so the gateway does not prune this node."""
@@ -548,8 +568,104 @@ class PoWNode:
                 logger.warning("ledger replay halted at block=%s: %s", getattr(block, 'index', '?'), reason)
                 break
 
+    def _start_gateway_control_listener(self):
+        """Encrypted control listener used only by gateway->node messages."""
+        key_dir = Path(__file__).parent / "keys"
+        self.gateway_control_server = EncryptedServer(
+            self.host,
+            self.gateway_control_port,
+            key_dir=key_dir,
+            key_name=f"{self.node_id}_gateway_control",
+            timeout=DEFAULT_SOCKET_TIMEOUT + 5,
+        )
+        self.gateway_control_server.bind_and_listen()
+        logger.info(
+            "gateway control listener (encrypted) on %s:%s",
+            self.host,
+            self.gateway_control_port,
+        )
+
+        def loop():
+            while self.is_running and self.gateway_control_server is not None:
+                try:
+                    client_socket, _addr, aes_key = self.gateway_control_server.accept()
+                    threading.Thread(
+                        target=self._handle_gateway_control_connection,
+                        args=(client_socket, aes_key),
+                        daemon=True,
+                    ).start()
+                except socket.timeout:
+                    continue
+                except Exception as exc:
+                    if self.is_running:
+                        logger.debug("gateway control accept failed: %s", exc)
+            if self.gateway_control_server is not None:
+                self.gateway_control_server.close()
+                self.gateway_control_server = None
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _handle_gateway_control_connection(self, client_socket, aes_key):
+        try:
+            if self.gateway_control_server is None:
+                return
+            incoming = self.gateway_control_server.recv_json(client_socket, aes_key)
+            valid, reason = validate_proto_message(incoming)
+            if not valid:
+                self.gateway_control_server.send_json(
+                    client_socket,
+                    aes_key,
+                    build_proto_message("ERROR", {'status': 'failed', 'message': reason}),
+                )
+                return
+
+            msg_type = str(incoming.get('type') or '').upper()
+            payload = incoming.get('payload') or {}
+            if msg_type == 'STOP_MINING':
+                self._stop_mining("stop_mining_secure")
+                self.gateway_control_server.send_json(
+                    client_socket,
+                    aes_key,
+                    build_proto_message("ACK", {'status': 'ok', 'handled': True}),
+                )
+                return
+
+            if msg_type == 'NEW_TRANSACTION':
+                message = {
+                    'type': 'NEW_TRANSACTION',
+                    'sender': payload.get('sender', ''),
+                    'data': payload.get('data', {}),
+                    'signature': payload.get('signature', ''),
+                    'public_key': payload.get('public_key', ''),
+                    'relay': payload.get('relay', 'gateway'),
+                }
+                accepted, tx_reason = self._queue_new_transaction(message, should_gossip=True)
+                self.gateway_control_server.send_json(
+                    client_socket,
+                    aes_key,
+                    build_proto_message(
+                        "TX_RESULT",
+                        {'status': 'ok' if accepted else 'failed', 'accepted': bool(accepted), 'reason': tx_reason},
+                    ),
+                )
+                return
+
+            self.gateway_control_server.send_json(
+                client_socket,
+                aes_key,
+                build_proto_message("ERROR", {'status': 'failed', 'message': f'unsupported type {msg_type}'}),
+            )
+        except Exception as exc:
+            logger.debug("gateway control handler error: %s", exc)
+        finally:
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+
     def start_listening(self):
         self.is_running = True
+        self._start_gateway_control_listener()
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((self.host, self.port))
@@ -729,7 +845,7 @@ class PoWNode:
         self._send_block_confirmation(block_index, current_hash, timestamp, tx_list, miner_id=miner_id)
         logger.info("block validate done index=%s", block_index)
 
-    def _handle_new_transaction(self, message, client_socket):
+    def _queue_new_transaction(self, message, should_gossip=True):
         inflight_added = False
         tx_id = None
         try:
@@ -756,10 +872,6 @@ class PoWNode:
                 file_name = tx_data.get('file_name') or tx_data.get('metadata_link') or ''
                 if file_name:
                     logger.info("mint file received: %s", file_name)
-
-            ack = {'type': 'MINING_STARTED', 'miner': self.node_id, 'message': 'Mining started'}
-            client_socket.send(json.dumps(ack).encode())
-            client_socket.close()
 
             state_for_validation = self._build_state_with_mempool()
             ok, reason = self._validate_incoming_tx(
@@ -789,22 +901,31 @@ class PoWNode:
                         self.inflight_tx_ids.remove(tx_id)
 
             logger.info("NEW_TRANSACTION queued: type=%s sender=%s tx_id=%s", tx_type, sender, tx_id)
-            self._gossip_transaction(sender, tx_data, signature, public_key, relay_from=relay)
+            if should_gossip:
+                self._gossip_transaction(sender, tx_data, signature, public_key, relay_from=relay)
             self._start_mining_if_needed()
+            return True, "queued"
         except Exception as e:
-            try:
-                client_socket.send(json.dumps({'type': 'ERROR', 'error': str(e)}).encode())
-            except Exception:
-                pass
-            try:
-                client_socket.close()
-            except Exception:
-                pass
+            return False, str(e)
         finally:
             if inflight_added and tx_id:
                 with self.mempool_lock:
                     if tx_id in self.inflight_tx_ids:
                         self.inflight_tx_ids.remove(tx_id)
+
+    def _handle_new_transaction(self, message, client_socket):
+        try:
+            ack = {'type': 'MINING_STARTED', 'miner': self.node_id, 'message': 'Mining started'}
+            client_socket.send(json.dumps(ack).encode())
+            client_socket.close()
+        except Exception:
+            pass
+
+        accepted, reason = self._queue_new_transaction(message, should_gossip=True)
+        if not accepted:
+            tx_data = message.get('data', {}) if isinstance(message, dict) else {}
+            tx_type = self._normalize_tx_type(tx_data) if isinstance(tx_data, dict) else 'unknown'
+            logger.warning("tx rejected (%s): %s", tx_type, reason)
 
     def _start_mining_if_needed(self):
         """Start miner process if not already mining. Uses first tx in mempool."""
@@ -964,10 +1085,9 @@ class PoWNode:
                 pass
 
     def _send_block_confirmation(self, block_index, block_hash, timestamp, transactions=None, miner_id=None):
-        """Notify RPC server so it can forward to main server (with tx list for wallet updates)."""
+        """Notify gateway over encrypted channel (with tx list for wallet updates)."""
         try:
-            msg = {
-                'type': 'block_confirmation',
+            payload = {
                 'block_index': block_index,
                 'block_hash': block_hash,
                 'miner_id': miner_id or self.node_id,
@@ -975,17 +1095,28 @@ class PoWNode:
                 'timestamp': timestamp,
                 'transactions': transactions or [],
             }
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3)
-            sock.connect((self.gateway_host, self.gateway_port))
-            Protocol.send_lp_json(sock, msg)
-            sock.close()
-            logger.info("block_confirmation sent to RPC block_index=%s", block_index)
+            envelope = build_proto_message("BLOCK_CONFIRMATION", payload)
+            response = EncryptedClient(
+                self.gateway_host,
+                self.gateway_secure_port,
+                timeout=DEFAULT_SOCKET_TIMEOUT,
+            ).request(envelope, expect_response=True)
+            if response:
+                valid, reason = validate_proto_message(response)
+                if not valid:
+                    raise ValueError(f"invalid block_confirmation response: {reason}")
+            logger.info(
+                "block_confirmation sent to gateway secure channel block_index=%s",
+                block_index,
+            )
         except Exception as e:
-            logger.warning("send block_confirmation to RPC failed: %s", e)
+            logger.warning("send block_confirmation to secure gateway failed: %s", e)
 
     def stop(self):
         self.is_running = False
         self._stop_mining("shutdown")
+        if self.gateway_control_server is not None:
+            self.gateway_control_server.close()
+            self.gateway_control_server = None
         logger.info("node stopping")
 
