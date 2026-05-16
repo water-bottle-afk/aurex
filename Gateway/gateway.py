@@ -1,0 +1,474 @@
+__author__ = "Nadav"
+
+import os
+import sys
+import threading
+import time
+import logging
+import json
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from typing import Any
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+
+# Adds the root folder to enable imports from SharedResources
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from SharedResources.classes import RSA_Client, RSA_Server, UDPServer
+from SharedResources.config import (
+    GATEWAY_UDP_PORT,
+    GATEWAY_IP,
+    SERVER_IP,
+    SERVER_PORT,
+    GATEWAY_BLOCKCHAIN_PORT,
+)
+
+
+class GatewayServer:
+    """Single gateway runtime: server<->nodes transparent relay with lightweight routing."""
+
+    def __init__(self, gui_bridge=None):
+        self.logger = logging.getLogger("gateway")
+        self.logger.setLevel(logging.INFO)
+
+        self.base_dir = Path(__file__).resolve().parent
+        self.keys_dir = self.base_dir / "GatewayKeys"
+        self.keys_dir.mkdir(parents=True, exist_ok=True)
+
+        self.ledger_path = self.base_dir / "gateway_ledger.json"
+
+        self.gui_bridge = gui_bridge
+        self.stop_event = threading.Event()
+
+        self.node_listener = RSA_Server(
+            GATEWAY_IP,
+            GATEWAY_BLOCKCHAIN_PORT,
+            dir_for_keys=str(self.keys_dir),
+            name="GatewayNodeServer",
+        )
+        self.node_listener.handle_client = self.handle_node_connection
+
+        self.server_client = RSA_Client(SERVER_IP, SERVER_PORT, name="GatewayToServer")
+        self.server_client.communicate_with_server = self.communicate_with_main_server
+
+        self.udp_service = UDPServer(GATEWAY_IP, GATEWAY_UDP_PORT, GATEWAY_IP, GATEWAY_BLOCKCHAIN_PORT)
+
+        self.nodes_lock = threading.Lock()
+        self.nodes: dict[tuple[str, int], dict[str, Any]] = {}
+
+        self.gateway_ledger: list[dict[str, Any]] = self._load_gateway_ledger()
+
+        self.gateway_operations = {
+            "buy_asset": self.tx_request_buy,
+            "sell_asset": self.tx_request_sell,
+            "publish_tx": self.broadcast_tx_to_verify,
+            "tx_request_buy": self.tx_request_buy,
+            "tx_request_sell": self.tx_request_sell,
+            "handle_get_balance": self.handle_get_balance,
+            "get_balance": self.handle_get_balance,
+        }
+        self.blockchain_operations = {
+            "register_blockchain_node": self.register_blockchain_node,
+            "tx_request_buy": self.tx_request_buy,
+            "tx_request_sell": self.tx_request_sell,
+            "broadcast_tx_to_verify": self.broadcast_tx_to_verify,
+            "handle_get_balance": self.handle_get_balance,
+            "get_balance": self.handle_get_balance,
+            "buy_success": self.notify_buy_success,
+            "sell_success": self.notify_sell_success,
+            "send_balance": self.notify_send_balance,
+        }
+
+    def start(self):
+        threading.Thread(target=self.udp_service.run, daemon=True).start()
+        threading.Thread(target=self.server_client.start, daemon=True).start()
+        threading.Thread(target=self.node_listener.start, daemon=True).start()
+
+        self.log_event("Gateway operational. Routing between nodes and server.")
+        while not self.stop_event.is_set():
+            time.sleep(0.2)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def log_event(self, message: str, event_type: str = "log", direction: str = "system", status: str = "info", **extra):
+        self.logger.info(message)
+        if self.gui_bridge is None:
+            return
+        try:
+            self.gui_bridge.log_event(
+                node_id=extra.pop("node_id", "gateway"),
+                message=message,
+                event_type=event_type,
+                direction=direction,
+                status=status,
+                timestamp=extra.pop("timestamp", datetime.now().strftime("%H:%M:%S")),
+                **extra,
+            )
+        except Exception:
+            pass
+
+    def _normalize_type(self, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _load_gateway_ledger(self):
+        if not self.ledger_path.exists():
+            self.ledger_path.write_text("[]", encoding="utf-8")
+            return []
+        try:
+            raw = json.loads(self.ledger_path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
+
+    def _save_gateway_ledger(self):
+        self.ledger_path.write_text(json.dumps(self.gateway_ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _extract_sender_addr(self, comm):
+        try:
+            ip, port = comm.sock.getpeername()
+            return str(ip), int(port)
+        except Exception:
+            return "", 0
+
+    def _register_comm(self, ip: str, port: int, comm, chain_length: int = 0):
+        if not ip or not port:
+            return
+        with self.nodes_lock:
+            self.nodes[(ip, int(port))] = {
+                "comm": comm,
+                "chain_length": int(chain_length),
+            }
+
+    def _update_node_length(self, addr: tuple[str, int], chain_length: int):
+        with self.nodes_lock:
+            if addr in self.nodes:
+                self.nodes[addr]["chain_length"] = int(chain_length)
+
+    def _remove_comm(self, comm):
+        with self.nodes_lock:
+            dead = [node_addr for node_addr, info in self.nodes.items() if info.get("comm") == comm]
+            for node_addr in dead:
+                self.nodes.pop(node_addr, None)
+
+    def _route_to_server(self, msg: dict):
+        if not self.server_client.communication:
+            self.log_event("Main server connection unavailable", status="warning")
+            return
+        self.server_client.communication.send_one_message(msg)
+
+    def _broadcast_to_nodes(self, msg: dict, skip_addr: tuple[str, int] | None = None):
+        with self.nodes_lock:
+            targets = [(addr, info.get("comm")) for addr, info in self.nodes.items()]
+
+        for addr, node_comm in targets:
+            if skip_addr and addr == skip_addr:
+                continue
+            if node_comm is None:
+                continue
+            try:
+                node_comm.send_one_message(msg)
+            except Exception as exc:
+                self.log_event(f"Node send failed {addr[0]}:{addr[1]}: {exc}", status="warning")
+
+    def _canonical_json_bytes(self, payload: dict[str, Any]) -> bytes:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+    def _verify_user_signature(self, public_key_hex: str, payload: dict[str, Any], signature_hex: str) -> bool:
+        try:
+            pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), bytes.fromhex(public_key_hex))
+            pub.verify(bytes.fromhex(signature_hex), self._canonical_json_bytes(payload), ec.ECDSA(hashes.SHA256()))
+            return True
+        except (InvalidSignature, ValueError, TypeError):
+            return False
+
+    def _validate_block(self, block: dict[str, Any]) -> tuple[bool, str]:
+        if not isinstance(block, dict):
+            return False, "block is not dict"
+
+        index = int(block.get("index", -1))
+        expected_index = len(self.gateway_ledger)
+        if index != expected_index:
+            return False, f"block index mismatch expected={expected_index} got={index}"
+
+        prev_hash = str(block.get("prev_hash", ""))
+        expected_prev_hash = "0" * 64 if not self.gateway_ledger else str(self.gateway_ledger[-1].get("hash", ""))
+        if prev_hash != expected_prev_hash:
+            return False, "prev_hash mismatch"
+
+        tx = block.get("tx")
+        if not isinstance(tx, dict):
+            tx = block.get("transaction") if isinstance(block.get("transaction"), dict) else {}
+
+        signature_hex = str(block.get("signature") or tx.get("signature") or "")
+        public_key_hex = str(block.get("public_key") or tx.get("public_key") or "")
+
+        payload = tx.get("data") if isinstance(tx.get("data"), dict) else tx
+        if not signature_hex or not public_key_hex:
+            return False, "missing signature/public_key"
+        if not self._verify_user_signature(public_key_hex, payload, signature_hex):
+            return False, "invalid user signature"
+
+        block_for_hash = dict(block)
+        block_hash = str(block_for_hash.pop("hash", ""))
+        recomputed = hashlib.sha256(self._canonical_json_bytes(block_for_hash)).hexdigest()
+        if block_hash and block_hash != recomputed:
+            return False, "block hash mismatch"
+
+        difficulty = int(block.get("difficulty", 0) or 0)
+        if difficulty > 0 and not recomputed.startswith("0" * difficulty):
+            return False, "invalid PoW target"
+
+        block["hash"] = recomputed
+        return True, "ok"
+
+    def _maybe_sync_lagging_nodes(self, publisher_addr: tuple[str, int], publisher_chain_length: int, userpk: str):
+        if publisher_chain_length <= 0:
+            return
+        threshold = int(publisher_chain_length) - 1
+        with self.nodes_lock:
+            snapshot = [(addr, info.copy()) for addr, info in self.nodes.items()]
+
+        for addr, info in snapshot:
+            if addr == publisher_addr:
+                continue
+            node_len = int(info.get("chain_length", 0) or 0)
+            if node_len > threshold:
+                continue
+            comm = info.get("comm")
+            if comm is None:
+                continue
+            try:
+                comm.send_one_message(
+                    {
+                        "type": "get_ledger",
+                        "publisher_ip": publisher_addr[0],
+                        "publisher_port": publisher_addr[1],
+                        "publisher_chain_length": int(publisher_chain_length),
+                    }
+                )
+                comm.send_one_message(
+                    {
+                        "type": "get_balance",
+                        "publisher_ip": publisher_addr[0],
+                        "publisher_port": publisher_addr[1],
+                        "publisher_chain_length": int(publisher_chain_length),
+                        "userpk": userpk,
+                    }
+                )
+            except Exception as exc:
+                self.log_event(f"Sync request failed for {addr[0]}:{addr[1]}: {exc}", status="warning")
+
+    def handle_node_connection(self, comm):
+        ip, port = self._extract_sender_addr(comm)
+        self._register_comm(ip, port, comm, chain_length=0)
+        self.log_event(
+            f"Node connected {ip}:{port}",
+            event_type="node_status",
+            direction="inbound",
+            status="connected",
+            node_id=f"{ip}:{port}",
+            address=f"{ip}:{port}",
+        )
+
+        try:
+            while True:
+                request = comm.recv_one_message()
+                if not request:
+                    break
+                self._handle_node_message(comm, request)
+        finally:
+            self._remove_comm(comm)
+            self.log_event(
+                f"Node disconnected {ip}:{port}",
+                event_type="node_status",
+                direction="system",
+                status="disconnected",
+                node_id=f"{ip}:{port}",
+                address=f"{ip}:{port}",
+            )
+
+    def _handle_node_message(self, comm, request: dict):
+        msg_type = self._normalize_type(request.get("type"))
+        handler = self.blockchain_operations.get(msg_type)
+
+        if handler:
+            handler(request, comm=comm)
+            return
+
+        self._route_to_server(request)
+        self.log_event(
+            f"Routed node message to server: {request.get('type')}",
+            event_type="route",
+            direction="outbound",
+        )
+
+    def communicate_with_main_server(self):
+        comm = self.server_client.communication
+        self._communicate_with_main_server_comm(comm)
+
+    def _communicate_with_main_server_comm(self, comm):
+        while True:
+            request = comm.recv_one_message()
+            if not request:
+                break
+
+            msg_type = self._normalize_type(request.get("type"))
+            handler = self.gateway_operations.get(msg_type)
+            if handler:
+                handler(request)
+                self.log_event(
+                    f"Processed request from server: {request.get('type')}",
+                    event_type="route",
+                    direction="inbound",
+                )
+            else:
+                self._broadcast_to_nodes(request)
+                self.log_event(
+                    f"Forwarded server message to nodes: {request.get('type')}",
+                    event_type="route",
+                    direction="outbound",
+                )
+
+    def register_blockchain_node(self, request: dict, comm=None):
+        ip, port = self._extract_sender_addr(comm) if comm else ("", 0)
+        data = request.get("data") if isinstance(request.get("data"), dict) else {}
+        reg_ip = str(data.get("ip") or request.get("sender_ip") or ip)
+        reg_port = int(data.get("port") or request.get("sender_port") or port or 0)
+        chain_length = int(data.get("chain_length") or request.get("chain_length") or 0)
+
+        if comm:
+            self._register_comm(reg_ip, reg_port, comm, chain_length=chain_length)
+
+        self.log_event(
+            f"Registered blockchain node {reg_ip}:{reg_port} len={chain_length}",
+            event_type="node_status",
+            direction="inbound",
+            status="connected",
+            node_id=f"{reg_ip}:{reg_port}",
+            address=f"{reg_ip}:{reg_port}",
+        )
+
+    def tx_request_buy(self, request: dict, comm=None):
+        _ = comm
+        outbound = {
+            "type": "tx_request_buy",
+            "data": request.get("data", request),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._broadcast_to_nodes(outbound)
+
+    def tx_request_sell(self, request: dict, comm=None):
+        _ = comm
+        outbound = {
+            "type": "tx_request_sell",
+            "data": request.get("data", request),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._broadcast_to_nodes(outbound)
+
+    def broadcast_tx_to_verify(self, request: dict, comm=None):
+        sender_ip, sender_port = self._extract_sender_addr(comm) if comm else ("", 0)
+        publisher_addr = (request.get("sender_ip") or sender_ip, int(request.get("sender_port") or sender_port or 0))
+
+        req_data = request.get("data") if isinstance(request.get("data"), dict) else {}
+        block = req_data.get("block") if isinstance(req_data.get("block"), dict) else req_data
+        publisher_chain_length = int(req_data.get("publisher_chain_length") or request.get("publisher_chain_length") or len(self.gateway_ledger) + 1)
+
+        ok, reason = self._validate_block(block)
+        if not ok:
+            self.log_event(f"Rejected block: {reason}", status="warning")
+            return
+
+        self.gateway_ledger.append(block)
+        self._save_gateway_ledger()
+        self._update_node_length((publisher_addr[0], publisher_addr[1]), publisher_chain_length)
+
+        tx = block.get("tx") if isinstance(block.get("tx"), dict) else (block.get("transaction") if isinstance(block.get("transaction"), dict) else {})
+        userpk = str(tx.get("sender") or "")
+        self._maybe_sync_lagging_nodes((publisher_addr[0], publisher_addr[1]), publisher_chain_length, userpk)
+
+        outbound = {
+            "type": "broadcast_tx_to_verify",
+            "data": {
+                "block": block,
+                "publisher_chain_length": publisher_chain_length,
+            },
+            "sender_ip": publisher_addr[0],
+            "sender_port": publisher_addr[1],
+        }
+        self._broadcast_to_nodes(outbound, skip_addr=(publisher_addr[0], publisher_addr[1]))
+
+    def handle_get_balance(self, request: dict, comm=None):
+        _ = comm
+        userpk = request.get("userpk")
+        if not userpk and isinstance(request.get("data"), dict):
+            userpk = request["data"].get("userpk")
+
+        outbound = {
+            "type": "handle_get_balance",
+            "userpk": userpk,
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._broadcast_to_nodes(outbound)
+
+    def notify_buy_success(self, request: dict, comm=None):
+        _ = comm
+        payload = {
+            "type": "buy_success",
+            "data": request.get("data", request),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._route_to_server(payload)
+
+    def notify_sell_success(self, request: dict, comm=None):
+        _ = comm
+        payload = {
+            "type": "sell_success",
+            "data": request.get("data", request),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._route_to_server(payload)
+
+    def notify_send_balance(self, request: dict, comm=None):
+        _ = comm
+        payload = {
+            "type": "send_balance",
+            "data": request.get("data", request),
+            "userpk": request.get("userpk"),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._route_to_server(payload)
+
+
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    gateway_server = GatewayServer()
+
+    answer = input("Use gateway GUI dashboard? (y/n): ").strip().lower()
+    if answer in {"y", "yes"}:
+        from Gateway.gateway_dashboard import run_dashboard
+
+        threading.Thread(target=gateway_server.start, daemon=True).start()
+        run_dashboard(gateway_server)
+        return
+
+    gateway_server.start()
+
+
+if __name__ == "__main__":
+    main()

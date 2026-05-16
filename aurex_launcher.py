@@ -2,15 +2,18 @@ import os
 import subprocess
 import sys
 import time
+from SharedResources.logging import Logger
 
 PYTHON_EXEC = "python"
-BLOCKCHAIN_DIR = "blockchain"
+BLOCKCHAIN_DIR = "Blockchain"
+GATEWAY_DIR = "Gateway"
 MARKETPLACE_DIR = "Server"
 CLIENT_DIR = "."
+logger = Logger(__file__)
 
 
 def launch_task(name, command, cwd=""):
-    print(f"[+] Starting {name}...")
+    logger.info(f"[+] Starting {name}...")
     # Use dedicated terminals so local debugging can follow each service log.
     return subprocess.Popen(
         ["start", "cmd", "/k", f"title {name} && {command}"],
@@ -20,7 +23,7 @@ def launch_task(name, command, cwd=""):
 
 
 def main():
-    print("=== AUREX PROJECT ORCHESTRATOR ===")
+    logger.info("=== AUREX PROJECT ORCHESTRATOR ===")
 
     nodes_count = 4
     difficulty = 1
@@ -31,8 +34,8 @@ def main():
     )
     time.sleep(2)
 
-    launch_task("Aurex-Gateway", f"{PYTHON_EXEC} gateway_server.py", BLOCKCHAIN_DIR)
-    print("[!] Waiting for Gateway to stabilize...")
+    launch_task("Aurex-Gateway", f"{PYTHON_EXEC} gateway.py", GATEWAY_DIR)
+    logger.info("[!] Waiting for Gateway to stabilize...")
     time.sleep(3)
 
     launch_task("Aurex-Marketplace", f"{PYTHON_EXEC} server_module.py", MARKETPLACE_DIR)
@@ -40,12 +43,12 @@ def main():
 
     launch_task("Aurex-Client", f"{PYTHON_EXEC} main.py", CLIENT_DIR)
 
-    print("\n[SUCCESS] All systems dispatched.")
-    print("  - Aurex-Nodes: blockchain PoW nodes (blockchain/BLOCKCHAIN_DB/node_*/)")
-    print("  - Aurex-Gateway: signature verification + broadcast (port 5000)")
-    print("  - Aurex-Marketplace: WSS marketplace server (port 23456)")
-    print("  - Aurex-Client: Flet web app over HTTPS")
-    print("\nFirst time? Go to Settings > Wallet & Identity > Generate My Keys before uploading.")
+    logger.info("[SUCCESS] All systems dispatched.")
+    logger.info("  - Aurex-Nodes: blockchain PoW nodes (blockchain/BLOCKCHAIN_DB/node_*/)")
+    logger.info("  - Aurex-Gateway: server<->blockchain relay")
+    logger.info("  - Aurex-Marketplace: WSS marketplace server (port 23456)")
+    logger.info("  - Aurex-Client: Flet web app over HTTPS")
+    logger.info("First time? Go to Settings > Wallet & Identity > Generate My Keys before uploading.")
 
 
 if __name__ == "__main__":

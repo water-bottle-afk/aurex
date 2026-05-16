@@ -1,0 +1,20 @@
+{
+  "firstuser": {
+    "username": "firstuser",
+    "email": "ititit@gmail.com",
+    "salt": "6066466",
+    "password_hash": "3d098620af31ef969c0af5f2e4aa40bf7bb25a293c943dc70090ea47b682de31",
+    "public_key": false,
+    "verification_code": null,
+    "reset_time": null
+  },
+  "andrew": {
+    "username": "andrew",
+    "email": "cohennadav3@gmail.com",
+    "salt": "9206465",
+    "password_hash": "b6ed78a6b331b7682cec150f78d46ca4454450a1c24f2cf9e5a1c6f53b8de5d7",
+    "public_key": false,
+    "verification_code": null,
+    "reset_time": null
+  }
+}
