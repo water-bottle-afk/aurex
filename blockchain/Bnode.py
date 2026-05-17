@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -14,8 +15,8 @@ from typing import Any
 # Adds the root folder to enable imports from SharedResources
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from SharedResources.classes import RSA_Client, RSA_Server, UDPClient
-from SharedResources.config import GATEWAY_UDP_PORT
+from SharedResources.classes import RSA_Client, RSA_Server
+from SharedResources.config import GATEWAY_UDP_PORT, BROADCAST_DISCOVERY_FREQUENCY, POW_DIFFICULTY
 from SharedResources.logging import Logger
 
 
@@ -24,22 +25,37 @@ class BlockchainNode:
 
     CHUNK_SIZE = 8192
 
-    def __init__(self, ip: str, port: int, difficulty: int = 2, symbol: str = "A"):
-        self.ip = str(ip)
+    def __init__(self, port: int = 0, difficulty: int = 2):
+        self.ip = "0.0.0.0"
         self.port = int(port)
         self.difficulty = int(difficulty)
-        self.symbol = symbol
-        self.node_id = f"node_{self.ip}_{self.port}"
 
-        self.logger = Logger("updated_Bnode")
+        self.logger = Logger("Bnode")
         self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
 
-        # Node local storage per node_<ip>_<port>/
         self.base_dir = Path(__file__).resolve().parent
+        self.server_for_peers = RSA_Server(
+            self.ip,
+            self.port,
+            dir_for_keys=None,
+            name="NodePeerServer",
+        )
+        self.server_for_peers.handle_client = self.handle_peer_connection
+
+        # Resolve effective bind values (port may be OS-assigned when 0).
+        self.ip, self.port = self.server_for_peers.sock.getsockname()
+        self.ip = str(self.ip)
+        self.port = int(self.port)
+        self.node_id = f"node_{self.ip}_{self.port}"
+
+        # Node local storage per node_<ip>_<port>/
         self.node_dir = self.base_dir / self.node_id
         self.node_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = self.node_dir / "ledger.json"
         self.balances_path = self.node_dir / "balances.json"
+        self.node_keys_dir = self.node_dir / "Node_keys"
+        self.node_keys_dir.mkdir(parents=True, exist_ok=True)
+        self.server_for_peers.dir_for_keys = str(self.node_keys_dir)
 
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -50,14 +66,6 @@ class BlockchainNode:
 
         self.gateway_client: RSA_Client | None = None
         self.gateway_comm = None
-
-        self.server_for_peers = RSA_Server(
-            self.ip,
-            self.port,
-            dir_for_keys=str(self.node_dir / "NodeKeys"),
-            name=f"NodePeerServer_{self.port}",
-        )
-        self.server_for_peers.handle_client = self.handle_peer_connection
 
         self._load_local_state()
 
@@ -73,20 +81,44 @@ class BlockchainNode:
     def stop(self):
         self.stop_event.set()
 
+    def _discover_gateway_once(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(float(BROADCAST_DISCOVERY_FREQUENCY))
+            sock.sendto(b"WHRSV", ("255.255.255.255", int(GATEWAY_UDP_PORT)))
+            raw, _ = sock.recvfrom(1024)
+            parts = raw.decode("utf-8", errors="ignore").split("|")
+            if len(parts) != 3 or parts[0] != "SRVAT":
+                return None
+            return parts[1], int(parts[2])
+        except Exception:
+            return None
+        finally:
+            sock.close()
+
     def connect_to_gateway(self):
-        udp = UDPClient(GATEWAY_UDP_PORT)
-        gw_ip, gw_port = udp.run()
+        while not self.stop_event.is_set():
+            discovered = self._discover_gateway_once()
+            if not discovered:
+                self.Print(f"[{self.node_id}] gateway not discovered, retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
+                time.sleep(float(BROADCAST_DISCOVERY_FREQUENCY))
+                continue
 
-        client = RSA_Client(gw_ip, gw_port, name=f"{self.node_id}_to_gateway")
-        client.sock.connect((gw_ip, gw_port))
-        client.contact_with_RSA()
-
-        self.gateway_client = client
-        self.gateway_comm = client.communication
-
-        threading.Thread(target=self._listen_gateway_loop, daemon=True).start()
-        self.register_blockchain_node()
-        self.Print(f"[{self.node_id}] connected to gateway at {gw_ip}:{gw_port}")
+            gw_ip, gw_port = discovered
+            try:
+                client = RSA_Client(gw_ip, gw_port, name=f"{self.node_id}_to_gateway")
+                client.sock.connect((gw_ip, gw_port))
+                client.contact_with_RSA()
+                self.gateway_client = client
+                self.gateway_comm = client.communication
+                threading.Thread(target=self._listen_gateway_loop, daemon=True).start()
+                self.register_blockchain_node()
+                self.Print(f"[{self.node_id}] connected to gateway at {gw_ip}:{gw_port}")
+                return
+            except Exception as exc:
+                self.Print(f"[{self.node_id}] gateway connect failed: {exc}; retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
+                time.sleep(float(BROADCAST_DISCOVERY_FREQUENCY))
 
     def _listen_gateway_loop(self):
         while not self.stop_event.is_set() and self.gateway_comm is not None:
@@ -94,6 +126,11 @@ class BlockchainNode:
             if not msg:
                 break
             self._handle_gateway_message(msg)
+        if not self.stop_event.is_set():
+            self.gateway_comm = None
+            self.gateway_client = None
+            self.Print(f"[{self.node_id}] gateway disconnected, reconnecting")
+            self.connect_to_gateway()
 
     # -------- local json persistence --------
 
@@ -162,7 +199,6 @@ class BlockchainNode:
             "signature": str(transaction.get("signature", "")),
             "nonce": 0,
             "difficulty": self.difficulty,
-            "symbol": self.symbol,
         }
         target = "0" * self.difficulty
         while not self.stop_event.is_set():
@@ -207,12 +243,22 @@ class BlockchainNode:
         except Exception as exc:
             self.Print(f"[{self.node_id}] gateway send failed: {exc}")
 
+    def _advertised_ip(self) -> str:
+        try:
+            if self.gateway_client and self.gateway_client.sock:
+                local_ip = str(self.gateway_client.sock.getsockname()[0])
+                if local_ip and local_ip != "0.0.0.0":
+                    return local_ip
+        except Exception:
+            pass
+        return self.ip
+
     def register_blockchain_node(self):
         self._send_gateway(
             {
                 "type": "register_blockchain_node",
-                "data": {"ip": self.ip, "port": self.port, "chain_length": len(self.chain)},
-                "sender_ip": self.ip,
+                "data": {"ip": self._advertised_ip(), "port": self.port, "chain_length": len(self.chain)},
+                "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
             }
         )
@@ -225,7 +271,7 @@ class BlockchainNode:
                     "block": block,
                     "publisher_chain_length": len(self.chain),
                 },
-                "sender_ip": self.ip,
+                "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
             }
         )
@@ -235,7 +281,7 @@ class BlockchainNode:
             {
                 "type": "buy_success",
                 "data": tx_data,
-                "sender_ip": self.ip,
+                "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
             }
         )
@@ -245,7 +291,7 @@ class BlockchainNode:
             {
                 "type": "sell_success",
                 "data": tx_data,
-                "sender_ip": self.ip,
+                "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
             }
         )
@@ -256,7 +302,7 @@ class BlockchainNode:
                 "type": "send_balance",
                 "userpk": userpk,
                 "data": {"userpk": userpk, "balance": self.get_balance(userpk)},
-                "sender_ip": self.ip,
+                "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
             }
         )
@@ -272,6 +318,9 @@ class BlockchainNode:
             return
         if msg_type == "broadcast_tx_to_verify":
             self.handle_broadcast_tx_to_verify(msg)
+            return
+        if msg_type == "create_wallet":
+            self.handle_create_wallet(msg)
             return
         if msg_type == "get_ledger":
             self.handle_get_ledger_sync(msg)
@@ -319,6 +368,18 @@ class BlockchainNode:
         if block is not None:
             self.notify_sell_success(tx)
             self.notify_gateway(block)
+
+    def handle_create_wallet(self, msg: dict[str, Any]):
+        public_key = str(msg.get("public_key") or "")
+        if not public_key:
+            data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+            public_key = str(data.get("public_key") or "")
+        if not public_key:
+            return
+        with self.lock:
+            if public_key not in self.balances:
+                self.balances[public_key] = 100.0
+                self._persist_local_state()
 
     def handle_broadcast_tx_to_verify(self, msg: dict[str, Any]):
         sender_ip = str(msg.get("sender_ip") or "")
@@ -479,12 +540,16 @@ class BlockchainNode:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Aurex updated blockchain node")
-    parser.add_argument("--ip", default="0.0.0.0")
-    parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--difficulty", type=int, default=2)
-    parser.add_argument("--symbol", default="A")
+    parser = argparse.ArgumentParser(
+        description="Aurex blockchain node. If --port is omitted, the OS will choose a free port."
+    )
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--difficulty", type=int, default=POW_DIFFICULTY)
     args = parser.parse_args()
 
-    node = BlockchainNode(args.ip, args.port, difficulty=args.difficulty, symbol=args.symbol)
+    if args.port == 0:
+        print("[*] No --port provided. OS will assign a free port.")
+    node = BlockchainNode(port=args.port, difficulty=args.difficulty)
+    print(f"[*] Node initialized at {node.ip}:{node.port}")
+    print(f"[*] Node keys directory: {node.node_keys_dir}")
     node.start()

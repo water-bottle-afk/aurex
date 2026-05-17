@@ -4,7 +4,7 @@
     "email": "ititit@gmail.com",
     "salt": "6066466",
     "password_hash": "3d098620af31ef969c0af5f2e4aa40bf7bb25a293c943dc70090ea47b682de31",
-    "public_key": false,
+    "public_key": "",
     "verification_code": null,
     "reset_time": null
   },
@@ -13,7 +13,16 @@
     "email": "cohennadav3@gmail.com",
     "salt": "9206465",
     "password_hash": "b6ed78a6b331b7682cec150f78d46ca4454450a1c24f2cf9e5a1c6f53b8de5d7",
-    "public_key": false,
+    "public_key": "",
+    "verification_code": null,
+    "reset_time": null
+  },
+  "Michael": {
+    "username": "Michael",
+    "email": "nadavthecool1@gmail.com",
+    "salt": "4589205",
+    "password_hash": "64252a31f12994352fb46a3d8d637907ed54c4db4a243dd36e08128002e179d0",
+    "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c",
     "verification_code": null,
     "reset_time": null
   }

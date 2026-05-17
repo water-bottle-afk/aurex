@@ -233,6 +233,8 @@ class ServerUpdated:
         self.db = ORMExtended()
         self.upload_sessions = {}
         self.upload_lock = threading.RLock()
+        self.gateway_clients = set()
+        self.gateway_lock = threading.RLock()
         self.client_listener = RSA_Server(self.host, self.port, dir_for_keys="ServerKeys", name="ServerUpdated")
         self.logger = logger
         self.client_listener.handle_client = self.handle_client
@@ -251,6 +253,9 @@ class ServerUpdated:
             "UPLOAD_FINISH": self.handle_upload_finish,
             "GET_ITEMS": self.handle_get_items,
             "UPDATE_PUBLIC_KEY": self.handle_update_public_key,
+            "REGISTER_GATEWAY": self.handle_register_gateway,
+            "CREATE_WALLET": self.handle_create_wallet,
+            "BUY_ASSET": self.handle_buy_asset,
         }
 
     def start(self):
@@ -262,6 +267,8 @@ class ServerUpdated:
             msg = comm.recv_one_message()
             if not msg:
                 self.logger.info("Client disconnected")
+                with self.gateway_lock:
+                    self.gateway_clients.discard(comm)
                 break
             try:
                 response = self.dispatch(comm, msg)
@@ -292,6 +299,16 @@ class ServerUpdated:
 
     def _error(self, e):
         return {"type": "ERROR", "message": str(e)}
+
+    def _notify_gateways(self, payload):
+        with self.gateway_lock:
+            targets = list(self.gateway_clients)
+        for gw_comm in targets:
+            try:
+                gw_comm.send_one_message(payload)
+            except Exception:
+                with self.gateway_lock:
+                    self.gateway_clients.discard(gw_comm)
 
     def handle_start(self, comm, msg):
         _ = comm
@@ -461,7 +478,34 @@ class ServerUpdated:
         ok = self.db.set_user_public_key(username, public_key)
         if not ok:
             return self._error("User not found")
+        self._notify_gateways({"type": "CREATE_WALLET", "data": {"username": username, "public_key": public_key}})
         return self._ok()
+
+    def handle_register_gateway(self, comm, msg):
+        _ = msg
+        with self.gateway_lock:
+            self.gateway_clients.add(comm)
+        return self._ok()
+
+    def handle_create_wallet(self, comm, msg):
+        _ = comm
+        username = str(self._param(msg, "username", 0, "")).strip()
+        public_key = str(self._param(msg, "public_key", 1, "")).strip()
+        if not username or not public_key:
+            return self._error("Missing username/public_key")
+        self._notify_gateways({"type": "CREATE_WALLET", "data": {"username": username, "public_key": public_key}})
+        return self._ok()
+
+    def handle_buy_asset(self, comm, msg):
+        _ = comm
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        buyer = str(data.get("buyer", "")).strip()
+        public_key = str(data.get("public_key", "")).strip()
+        signature = str(data.get("signature", "")).strip()
+        if not buyer or not public_key or not signature:
+            return self._error("Missing buyer/public_key/signature")
+        self._notify_gateways({"type": "tx_request_buy", "data": data})
+        return self._ok(status="submitted")
 
 
 if __name__ == "__main__":

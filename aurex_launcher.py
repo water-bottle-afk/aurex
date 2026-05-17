@@ -8,7 +8,7 @@ PYTHON_EXEC = "python"
 BLOCKCHAIN_DIR = "Blockchain"
 GATEWAY_DIR = "Gateway"
 MARKETPLACE_DIR = "Server"
-CLIENT_DIR = "."
+CLIENT_DIR = "Client"
 logger = Logger(__file__)
 
 
@@ -25,11 +25,11 @@ def launch_task(name, command, cwd=""):
 def main():
     logger.info("=== AUREX PROJECT ORCHESTRATOR ===")
 
-    nodes_count = 4
+    nodes_count = 1
     difficulty = 1
     launch_task(
         "Aurex-Nodes",
-        f"{PYTHON_EXEC} launcher.py --nodes {nodes_count} --difficulty {difficulty}",
+        f"{PYTHON_EXEC} updated_Bnode.py --ip {"10.100.102.58"} --difficulty {2} --port {14253}",
         BLOCKCHAIN_DIR,
     )
     time.sleep(2)
@@ -41,13 +41,13 @@ def main():
     launch_task("Aurex-Marketplace", f"{PYTHON_EXEC} server_module.py", MARKETPLACE_DIR)
     time.sleep(2)
 
-    launch_task("Aurex-Client", f"{PYTHON_EXEC} main.py", CLIENT_DIR)
+    launch_task("Aurex-Client", f"{PYTHON_EXEC} client.py", CLIENT_DIR)
 
     logger.info("[SUCCESS] All systems dispatched.")
     logger.info("  - Aurex-Nodes: blockchain PoW nodes (blockchain/BLOCKCHAIN_DB/node_*/)")
     logger.info("  - Aurex-Gateway: server<->blockchain relay")
-    logger.info("  - Aurex-Marketplace: WSS marketplace server (port 23456)")
-    logger.info("  - Aurex-Client: Flet web app over HTTPS")
+    logger.info("  - Aurex-Server: marketplace server (API, DB, order matching, etc.)")
+    logger.info("  - Aurex-Client: Flet app")
     logger.info("First time? Go to Settings > Wallet & Identity > Generate My Keys before uploading.")
 
 

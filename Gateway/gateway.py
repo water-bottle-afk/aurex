@@ -70,6 +70,7 @@ class GatewayServer:
             "tx_request_sell": self.tx_request_sell,
             "handle_get_balance": self.handle_get_balance,
             "get_balance": self.handle_get_balance,
+            "create_wallet": self.create_wallet,
         }
         self.blockchain_operations = {
             "register_blockchain_node": self.register_blockchain_node,
@@ -139,9 +140,11 @@ class GatewayServer:
         if not ip or not port:
             return
         with self.nodes_lock:
+            prev_registered = bool(self.nodes.get((ip, int(port)), {}).get("registered"))
             self.nodes[(ip, int(port))] = {
                 "comm": comm,
                 "chain_length": int(chain_length),
+                "registered": prev_registered,
             }
 
     def _update_node_length(self, addr: tuple[str, int], chain_length: int):
@@ -266,14 +269,6 @@ class GatewayServer:
     def handle_node_connection(self, comm):
         ip, port = self._extract_sender_addr(comm)
         self._register_comm(ip, port, comm, chain_length=0)
-        self.log_event(
-            f"Node connected {ip}:{port}",
-            event_type="node_status",
-            direction="inbound",
-            status="connected",
-            node_id=f"{ip}:{port}",
-            address=f"{ip}:{port}",
-        )
 
         try:
             while True:
@@ -282,15 +277,22 @@ class GatewayServer:
                     break
                 self._handle_node_message(comm, request)
         finally:
+            registered_id = None
+            with self.nodes_lock:
+                for node_addr, info in self.nodes.items():
+                    if info.get("comm") == comm and info.get("registered"):
+                        registered_id = f"{node_addr[0]}:{node_addr[1]}"
+                        break
             self._remove_comm(comm)
-            self.log_event(
-                f"Node disconnected {ip}:{port}",
-                event_type="node_status",
-                direction="system",
-                status="disconnected",
-                node_id=f"{ip}:{port}",
-                address=f"{ip}:{port}",
-            )
+            if registered_id:
+                self.log_event(
+                    f"Node disconnected {registered_id}",
+                    event_type="node_status",
+                    direction="system",
+                    status="disconnected",
+                    node_id=registered_id,
+                    address=registered_id,
+                )
 
     def _handle_node_message(self, comm, request: dict):
         msg_type = self._normalize_type(request.get("type"))
@@ -312,6 +314,10 @@ class GatewayServer:
         self._communicate_with_main_server_comm(comm)
 
     def _communicate_with_main_server_comm(self, comm):
+        try:
+            comm.send_one_message({"type": "REGISTER_GATEWAY"})
+        except Exception:
+            pass
         while True:
             request = comm.recv_one_message()
             if not request:
@@ -343,6 +349,8 @@ class GatewayServer:
 
         if comm:
             self._register_comm(reg_ip, reg_port, comm, chain_length=chain_length)
+            with self.nodes_lock:
+                self.nodes[(reg_ip, reg_port)]["registered"] = True
 
         self.log_event(
             f"Registered blockchain node {reg_ip}:{reg_port} len={chain_length}",
@@ -449,6 +457,18 @@ class GatewayServer:
             "sender_port": request.get("sender_port"),
         }
         self._route_to_server(payload)
+
+    def create_wallet(self, request: dict, comm=None):
+        _ = comm
+        data = request.get("data") if isinstance(request.get("data"), dict) else request
+        outbound = {
+            "type": "CREATE_WALLET",
+            "username": data.get("username"),
+            "public_key": data.get("public_key"),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._broadcast_to_nodes(outbound)
 
 
 def main():

@@ -108,6 +108,12 @@ class WalletManager:
 
     def load_wallet_from_path(self, path: Path) -> WalletData:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("wallet file must be a JSON object")
+        expected = {"username", "public_key", "private_key"}
+        actual = set(raw.keys())
+        if actual != expected:
+            raise ValueError("wallet must contain exactly: username, public_key, private_key")
         wallet = WalletData.from_dict(raw)
         ok, reason = wallet.validate()
         if not ok:
@@ -119,4 +125,3 @@ class WalletManager:
         if not path.exists():
             return None
         return self.load_wallet_from_path(path)
-

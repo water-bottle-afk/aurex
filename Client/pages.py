@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import flet as ft
+from pathlib import Path
 
 BG = "#090B0F"
 SCRIM = "#C814161B"
@@ -168,7 +169,14 @@ def build_forgot_view(app):
     return _auth_shell("/forgot", card)
 
 
-def _asset_card(item):
+def _asset_card(app, item):
+    def do_buy(_):
+        try:
+            app.buy_asset(item)
+            app.notify("Purchase request signed and sent")
+        except Exception as e:
+            app.notify(str(e), error=True)
+
     return ft.Container(
         bgcolor=CARD_SOFT,
         border_radius=14,
@@ -180,7 +188,14 @@ def _asset_card(item):
                 ft.Text(item.title, color=TEXT, size=16, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.Text(f"Owner: {item.owner}", color=MUTED, size=12),
                 ft.Text(item.description or "-", color=MUTED, size=12, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, controls=[ft.Text(f"${item.price:.2f}", color=SUCCESS, size=15, weight=ft.FontWeight.BOLD), ft.Text(item.created_at, color=MUTED, size=11)]),
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Text(f"${item.price:.2f}", color=SUCCESS, size=15, weight=ft.FontWeight.BOLD),
+                        ft.Text(item.created_at, color=MUTED, size=11),
+                    ],
+                ),
+                ft.FilledButton("Buy", bgcolor=GOLD, color="#171717", on_click=do_buy),
             ],
         ),
     )
@@ -192,7 +207,7 @@ def build_marketplace_view(app):
     except Exception as e:
         app.notify(str(e), error=True)
         items = []
-    grid = ft.ResponsiveRow(spacing=10, run_spacing=10, controls=[ft.Container(col={"xs": 12, "sm": 6, "md": 4, "lg": 3}, content=_asset_card(it)) for it in items]) if items else ft.Container(padding=20, content=ft.Text("No assets yet", color=MUTED))
+    grid = ft.ResponsiveRow(spacing=10, run_spacing=10, controls=[ft.Container(col={"xs": 12, "sm": 6, "md": 4, "lg": 3}, content=_asset_card(app, it)) for it in items]) if items else ft.Container(padding=20, content=ft.Text("No assets yet", color=MUTED))
     body = ft.Column(spacing=12, controls=[ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, controls=[ft.Text("Marketplace Assets", color=TEXT, size=20, weight=ft.FontWeight.BOLD), ft.FilledButton("Refresh", bgcolor=GOLD_SOFT, color="#161616", on_click=lambda _: app.page.go("/marketplace"))]), grid])
     return _main_shell(app, "/marketplace", "Trade digital ownership", body)
 
@@ -201,35 +216,40 @@ def build_upload_view(app):
     picked = {"path": ""}
     selected = ft.Text("No file selected", color=MUTED)
     asset_name, description = _input("Asset Name"), ft.TextField(label="Description", multiline=True, min_lines=2, max_lines=4, border_radius=14, bgcolor="#0E1218", border_color=BORDER, focused_border_color=GOLD, color=TEXT)
-    file_type = ft.Dropdown(label="File Type", value="jpg", options=[ft.dropdown.Option("jpg"), ft.dropdown.Option("png")], border_radius=14, bgcolor="#070809", border_color="#6B4E29", focused_border_color=GOLD)
     cost = _input("Price")
-
-    def on_pick(e):
-        if e.files:
-            picked["path"] = e.files[0].path
-            selected.value = e.files[0].name
-            selected.color = TEXT
-            app.page.update()
 
     picker = getattr(app.page, "_upload_picker", None)
     if picker is None:
-        picker = ft.FilePicker(on_result=on_pick)
+        picker = ft.FilePicker()
         app.page.services.append(picker)
         setattr(app.page, "_upload_picker", picker)
-    else:
-        picker.on_result = on_pick
+
+    async def choose_file(_):
+        try:
+            files = await picker.pick_files(allow_multiple=False, allowed_extensions=["png", "jpg", "jpeg"])
+            if files:
+                picked["path"] = files[0].path
+                selected.value = files[0].name
+                selected.color = TEXT
+                app.page.update()
+        except Exception as e:
+            app.notify(str(e), error=True)
 
     def do_upload(_):
         try:
             if not picked["path"]:
                 raise RuntimeError("Choose a file first")
-            app.upload_asset(picked["path"], asset_name.value, description.value, file_type.value, float(cost.value or 0))
+            ext = Path(picked["path"]).suffix.lower().lstrip(".")
+            if ext not in {"png", "jpg", "jpeg"}:
+                raise RuntimeError("Only .png, .jpg, .jpeg are allowed")
+            file_type = "jpg" if ext == "jpeg" else ext
+            app.upload_asset(picked["path"], asset_name.value, description.value, file_type, float(cost.value or 0))
             app.notify("Upload complete")
             app.page.go("/marketplace")
         except Exception as e:
             app.notify(str(e), error=True)
 
-    body = ft.Container(width=680, bgcolor=CARD, border_radius=18, border=ft.border.all(1, BORDER), padding=20, content=ft.Column(spacing=12, controls=[ft.Row(spacing=10, controls=[ft.FilledButton("Choose File", on_click=lambda _: picker.pick_files(allow_multiple=False)), selected]), asset_name, description, file_type, cost, ft.FilledButton("Upload Asset", bgcolor=GOLD, color="#171717", on_click=do_upload)]))
+    body = ft.Container(width=680, bgcolor=CARD, border_radius=18, border=ft.border.all(1, BORDER), padding=20, content=ft.Column(spacing=12, controls=[ft.Row(spacing=10, controls=[ft.FilledButton("Choose .png/.jpg", on_click=choose_file), selected]), asset_name, description, cost, ft.FilledButton("Upload Asset", bgcolor=GOLD, color="#171717", on_click=do_upload)]))
     return _main_shell(app, "/upload", "Mint a new asset", body)
 
 
@@ -243,7 +263,7 @@ def build_wallet_settings_view(app):
 
     def refresh_wallet_ui():
         if app.state.wallet_loaded and app.wallet_session:
-            status.value = "Wallet ready for this session"
+            status.value = app.state.wallet_status_message or "Wallet ready for this session"
             status.color = SUCCESS
             preview.value = app.wallet_preview()
         else:
@@ -252,38 +272,15 @@ def build_wallet_settings_view(app):
             preview.value = ""
         app.page.update()
 
-    def on_import_result(e):
-        try:
-            if not e.files:
-                return
-            app.load_wallet_from_file(e.files[0].path)
-            app.notify("Wallet imported and loaded")
-            refresh_wallet_ui()
-        except Exception as exc:
-            app.notify(str(exc), error=True)
-
-    def on_export_result(e):
-        try:
-            if not e.path:
-                return
-            app.export_wallet(e.path)
-            app.notify("Wallet exported")
-        except Exception as exc:
-            app.notify(str(exc), error=True)
-
     if import_picker is None:
-        import_picker = ft.FilePicker(on_result=on_import_result)
+        import_picker = ft.FilePicker()
         app.page.services.append(import_picker)
         setattr(app.page, "_wallet_import_picker", import_picker)
-    else:
-        import_picker.on_result = on_import_result
 
     if export_picker is None:
-        export_picker = ft.FilePicker(on_result=on_export_result)
+        export_picker = ft.FilePicker()
         app.page.services.append(export_picker)
         setattr(app.page, "_wallet_export_picker", export_picker)
-    else:
-        export_picker.on_result = on_export_result
 
     def generate_wallet(_):
         try:
@@ -301,18 +298,32 @@ def build_wallet_settings_view(app):
         except Exception as exc:
             app.notify(str(exc), error=True)
 
-    def import_wallet(_):
-        import_picker.pick_files(allow_multiple=False, allowed_extensions=["json"])
+    async def import_wallet(_):
+        try:
+            files = await import_picker.pick_files(allow_multiple=False, allowed_extensions=["json"])
+            if not files:
+                return
+            app.load_wallet_from_file(files[0].path)
+            app.notify("Wallet imported and loaded")
+            refresh_wallet_ui()
+        except Exception as exc:
+            app.notify(str(exc), error=True)
 
-    def export_wallet(_):
+    async def export_wallet(_):
         if not app.state.wallet_loaded:
             app.notify("Load or generate wallet first", error=True)
             return
-        export_picker.save_file(
-            dialog_title="Save wallet.json",
-            file_name=f"wallet_{app.state.username}.json",
-            allowed_extensions=["json"],
-        )
+        try:
+            save_path = await export_picker.save_file(
+                dialog_title="Save wallet.json",
+                file_name=f"wallet_{app.state.username}.json",
+                allowed_extensions=["json"],
+            )
+            if save_path:
+                app.export_wallet(save_path)
+                app.notify("Wallet exported")
+        except Exception as exc:
+            app.notify(str(exc), error=True)
 
     def continue_market(_):
         if not app.state.wallet_loaded:

@@ -7,6 +7,8 @@ import json
 import os
 import sys
 import threading
+import hashlib
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,7 +46,7 @@ except Exception:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
-ICON_PATH = ASSETS_DIR / "images" / "gold_icon.png"
+ICON_PATH = ASSETS_DIR / "flet_assets" / "aurex_icon.ico"
 
 @dataclass
 class MarketItem:
@@ -73,6 +75,7 @@ class ClientState:
     wallet_loaded: bool = False
     wallet_public_key: str | None = None
     wallet_username: str | None = None
+    wallet_status_message: str = ""
 
 
 class ServerClient:
@@ -142,7 +145,13 @@ class ServerClient:
     def get_items(self):
         return self._request({"type": "GET_ITEMS"})
 
-    def upload_file(self, username, file_path, asset_name, description, file_type, cost):
+    def create_wallet(self, username, public_key):
+        return self._request({"type": "CREATE_WALLET", "username": username, "public_key": public_key})
+
+    def buy_asset(self, payload):
+        return self._request({"type": "BUY_ASSET", "data": payload})
+
+    def upload_file(self, username, file_path, asset_name, description, file_type, cost, signature="", public_key="", signed_payload=None):
         """Upload file with UPLOAD_INIT -> UPLOAD chunks -> UPLOAD_FINISH."""
         upload_init = self._request(
             {
@@ -152,6 +161,9 @@ class ServerClient:
                 "description": description,
                 "file_type": file_type,
                 "cost": cost,
+                "signature": signature,
+                "public_key": public_key,
+                "signed_payload": signed_payload or {},
             }
         )
         upload_id = str(upload_init.get("upload_id", ""))
@@ -180,7 +192,13 @@ class ClientApp:
         self.page.padding = 0
         self.page.bgcolor = "#090B0F"
         try:
-            self.page.window.icon = str(ICON_PATH)
+            if ICON_PATH.exists():
+                self.page.window.icon = str(ICON_PATH.resolve())
+            png_fallback = ASSETS_DIR / "icon-512.png"
+            if not ICON_PATH.exists() and png_fallback.exists():
+                self.page.window.icon = str(png_fallback.resolve())
+            if hasattr(self.page.window, "app_id"):
+                self.page.window.app_id = "Aurex"
             self.page.window.min_width = 1000
             self.page.window.min_height = 680
         except Exception:
@@ -196,7 +214,7 @@ class ClientApp:
         """Show snackbar notification."""
         if error:
             self.page.dialog = ft.AlertDialog(
-                modal=False,
+                modal=True,
                 title=ft.Text("Error", color="#F6D2D2"),
                 content=ft.Text(str(message), color="#F1F4F8"),
                 bgcolor="#2A0E12",
@@ -204,6 +222,8 @@ class ClientApp:
                 actions_alignment=ft.MainAxisAlignment.END,
             )
             self.page.dialog.open = True
+            self.page.snack_bar = ft.SnackBar(content=ft.Text(str(message)), bgcolor="#7D2032")
+            self.page.snack_bar.open = True
         else:
             self.page.snack_bar = ft.SnackBar(content=ft.Text(message), bgcolor="#136F3A")
             self.page.snack_bar.open = True
@@ -311,14 +331,20 @@ class ClientApp:
     def upload_asset(self, file_path, asset_name, description, file_type, cost):
         if not self.state.username:
             raise RuntimeError("Not authenticated")
+        if not self.wallet_session:
+            raise RuntimeError("Wallet not loaded")
+        file_bytes = Path(file_path).read_bytes()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
         tx_payload = {
             "username": self.state.username,
             "asset_name": asset_name,
             "description": description,
             "file_type": file_type,
             "cost": float(cost),
+            "file_hash": file_hash,
+            "timestamp": time.time(),
         }
-        signature = self.sign_payload(tx_payload) if self.wallet_session else ""
+        signature = self.sign_payload(tx_payload)
         resp = self.client.upload_file(
             self.state.username,
             file_path,
@@ -326,11 +352,36 @@ class ClientApp:
             description,
             file_type,
             cost,
+            signature=signature,
+            public_key=self.wallet_session.public_key,
+            signed_payload=tx_payload,
         )
         self.state.notifications.append(f"Uploaded asset: {asset_name}")
-        if signature:
-            self.state.notifications.append("Upload payload signed locally")
+        self.state.notifications.append("Upload payload signed locally")
         return resp
+
+    def buy_asset(self, item: MarketItem):
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+        if not self.wallet_session:
+            raise RuntimeError("Wallet not loaded")
+        payload = {
+            "asset_id": item.asset_id,
+            "buyer": self.state.username,
+            "price": float(item.price),
+            "timestamp": time.time(),
+        }
+        signature = self.sign_payload(payload)
+        req = {
+            "asset_id": item.asset_id,
+            "buyer": self.state.username,
+            "price": float(item.price),
+            "timestamp": payload["timestamp"],
+            "signature": signature,
+            "public_key": self.wallet_session.public_key,
+            "signed_payload": payload,
+        }
+        return self.client.buy_asset(req)
 
     def update_public_key(self, public_key):
         if not self.state.username:
@@ -354,6 +405,7 @@ class ClientApp:
         self.state.wallet_public_key = wallet.public_key
         self.state.wallet_username = wallet.username
         self.update_public_key(wallet.public_key)
+        self.client.create_wallet(wallet.username, wallet.public_key)
 
     def _load_wallet_session_from_default(self):
         if not self.state.username:
@@ -364,12 +416,14 @@ class ClientApp:
             return None
         if wallet:
             self._set_wallet_session(wallet)
+            self.state.wallet_status_message = f"Wallet loaded from {self.wallet_manager.wallet_path_for_user(self.state.username).resolve()}"
         return wallet
 
     def load_wallet_from_file(self, file_path: str):
         wallet = self.wallet_manager.load_wallet_from_path(Path(file_path))
         self._set_wallet_session(wallet)
         self.wallet_manager.save_wallet(wallet, self.wallet_manager.wallet_path_for_user(self.state.username or wallet.username))
+        self.state.wallet_status_message = f"Wallet loaded from {Path(file_path).resolve()}"
         return wallet
 
     def generate_new_wallet(self):
@@ -377,6 +431,7 @@ class ClientApp:
             raise RuntimeError("Not authenticated")
         wallet = self.wallet_manager.generate_wallet(self.state.username)
         self._set_wallet_session(wallet)
+        self.state.wallet_status_message = f"Wallet loaded from {self.wallet_manager.wallet_path_for_user(self.state.username).resolve()}"
         self.state.notifications.append("Generated new wallet. Previous assets remain tied to old public key.")
         return wallet
 
@@ -384,6 +439,7 @@ class ClientApp:
         wallet = self._load_wallet_session_from_default()
         if not wallet:
             raise RuntimeError("No local wallet found for this user")
+        self.state.wallet_status_message = f"Wallet loaded from {self.wallet_manager.wallet_path_for_user(self.state.username).resolve()}"
         return wallet
 
     def export_wallet(self, output_path: str):
