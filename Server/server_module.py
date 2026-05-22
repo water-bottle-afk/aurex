@@ -25,7 +25,7 @@ try:
     from Server.DB_ORM import ORM, send_reset_email
 except Exception:
     from DB_ORM import ORM, send_reset_email
-from SharedResources.config import SERVER_IP, SERVER_PORT
+from SharedResources.config import SERVER_IP, SERVER_PORT, INITIAL_BALANCE
 from SharedResources.classes import RSA_Server
 from SharedResources.logging import Logger
 
@@ -43,6 +43,7 @@ class MarketplaceItem:
     file_type: str
     cost: float
     content_b64: str
+    storage_path: str
     created_at: str
 
     def to_dict(self):
@@ -58,6 +59,7 @@ class MarketplaceItem:
             file_type=str(raw.get("file_type", "")),
             cost=float(raw.get("cost", 0.0)),
             content_b64=str(raw.get("content_b64", "")),
+            storage_path=str(raw.get("storage_path", "")),
             created_at=str(raw.get("created_at", "")),
         )
 
@@ -69,6 +71,7 @@ class MarketplaceItem:
             f"asset_name='{self.asset_name}', "
             f"file_type='{self.file_type}', "
             f"cost={self.cost}, "
+            f"storage_path='{self.storage_path}', "
             f"created_at='{self.created_at}'"
             ")"
         )
@@ -235,6 +238,13 @@ class ServerUpdated:
         self.upload_lock = threading.RLock()
         self.gateway_clients = set()
         self.gateway_lock = threading.RLock()
+        self.online_users: dict[str, object] = {}
+        self.online_users_lock = threading.RLock()
+        self.notifications_path = Path(__file__).resolve().parent.parent / "DB" / "notifications.json"
+        self.notifications_lock = threading.RLock()
+        self.notifications_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.notifications_path.exists():
+            self.notifications_path.write_text("{}", encoding="utf-8")
         self.client_listener = RSA_Server(self.host, self.port, dir_for_keys="ServerKeys", name="ServerUpdated")
         self.logger = logger
         self.client_listener.handle_client = self.handle_client
@@ -254,8 +264,10 @@ class ServerUpdated:
             "GET_ITEMS": self.handle_get_items,
             "UPDATE_PUBLIC_KEY": self.handle_update_public_key,
             "REGISTER_GATEWAY": self.handle_register_gateway,
-            "CREATE_WALLET": self.handle_create_wallet,
             "BUY_ASSET": self.handle_buy_asset,
+            "BUY_SUCCESS": self.handle_buy_success,
+            "SELL_SUCCESS": self.handle_sell_success,
+            "SEND_BALANCE": self.handle_send_balance,
         }
 
     def start(self):
@@ -263,19 +275,29 @@ class ServerUpdated:
 
     def handle_client(self, comm):
         self.logger.info("Client connected")
+        comm.start_async(default_encryption=True)
         while True:
-            msg = comm.recv_one_message()
-            if not msg:
+            msg = comm.recv_async(timeout=0.25)
+            if msg is None:
+                continue
+            if comm.is_close_marker(msg):
                 self.logger.info("Client disconnected")
                 with self.gateway_lock:
                     self.gateway_clients.discard(comm)
+                user_obj = getattr(comm, "user", None)
+                username = getattr(user_obj, "username", "") if user_obj else ""
+                if username:
+                    with self.online_users_lock:
+                        if self.online_users.get(username) == comm:
+                            self.online_users.pop(username, None)
                 break
             try:
                 response = self.dispatch(comm, msg)
             except Exception as e:
                 self.logger.error(f"Unhandled server error: {e}")
                 response = {"type": "ERROR", "message": str(e)}
-            comm.send_one_message(response)
+            if response is not None:
+                comm.send_async(response)
 
     def dispatch(self, comm, msg):
         if not isinstance(msg, dict):
@@ -300,12 +322,74 @@ class ServerUpdated:
     def _error(self, e):
         return {"type": "ERROR", "message": str(e)}
 
+    def _load_notifications(self):
+        try:
+            data = json.loads(self.notifications_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_notifications(self, data):
+        self.notifications_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _queue_notification(self, username: str, msg: str):
+        username = str(username or "").strip()
+        if not username:
+            return
+        with self.notifications_lock:
+            data = self._load_notifications()
+            items = data.get(username, [])
+            if not isinstance(items, list):
+                items = []
+            items.append({"msg": str(msg)})
+            data[username] = items
+            self._save_notifications(data)
+
+    def _flush_notifications_for_user(self, username: str, comm):
+        username = str(username or "").strip()
+        if not username:
+            return
+        with self.notifications_lock:
+            data = self._load_notifications()
+            items = data.get(username, [])
+            data[username] = []
+            self._save_notifications(data)
+        if not isinstance(items, list):
+            return
+        for item in items:
+            msg = str(item.get("msg", "")) if isinstance(item, dict) else str(item)
+            if not msg:
+                continue
+            try:
+                comm.send_async({"type": "NOTIFICATION", "msg": msg})
+            except Exception:
+                self._queue_notification(username, msg)
+                return
+
+    def _push_notification(self, username: str, msg: str):
+        username = str(username or "").strip()
+        text = str(msg or "").strip()
+        if not username or not text:
+            return
+        with self.online_users_lock:
+            online_comm = self.online_users.get(username)
+        if online_comm is None:
+            self._queue_notification(username, text)
+            return
+        try:
+            online_comm.send_async({"type": "NOTIFICATION", "msg": text})
+        except Exception:
+            with self.online_users_lock:
+                if self.online_users.get(username) == online_comm:
+                    self.online_users.pop(username, None)
+            self._queue_notification(username, text)
+
     def _notify_gateways(self, payload):
         with self.gateway_lock:
             targets = list(self.gateway_clients)
         for gw_comm in targets:
             try:
-                gw_comm.send_one_message(payload)
+                gw_comm.send_async(payload)
             except Exception:
                 with self.gateway_lock:
                     self.gateway_clients.discard(gw_comm)
@@ -326,6 +410,9 @@ class ServerUpdated:
             comm.set_user(user)
         else:
             comm.user = user
+        with self.online_users_lock:
+            self.online_users[username] = comm
+        self._flush_notifications_for_user(username, comm)
         return self._ok(username=username)
 
     def handle_signup(self, comm, msg):
@@ -386,6 +473,12 @@ class ServerUpdated:
 
     def handle_logout(self, comm, msg):
         _ = msg
+        user_obj = getattr(comm, "user", None)
+        username = getattr(user_obj, "username", "") if user_obj else ""
+        if username:
+            with self.online_users_lock:
+                if self.online_users.get(username) == comm:
+                    self.online_users.pop(username, None)
         if hasattr(comm, "set_user"):
             comm.set_user(None)
         else:
@@ -450,6 +543,13 @@ class ServerUpdated:
         except Exception:
             return self._error("Invalid upload payload")
         asset_hash = hashlib.sha256(raw).hexdigest()
+        uploads_dir = Path(__file__).resolve().parent.parent / "DB" / "uploads" / session.username
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        file_path = uploads_dir / f"{asset_hash}.{session.file_type}"
+        try:
+            file_path.write_bytes(raw)
+        except Exception as exc:
+            return self._error(f"Failed writing upload file: {exc}")
         item = MarketplaceItem(
             asset_id=asset_hash[:16],
             owner=session.username,
@@ -458,6 +558,7 @@ class ServerUpdated:
             file_type=session.file_type,
             cost=session.cost,
             content_b64=content_b64,
+            storage_path=str(file_path),
             created_at=datetime.now().isoformat(),
         )
         self.db.add_asset(session.username, item)
@@ -478,22 +579,22 @@ class ServerUpdated:
         ok = self.db.set_user_public_key(username, public_key)
         if not ok:
             return self._error("User not found")
-        self._notify_gateways({"type": "CREATE_WALLET", "data": {"username": username, "public_key": public_key}})
+        self._notify_gateways(
+            {
+                "type": "CREATE_BALANCE",
+                "data": {
+                    "username": username,
+                    "public_key": public_key,
+                    "balance": float(INITIAL_BALANCE),
+                },
+            }
+        )
         return self._ok()
 
     def handle_register_gateway(self, comm, msg):
         _ = msg
         with self.gateway_lock:
             self.gateway_clients.add(comm)
-        return self._ok()
-
-    def handle_create_wallet(self, comm, msg):
-        _ = comm
-        username = str(self._param(msg, "username", 0, "")).strip()
-        public_key = str(self._param(msg, "public_key", 1, "")).strip()
-        if not username or not public_key:
-            return self._error("Missing username/public_key")
-        self._notify_gateways({"type": "CREATE_WALLET", "data": {"username": username, "public_key": public_key}})
         return self._ok()
 
     def handle_buy_asset(self, comm, msg):
@@ -506,6 +607,44 @@ class ServerUpdated:
             return self._error("Missing buyer/public_key/signature")
         self._notify_gateways({"type": "tx_request_buy", "data": data})
         return self._ok(status="submitted")
+
+    def handle_buy_success(self, comm, msg):
+        _ = comm
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        buyer = str(data.get("buyer") or data.get("sender") or "").strip()
+        seller = str(data.get("seller") or data.get("receiver") or "").strip()
+        asset_id = str(data.get("asset_id") or "").strip()
+        price = data.get("price") if data.get("price") is not None else data.get("amount")
+
+        if buyer:
+            self._push_notification(
+                buyer,
+                f"Purchase confirmed for asset {asset_id or '?'} at {price}.",
+            )
+        if seller:
+            self._push_notification(
+                seller,
+                f"Your asset {asset_id or '?'} was sold at {price}.",
+            )
+        return self._ok()
+
+    def handle_sell_success(self, comm, msg):
+        _ = comm
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        seller = str(data.get("seller") or data.get("sender") or "").strip()
+        asset_id = str(data.get("asset_id") or "").strip()
+        if seller:
+            self._push_notification(seller, f"Sell request for asset {asset_id or '?'} was mined.")
+        return self._ok()
+
+    def handle_send_balance(self, comm, msg):
+        _ = comm
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        userpk = str(msg.get("userpk") or data.get("userpk") or "").strip()
+        balance = data.get("balance")
+        if userpk:
+            self.logger.info(f"Balance update from blockchain userpk={userpk} balance={balance}")
+        return self._ok()
 
 
 if __name__ == "__main__":

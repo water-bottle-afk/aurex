@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import flet as ft
+import base64
 from pathlib import Path
 
 BG = "#090B0F"
@@ -215,6 +216,13 @@ def build_marketplace_view(app):
 def build_upload_view(app):
     picked = {"path": ""}
     selected = ft.Text("No file selected", color=MUTED)
+    preview = ft.Container(
+        visible=False,
+        border_radius=12,
+        border=ft.border.all(1, "#2B3848"),
+        padding=8,
+        content=ft.Image(width=320, height=220, fit=ft.ImageFit.CONTAIN, border_radius=10),
+    )
     asset_name, description = _input("Asset Name"), ft.TextField(label="Description", multiline=True, min_lines=2, max_lines=4, border_radius=14, bgcolor="#0E1218", border_color=BORDER, focused_border_color=GOLD, color=TEXT)
     cost = _input("Price")
 
@@ -224,16 +232,28 @@ def build_upload_view(app):
         app.page.services.append(picker)
         setattr(app.page, "_upload_picker", picker)
 
-    async def choose_file(_):
+    async def _choose_file_async():
         try:
-            files = await picker.pick_files(allow_multiple=False, allowed_extensions=["png", "jpg", "jpeg"])
+            files = await picker.pick_files(
+                allow_multiple=False,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["png", "jpg", "jpeg"],
+            )
             if files:
                 picked["path"] = files[0].path
                 selected.value = files[0].name
                 selected.color = TEXT
+                raw = Path(picked["path"]).read_bytes()
+                image = preview.content
+                image.src = None
+                image.src_base64 = base64.b64encode(raw).decode("ascii")
+                preview.visible = True
                 app.page.update()
         except Exception as e:
             app.notify(str(e), error=True)
+
+    def choose_file(_):
+        app.page.run_task(_choose_file_async)
 
     def do_upload(_):
         try:
@@ -249,7 +269,24 @@ def build_upload_view(app):
         except Exception as e:
             app.notify(str(e), error=True)
 
-    body = ft.Container(width=680, bgcolor=CARD, border_radius=18, border=ft.border.all(1, BORDER), padding=20, content=ft.Column(spacing=12, controls=[ft.Row(spacing=10, controls=[ft.FilledButton("Choose .png/.jpg", on_click=choose_file), selected]), asset_name, description, cost, ft.FilledButton("Upload Asset", bgcolor=GOLD, color="#171717", on_click=do_upload)]))
+    body = ft.Container(
+        width=680,
+        bgcolor=CARD,
+        border_radius=18,
+        border=ft.border.all(1, BORDER),
+        padding=20,
+        content=ft.Column(
+            spacing=12,
+            controls=[
+                ft.Row(spacing=10, controls=[ft.FilledButton("Choose .png/.jpg", on_click=choose_file), selected]),
+                preview,
+                asset_name,
+                description,
+                cost,
+                ft.FilledButton("Upload Asset", bgcolor=GOLD, color="#171717", on_click=do_upload),
+            ],
+        ),
+    )
     return _main_shell(app, "/upload", "Mint a new asset", body)
 
 
@@ -298,9 +335,13 @@ def build_wallet_settings_view(app):
         except Exception as exc:
             app.notify(str(exc), error=True)
 
-    async def import_wallet(_):
+    async def _import_wallet_async():
         try:
-            files = await import_picker.pick_files(allow_multiple=False, allowed_extensions=["json"])
+            files = await import_picker.pick_files(
+                allow_multiple=False,
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["json"],
+            )
             if not files:
                 return
             app.load_wallet_from_file(files[0].path)
@@ -309,7 +350,10 @@ def build_wallet_settings_view(app):
         except Exception as exc:
             app.notify(str(exc), error=True)
 
-    async def export_wallet(_):
+    def import_wallet(_):
+        app.page.run_task(_import_wallet_async)
+
+    async def _export_wallet_async():
         if not app.state.wallet_loaded:
             app.notify("Load or generate wallet first", error=True)
             return
@@ -317,6 +361,7 @@ def build_wallet_settings_view(app):
             save_path = await export_picker.save_file(
                 dialog_title="Save wallet.json",
                 file_name=f"wallet_{app.state.username}.json",
+                file_type=ft.FilePickerFileType.CUSTOM,
                 allowed_extensions=["json"],
             )
             if save_path:
@@ -324,6 +369,9 @@ def build_wallet_settings_view(app):
                 app.notify("Wallet exported")
         except Exception as exc:
             app.notify(str(exc), error=True)
+
+    def export_wallet(_):
+        app.page.run_task(_export_wallet_async)
 
     def continue_market(_):
         if not app.state.wallet_loaded:
@@ -393,6 +441,6 @@ def build_notifications_view(app):
 
 def build_my_assets_view(app):
     mine = [it for it in app.state.market_items if it.owner == (app.state.username or "")]
-    cards = [ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=_asset_card(it)) for it in mine]
+    cards = [ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=_asset_card(app, it)) for it in mine]
     body = ft.Column(spacing=12, controls=[ft.Text("Your collection", color=TEXT, size=20, weight=ft.FontWeight.BOLD), ft.ResponsiveRow(spacing=10, run_spacing=10, controls=cards) if cards else ft.Container(padding=20, content=ft.Text("You don't own assets yet.", color=MUTED))])
     return _main_shell(app, "/my_assets", "Personal portfolio", body)

@@ -16,7 +16,7 @@ from typing import Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from SharedResources.classes import RSA_Client, RSA_Server
-from SharedResources.config import GATEWAY_UDP_PORT, BROADCAST_DISCOVERY_FREQUENCY, POW_DIFFICULTY
+from SharedResources.config import GATEWAY_UDP_PORT, BROADCAST_DISCOVERY_FREQUENCY, POW_DIFFICULTY, INITIAL_BALANCE
 from SharedResources.logging import Logger
 
 
@@ -319,8 +319,8 @@ class BlockchainNode:
         if msg_type == "broadcast_tx_to_verify":
             self.handle_broadcast_tx_to_verify(msg)
             return
-        if msg_type == "create_wallet":
-            self.handle_create_wallet(msg)
+        if msg_type == "create_balance":
+            self.handle_create_balance(msg)
             return
         if msg_type == "get_ledger":
             self.handle_get_ledger_sync(msg)
@@ -369,16 +369,22 @@ class BlockchainNode:
             self.notify_sell_success(tx)
             self.notify_gateway(block)
 
-    def handle_create_wallet(self, msg: dict[str, Any]):
+    def handle_create_balance(self, msg: dict[str, Any]):
         public_key = str(msg.get("public_key") or "")
         if not public_key:
             data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
             public_key = str(data.get("public_key") or "")
         if not public_key:
             return
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        target_balance = msg.get("balance", data.get("balance", INITIAL_BALANCE))
+        try:
+            target_balance = float(target_balance)
+        except Exception:
+            target_balance = float(INITIAL_BALANCE)
         with self.lock:
             if public_key not in self.balances:
-                self.balances[public_key] = 100.0
+                self.balances[public_key] = target_balance
                 self._persist_local_state()
 
     def handle_broadcast_tx_to_verify(self, msg: dict[str, Any]):

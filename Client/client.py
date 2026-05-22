@@ -9,6 +9,7 @@ import sys
 import threading
 import hashlib
 import time
+import queue
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,6 +88,10 @@ class ServerClient:
         self._lock = threading.RLock()
         self._transport = None
         self._comm = None
+        self._receiver_thread = None
+        self._stop_event = threading.Event()
+        self._response_queue: "queue.Queue[dict | None]" = queue.Queue()
+        self.notification_queue: "queue.Queue[str]" = queue.Queue()
 
     def connect(self):
         """Open TCP + RSA/AES session once."""
@@ -97,10 +102,15 @@ class ServerClient:
             self._transport.sock.connect((self.host, self.port))
             self._transport.contact_with_RSA()
             self._comm = self._transport.communication
+            self._comm.start_async(default_encryption=True)
+            self._stop_event.clear()
+            self._receiver_thread = threading.Thread(target=self._recv_dispatch_loop, daemon=True)
+            self._receiver_thread.start()
 
     def close(self):
         """Close transport safely."""
         with self._lock:
+            self._stop_event.set()
             if self._comm is not None:
                 try:
                     self._comm.close()
@@ -109,12 +119,30 @@ class ServerClient:
             self._comm = None
             self._transport = None
 
-    def _request(self, payload):
+    def _recv_dispatch_loop(self):
+        while not self._stop_event.is_set() and self._comm is not None:
+            msg = self._comm.recv_async(timeout=0.25)
+            if msg is None:
+                continue
+            if self._comm.is_close_marker(msg):
+                break
+            if not isinstance(msg, dict):
+                continue
+            msg_type = str(msg.get("type", "")).upper()
+            if msg_type == "NOTIFICATION":
+                self.notification_queue.put(str(msg.get("msg", "")))
+                continue
+            self._response_queue.put(msg)
+
+    def _request(self, payload, timeout=20):
         """Send one dict request and receive dict response."""
         self.connect()
         with self._lock:
-            self._comm.send_one_message(payload)
-            resp = self._comm.recv_one_message()
+            self._comm.send_async(payload)
+            try:
+                resp = self._response_queue.get(timeout=timeout)
+            except queue.Empty as exc:
+                raise RuntimeError("Server response timeout") from exc
         if not isinstance(resp, dict):
             raise RuntimeError("Invalid server response")
         if resp.get("type") != "OK":
@@ -144,9 +172,6 @@ class ServerClient:
 
     def get_items(self):
         return self._request({"type": "GET_ITEMS"})
-
-    def create_wallet(self, username, public_key):
-        return self._request({"type": "CREATE_WALLET", "username": username, "public_key": public_key})
 
     def buy_asset(self, payload):
         return self._request({"type": "BUY_ASSET", "data": payload})
@@ -229,12 +254,22 @@ class ClientApp:
             self.page.snack_bar.open = True
         self.page.update()
 
+    def _drain_server_notifications(self):
+        while True:
+            try:
+                msg = self.client.notification_queue.get_nowait()
+            except queue.Empty:
+                break
+            if msg:
+                self.state.notifications.append(msg)
+
     def _close_error_dialog(self):
         if self.page.dialog:
             self.page.dialog.open = False
             self.page.update()
 
     def _on_route_change(self, _):
+        self._drain_server_notifications()
         route = self.page.route or "/login"
         private_routes = {"/wallet", "/marketplace", "/upload", "/my_assets", "/notifications"}
         if route in private_routes and not self.state.is_authenticated:
@@ -283,6 +318,7 @@ class ClientApp:
         self.state.username = str(resp.get("username") or username)
         self.state.is_authenticated = True
         self._load_wallet_session_from_default()
+        self._drain_server_notifications()
         self.state.notifications.append("Logged in successfully")
         return resp
 
@@ -357,7 +393,7 @@ class ClientApp:
             signed_payload=tx_payload,
         )
         self.state.notifications.append(f"Uploaded asset: {asset_name}")
-        self.state.notifications.append("Upload payload signed locally")
+        self.state.notifications.append("Asset sent to mining process")
         return resp
 
     def buy_asset(self, item: MarketItem):
@@ -405,7 +441,6 @@ class ClientApp:
         self.state.wallet_public_key = wallet.public_key
         self.state.wallet_username = wallet.username
         self.update_public_key(wallet.public_key)
-        self.client.create_wallet(wallet.username, wallet.public_key)
 
     def _load_wallet_session_from_default(self):
         if not self.state.username:

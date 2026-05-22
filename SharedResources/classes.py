@@ -14,6 +14,7 @@ import random
 import pickle
 import threading
 import struct
+import queue
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as PADDING
 from cryptography.hazmat.primitives.ciphers.algorithms import AES
@@ -49,6 +50,14 @@ class Communication:
         self.AES_key = None
 
         self.user = None
+        self.msg_queue: "queue.Queue[object]" = queue.Queue()
+        self.send_queue: "queue.Queue[tuple[dict, bool | None] | None]" = queue.Queue()
+        self._async_running = False
+        self._async_recv_thread = None
+        self._async_send_thread = None
+        self._async_stop_event = threading.Event()
+        self._default_encryption = True
+        self._close_marker = object()
 
     #used for server's communication
     def set_user(self, user):
@@ -92,7 +101,8 @@ class Communication:
         else:
             message = data_json
 
-        self.sock.send(struct.pack('!H', len(message)) + message)
+        with self.lock:
+            self.sock.sendall(struct.pack('!H', len(message)) + message)
         self.log('send', data_json.decode())
 
 
@@ -117,6 +127,67 @@ class Communication:
         except Exception as e:
             self.logger.error(f"Error decoding JSON: {e}")
             return None
+
+    def start_async(self, default_encryption=True):
+        """Start duplex queue mode: recv thread -> msg_queue, send_queue -> send thread."""
+        if self._async_running:
+            return
+        self._default_encryption = bool(default_encryption)
+        self._async_stop_event.clear()
+        self._async_running = True
+        self._async_recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._async_send_thread = threading.Thread(target=self._send_loop, daemon=True)
+        self._async_recv_thread.start()
+        self._async_send_thread.start()
+
+    def _recv_loop(self):
+        while not self._async_stop_event.is_set():
+            msg = self.recv_one_message(encryption=self._default_encryption)
+            if msg is None:
+                break
+            self.msg_queue.put(msg)
+        self.msg_queue.put(self._close_marker)
+        self._async_running = False
+
+    def _send_loop(self):
+        while not self._async_stop_event.is_set():
+            item = self.send_queue.get()
+            if item is None:
+                break
+            data, encryption = item
+            enc = self._default_encryption if encryption is None else bool(encryption)
+            try:
+                self.send_one_message(data, encryption=enc)
+            except Exception:
+                break
+        self._async_running = False
+
+    def send_async(self, data: dict, encryption=None):
+        if not self._async_running:
+            enc = self._default_encryption if encryption is None else bool(encryption)
+            self.send_one_message(data, encryption=enc)
+            return
+        self.send_queue.put((data, encryption))
+
+    def recv_async(self, timeout=None):
+        if not self._async_running:
+            return self.recv_one_message(encryption=self._default_encryption)
+        try:
+            return self.msg_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def is_close_marker(self, value):
+        return value is self._close_marker
+
+    def stop_async(self):
+        if not self._async_running:
+            return
+        self._async_stop_event.set()
+        try:
+            self.send_queue.put_nowait(None)
+        except Exception:
+            pass
 
     def __recv_amount(self, size):
         buffer = b''
@@ -143,6 +214,7 @@ class Communication:
         return key
 
     def close(self):
+        self.stop_async()
         self.Print(f"Closes {self.name} socket!")
         self.sock.close()
 

@@ -70,7 +70,7 @@ class GatewayServer:
             "tx_request_sell": self.tx_request_sell,
             "handle_get_balance": self.handle_get_balance,
             "get_balance": self.handle_get_balance,
-            "create_wallet": self.create_wallet,
+            "create_balance": self.create_balance,
         }
         self.blockchain_operations = {
             "register_blockchain_node": self.register_blockchain_node,
@@ -324,6 +324,11 @@ class GatewayServer:
                 break
 
             msg_type = self._normalize_type(request.get("type"))
+            if msg_type == "ok":
+                continue
+            if msg_type == "error":
+                self.log_event(f"Server error message: {request.get('message')}", status="warning")
+                continue
             handler = self.gateway_operations.get(msg_type)
             if handler:
                 handler(request)
@@ -458,13 +463,14 @@ class GatewayServer:
         }
         self._route_to_server(payload)
 
-    def create_wallet(self, request: dict, comm=None):
+    def create_balance(self, request: dict, comm=None):
         _ = comm
         data = request.get("data") if isinstance(request.get("data"), dict) else request
         outbound = {
-            "type": "CREATE_WALLET",
+            "type": "CREATE_BALANCE",
             "username": data.get("username"),
             "public_key": data.get("public_key"),
+            "balance": data.get("balance"),
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
         }
