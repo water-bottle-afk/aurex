@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import sys
 import threading
 import hashlib
 import time
+import uuid
 import queue
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from SharedResources.classes import RSA_Client
 from SharedResources.config import SERVER_IP, SERVER_PORT
+from SharedResources.logging import Logger
+logger = Logger(__file__)
+
 try:
     from Client.wallet_manager import WalletData, WalletManager
     from Client.pages import (
@@ -47,7 +52,16 @@ except Exception:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = PROJECT_ROOT / "assets"
-ICON_PATH = ASSETS_DIR / "flet_assets" / "aurex_icon.ico"
+ICON_PATH = ASSETS_DIR / "flet_assets" / "icon.ico"
+_ICON_FALLBACK = ASSETS_DIR / "flet_assets" / "aurex_icon.ico"
+
+# Push-only events the server sends proactively — routed to notification_queue, not response_queue.
+_PUSH_EVENTS = frozenset({
+    "NOTIFICATION",
+    "BUY_SUCCESS", "BUY_FAILED",
+    "BLOCK_ACCEPTED", "BLOCK_REJECTED",
+    "BALANCE_UPDATED",
+})
 
 @dataclass
 class MarketItem:
@@ -60,7 +74,7 @@ class MarketItem:
     file_type: str
     price: float
     created_at: str
-    #TODO: add a pk value for easier handling of purchases
+    public_key_hex: str 
 
 
 @dataclass
@@ -120,17 +134,33 @@ class ServerClient:
             self._transport = None
 
     def _recv_dispatch_loop(self):
-        while not self._stop_event.is_set() and self._comm is not None:
-            msg = self._comm.recv_async(timeout=0.25)
+        while not self._stop_event.is_set():
+            comm = self._comm  # snapshot to avoid race with close()
+            if comm is None:
+                break
+            msg = comm.recv_async(timeout=0.25)
             if msg is None:
                 continue
-            if self._comm.is_close_marker(msg):
+            if comm.is_close_marker(msg):
                 break
             if not isinstance(msg, dict):
                 continue
             msg_type = str(msg.get("type", "")).upper()
-            if msg_type == "NOTIFICATION":
-                self.notification_queue.put(str(msg.get("msg", "")))
+            if msg_type in _PUSH_EVENTS:
+                if msg_type == "NOTIFICATION":
+                    self.notification_queue.put(str(msg.get("msg", "")))
+                elif msg_type == "BUY_SUCCESS":
+                    self.notification_queue.put(
+                        f"Transaction confirmed — asset {msg.get('asset_id', '')} at {msg.get('price', '')} AUR"
+                    )
+                elif msg_type == "BUY_FAILED":
+                    self.notification_queue.put(f"Transaction failed: {msg.get('message', 'Unknown reason')}")
+                elif msg_type == "BLOCK_ACCEPTED":
+                    self.notification_queue.put(f"Block accepted for asset {msg.get('asset_id', '')}")
+                elif msg_type == "BLOCK_REJECTED":
+                    self.notification_queue.put(f"Block rejected: {msg.get('message', 'Unknown reason')}")
+                elif msg_type == "BALANCE_UPDATED":
+                    self.notification_queue.put(f"Balance updated: {msg.get('balance', '')} AUR")
                 continue
             self._response_queue.put(msg)
 
@@ -145,7 +175,8 @@ class ServerClient:
                 raise RuntimeError("Server response timeout") from exc
         if not isinstance(resp, dict):
             raise RuntimeError("Invalid server response")
-        if resp.get("type") != "OK":
+        resp_type = str(resp.get("type", "")).upper()
+        if resp_type == "ERROR" or resp_type.endswith("_FAILED"):
             raise RuntimeError(str(resp.get("message", "Unknown server error")))
         return resp
 
@@ -173,14 +204,19 @@ class ServerClient:
     def get_items(self):
         return self._request({"type": "GET_ITEMS"})
 
+    def get_my_assets(self, username):
+        return self._request({"type": "GET_MY_ASSETS", "username": username})
+
     def buy_asset(self, payload):
         return self._request({"type": "BUY_ASSET", "data": payload})
 
     def upload_file(self, username, file_path, asset_name, description, file_type, cost, signature="", public_key="", signed_payload=None):
         """Upload file with UPLOAD_INIT -> UPLOAD chunks -> UPLOAD_FINISH."""
-        upload_init = self._request(
+        upload_id = uuid.uuid4().hex
+        self._request(
             {
                 "type": "UPLOAD_INIT",
+                "upload_id": upload_id,
                 "username": username,
                 "asset_name": asset_name,
                 "description": description,
@@ -191,12 +227,9 @@ class ServerClient:
                 "signed_payload": signed_payload or {},
             }
         )
-        upload_id = str(upload_init.get("upload_id", ""))
-        if not upload_id:
-            raise RuntimeError("Missing upload_id")
         raw = Path(file_path).read_bytes()
         b64 = base64.b64encode(raw).decode("ascii")
-        chunk_size = 120_000
+        chunk_size = 32_000  # struct '!H' cap is 65535 bytes; 32k b64 + JSON + AES overhead fits safely
         for i in range(0, len(b64), chunk_size):
             self._request({"type": "UPLOAD", "upload_id": upload_id, "chunk_b64": b64[i : i + chunk_size]})
         return self._request({"type": "UPLOAD_FINISH", "upload_id": upload_id})
@@ -216,18 +249,6 @@ class ClientApp:
         self.page.theme = ft.Theme(font_family="Trebuchet MS")
         self.page.padding = 0
         self.page.bgcolor = "#090B0F"
-        try:
-            if ICON_PATH.exists():
-                self.page.window.icon = str(ICON_PATH.resolve())
-            png_fallback = ASSETS_DIR / "icon-512.png"
-            if not ICON_PATH.exists() and png_fallback.exists():
-                self.page.window.icon = str(png_fallback.resolve())
-            if hasattr(self.page.window, "app_id"):
-                self.page.window.app_id = "Aurex"
-            self.page.window.min_width = 1000
-            self.page.window.min_height = 680
-        except Exception:
-            pass
         self.page.on_route_change = self._on_route_change
         self.page.on_view_pop = self._on_view_pop
 
@@ -346,23 +367,31 @@ class ClientApp:
         self.state = ClientState()
         self.wallet_session = None
 
+    def _parse_items(self, raw_list):
+        items = []
+        for raw in raw_list:
+            items.append(MarketItem(
+                asset_id=str(raw.get("asset_id", "")),
+                owner=str(raw.get("owner", "")),
+                title=str(raw.get("asset_name", "")),
+                description=str(raw.get("description", "")),
+                file_type=str(raw.get("file_type", "")),
+                price=float(raw.get("cost", 0.0)),
+                created_at=str(raw.get("created_at", "")),
+                public_key_hex=str(raw.get("public_key", "")),
+            ))
+        return items
+
     def refresh_market_items(self):
         resp = self.client.get_items()
-        items = []
-        for raw in resp.get("items", []):
-            items.append(
-                MarketItem(
-                    asset_id=str(raw.get("asset_id", "")),
-                    owner=str(raw.get("owner", "")),
-                    title=str(raw.get("asset_name", "")),
-                    description=str(raw.get("description", "")),
-                    file_type=str(raw.get("file_type", "")),
-                    price=float(raw.get("cost", 0.0)),
-                    created_at=str(raw.get("created_at", "")),
-                )
-            )
-        self.state.market_items = items
-        return items
+        self.state.market_items = self._parse_items(resp.get("items", []))
+        return self.state.market_items
+
+    def fetch_my_assets(self):
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+        resp = self.client.get_my_assets(self.state.username)
+        return self._parse_items(resp.get("items", []))
 
     def upload_asset(self, file_path, asset_name, description, file_type, cost):
         if not self.state.username:
@@ -496,11 +525,42 @@ class ClientApp:
         )
 
 
+def _setup_window(page) -> None:
+    """Set window icon and constraints early, before ClientApp construction."""
+    try:
+        _cwd = Path.cwd()
+        _frozen = getattr(sys, "frozen", False)
+        logger.info(f"[icon] CWD={_cwd}")
+        logger.info(f"[icon] packaged/frozen={_frozen}")
+        logger.info(f"[icon] ICON_PATH={ICON_PATH}  exists={ICON_PATH.exists()}")
+        logger.info(f"[icon] _ICON_FALLBACK={_ICON_FALLBACK}  exists={_ICON_FALLBACK.exists()}")
+        _icon = ICON_PATH if ICON_PATH.exists() else (_ICON_FALLBACK if _ICON_FALLBACK.exists() else None)
+        logger.info(f"[icon] selected icon={_icon!r}")
+        if _icon is not None:
+            icon_str = str(_icon)
+            page.window.icon = icon_str
+            logger.info(f"[icon] page.window.icon assigned: {icon_str!r}")
+        else:
+            logger.warning("[icon] no .ico file found — window icon will not be set")
+        page.window.min_width = 1000
+        page.window.min_height = 680
+        page.window.update()
+        logger.info("[icon] page.window.update() called")
+    except Exception as _exc:
+        logger.error(f"[icon] setup failed: {_exc}", exc_info=True)
+
+
 def main(page):
     """Desktop entrypoint."""
+    _setup_window(page)
     app = ClientApp(page)
     app.start()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
     ft.app(target=main, view=ft.AppView.FLET_APP, assets_dir=str(ASSETS_DIR))

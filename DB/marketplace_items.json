@@ -1,1 +1,15 @@
-{}
+{
+  "Michael": [
+    {
+      "asset_id": "4406813d6ffd569e",
+      "owner": "Michael",
+      "asset_name": "try43`",
+      "description": "OIOI",
+      "file_type": "png",
+      "cost": 3.0,
+      "content_b64": "",
+      "storage_path": "C:\\dev\\aurex\\DB\\uploads\\Michael\\4406813d6ffd569e30ed676237129a630a93ebd408078469d56a494ab7306d94.png",
+      "created_at": "2026-05-25T12:20:29.392419"
+    }
+  ]
+}

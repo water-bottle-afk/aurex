@@ -29,7 +29,7 @@ def main():
     difficulty = 1
     launch_task(
         "Aurex-Nodes",
-        f"{PYTHON_EXEC} Bnode.py --ip {"10.100.102.58"} --difficulty {2} --port {14253}",
+        f"{PYTHON_EXEC} Bnode.py --difficulty {2} --port {14253}",
         BLOCKCHAIN_DIR,
     )
     time.sleep(2)

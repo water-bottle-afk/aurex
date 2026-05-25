@@ -92,9 +92,18 @@ class Communication:
         return plaintext
 
 
+    def _sanitize_for_log(self, d: dict) -> dict:
+        out = {}
+        for k, v in d.items():
+            if k in ("chunk_b64", "content_b64") and isinstance(v, str) and len(v) > 80:
+                out[k] = f"<{len(v)} chars>"
+            else:
+                out[k] = v
+        return out
+
     def send_one_message(self, data: dict, encryption=True):
         data_json = json.dumps(data, sort_keys=True).encode()
-        
+
         if encryption:
             new_iv = self.generate_iv()
             message = new_iv + self.AES_encrypt(data_json, self.AES_key, new_iv)
@@ -103,7 +112,7 @@ class Communication:
 
         with self.lock:
             self.sock.sendall(struct.pack('!H', len(message)) + message)
-        self.log('send', data_json.decode())
+        self.log('send', json.dumps(self._sanitize_for_log(data), sort_keys=True))
 
 
     def recv_one_message(self, encryption=True):
@@ -122,8 +131,9 @@ class Communication:
             data = self.AES_decrypt(data[16:], self.AES_key, iv)
 
         try:
-            self.log('recv', data.decode())
-            return json.loads(data.decode())
+            decoded = json.loads(data.decode())
+            self.log('recv', json.dumps(self._sanitize_for_log(decoded), sort_keys=True))
+            return decoded
         except Exception as e:
             self.logger.error(f"Error decoding JSON: {e}")
             return None

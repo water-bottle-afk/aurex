@@ -313,6 +313,16 @@ class GatewayServer:
         comm = self.server_client.communication
         self._communicate_with_main_server_comm(comm)
 
+    # Server acknowledgement types that require no further action.
+    _SERVER_ACK_TYPES = frozenset({
+        "ok", "ready",
+        "gateway_registered",
+        "buy_acknowledged", "buy_failed_acknowledged",
+        "sell_acknowledged",
+        "balance_acknowledged",
+        "block_rejected_acknowledged",
+    })
+
     def _communicate_with_main_server_comm(self, comm):
         try:
             comm.send_one_message({"type": "REGISTER_GATEWAY"})
@@ -324,7 +334,7 @@ class GatewayServer:
                 break
 
             msg_type = self._normalize_type(request.get("type"))
-            if msg_type == "ok":
+            if msg_type in self._SERVER_ACK_TYPES:
                 continue
             if msg_type == "error":
                 self.log_event(f"Server error message: {request.get('message')}", status="warning")
