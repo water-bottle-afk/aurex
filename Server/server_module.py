@@ -5,15 +5,17 @@ No asyncio, websockets, TLS/SSL/certs.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
 import os
 import random
 import re
+import shutil
 import sys
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -88,9 +90,6 @@ class UploadSession:
     cost: float
     chunks_b64: list[str]
     created_at: str
-    public_key: str = ""
-    signature: str = ""
-    signed_payload: dict = field(default_factory=dict)
 
 
 class ORMExtended(ORM):
@@ -238,32 +237,6 @@ class ORMExtended(ORM):
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
 
-    def get_all_assets_excluding_user(self, username: str):
-        username = (username or "").strip()
-        market = self._load_marketplace()
-        assets = []
-        for owner, owner_assets in market.items():
-            if owner == username:
-                continue
-            for asset in owner_assets:
-                if isinstance(asset, dict):
-                    assets.append(MarketplaceItem.from_dict(asset))
-        assets.sort(key=lambda a: a.created_at, reverse=True)
-        return assets
-
-    def find_asset_by_id(self, asset_id: str):
-        asset_id = (asset_id or "").strip()
-        if not asset_id:
-            return None
-        market = self._load_marketplace()
-        for owner_assets in market.values():
-            for asset_dict in owner_assets:
-                if isinstance(asset_dict, dict):
-                    item = MarketplaceItem.from_dict(asset_dict)
-                    if item.asset_id == asset_id:
-                        return item
-        return None
-
 
 class ServerUpdated:
     """Sync marketplace server using RSA_Server + Communication dict frames."""
@@ -283,7 +256,7 @@ class ServerUpdated:
         self.notifications_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.notifications_path.exists():
             self.notifications_path.write_text("{}", encoding="utf-8")
-        self.client_listener = RSA_Server(self.host, self.port, dir_for_keys="ServerKeys", name="ServerUpdated")
+        self.client_listener = RSA_Server(self.host, self.port, dir_for_keys="ServerKeys", name="ServerUpdated", peer_label="Client")
         self.logger = logger
         self.client_listener.handle_client = self.handle_client
         self.handlers = {
@@ -309,6 +282,10 @@ class ServerUpdated:
             "SELL_SUCCESS": self.handle_sell_success,
             "BLOCK_REJECTED": self.handle_block_rejected,
             "SEND_BALANCE": self.handle_send_balance,
+            "GET_ASSETS_IDS": self.handle_get_assets_ids,
+            "GET_ASSET_BY_ID": self.handle_get_asset_by_id,
+            "DELETE_ACCOUNT": self.handle_delete_account,
+            "GET_BALANCE": self.handle_get_balance,
         }
 
     def start(self):
@@ -538,11 +515,6 @@ class ServerUpdated:
             cost = float(cost_raw)
         except Exception:
             cost = -1
-        public_key = str(self._param(msg, "public_key", 6, "")).strip()
-        signature = str(self._param(msg, "signature", 7, "")).strip()
-        signed_payload = self._param(msg, "signed_payload", 8, {})
-        if not isinstance(signed_payload, dict):
-            signed_payload = {}
         if not upload_id:
             return self._fail("UPLOAD_FAILED", "Missing upload_id")
         if not username or not asset_name or file_type not in {"jpg", "jpeg", "png"} or cost < 0:
@@ -558,9 +530,6 @@ class ServerUpdated:
             cost=cost,
             chunks_b64=[],
             created_at=datetime.now().isoformat(),
-            public_key=public_key,
-            signature=signature,
-            signed_payload=signed_payload,
         )
         with self.upload_lock:
             self.upload_sessions[upload_id] = session
@@ -608,41 +577,17 @@ class ServerUpdated:
             description=session.description,
             file_type=session.file_type,
             cost=session.cost,
-            content_b64="",          # file is on disk at storage_path; don't bloat the DB
+            content_b64=content_b64,
             storage_path=str(file_path),
             created_at=datetime.now().isoformat(),
         )
         self.db.add_asset(session.username, item)
-        self._notify_gateways({
-            "type": "UPLOAD_ASSET",
-            "data": {
-                "asset_id": item.asset_id,
-                "owner": session.username,
-                "asset_name": session.asset_name,
-                "description": session.description,
-                "file_type": session.file_type,
-                "cost": session.cost,
-                "file_hash": asset_hash,
-                "storage_path": str(file_path),
-                "created_at": item.created_at,
-                "public_key": session.public_key,
-                "signature": session.signature,
-                "signed_payload": session.signed_payload,
-            },
-        })
         return self._success("UPLOAD_SUCCESS", asset_id=item.asset_id)
-
-    @staticmethod
-    def _item_to_wire(item: MarketplaceItem) -> dict:
-        """Strip content_b64 — it's large and clients don't need it; file is at storage_path."""
-        d = item.to_dict()
-        d.pop("content_b64", None)
-        return d
 
     def handle_get_items(self, comm, msg):
         _ = comm
         _ = msg
-        items = [self._item_to_wire(item) for item in self.db.get_all_assets()]
+        items = [item.to_dict() for item in self.db.get_all_assets()]
         return self._success("ITEMS_LIST", items=items)
 
     def handle_get_my_assets(self, comm, msg):
@@ -650,7 +595,7 @@ class ServerUpdated:
         username = str(self._param(msg, "username", 0, "")).strip()
         if not username:
             return self._fail("FETCH_FAILED", "Missing username")
-        items = [self._item_to_wire(item) for item in self.db.get_assets_for_user(username)]
+        items = [item.to_dict() for item in self.db.get_assets_for_user(username)]
         return self._success("MY_ASSETS_LIST", items=items)
 
     def handle_update_public_key(self, comm, msg):
@@ -676,6 +621,7 @@ class ServerUpdated:
 
     def handle_register_gateway(self, comm, msg):
         _ = msg
+        comm.peer_label = "Gateway"
         with self.gateway_lock:
             self.gateway_clients.add(comm)
         return self._success("GATEWAY_REGISTERED")
@@ -762,7 +708,101 @@ class ServerUpdated:
         return self._success("BALANCE_ACKNOWLEDGED")
 
 
+    def handle_get_balance(self, comm, msg):
+        public_key = str(self._param(msg, "user_public_key", 0, "")).strip()
+        if not public_key:
+            return self._fail("BALANCE_FAILED", "Missing user_public_key")
+        self._notify_gateways({"type": "GET_BALANCE", "userpk": public_key})
+        return self._success("BALANCE_REQUESTED")
+
+    def handle_get_assets_ids(self, comm, msg):
+        _ = comm
+        _ = msg
+        items = self.db.get_all_assets()
+        ids = [{"id": item.asset_id, "version": getattr(item, "version", 1)} for item in items if item.asset_id]
+        return self._success("ASSETS_IDS_LIST", ids=ids)
+
+    def handle_get_asset_by_id(self, comm, msg):
+        asset_id = str(self._param(msg, "id", 0, "")).strip()
+        if not asset_id:
+            comm.send_async({"type": "ASSET_FAILED", "message": "Missing asset id"})
+            return None
+
+        item = None
+        for a in self.db.get_all_assets():
+            if a.asset_id == asset_id:
+                item = a
+                break
+
+        if not item:
+            comm.send_async({"type": "ASSET_FAILED", "message": "Asset not found"})
+            return None
+
+        content_b64 = getattr(item, "content_b64", "") or ""
+        if not content_b64:
+            try:
+                raw = Path(item.storage_path).read_bytes()
+                content_b64 = base64.b64encode(raw).decode("ascii")
+            except Exception:
+                comm.send_async({"type": "ASSET_FAILED", "message": "Asset file not found"})
+                return None
+
+        chunk_size = 32_000
+        chunks = [content_b64[i: i + chunk_size] for i in range(0, len(content_b64), chunk_size)] or [""]
+
+        comm.send_async({
+            "type": "ASSET_INIT",
+            "total_chunks": len(chunks),
+            "file_type": item.file_type,
+            "version": getattr(item, "version", 1),
+            "owner": item.owner,
+            "asset_name": item.asset_name,
+            "description": item.description,
+            "cost": item.cost,
+            "created_at": item.created_at,
+            "public_key": getattr(item, "public_key", ""),
+            "asset_status": getattr(item, "asset_status", "PENDING"),
+        })
+        for chunk in chunks:
+            comm.send_async({"type": "ASSET_CHUNK", "chunk_b64": chunk})
+        comm.send_async({"type": "ASSET_END"})
+        return None
+
+    def handle_delete_account(self, comm, msg):
+        username = str(self._param(msg, "username", 0, "")).strip()
+        if not username:
+            return self._fail("DELETE_FAILED", "Missing username")
+
+        self.db.delete_user(username)
+        self.db.delete_user_assets(username)
+
+        with self.notifications_lock:
+            data = self._load_notifications()
+            data.pop(username, None)
+            self._save_notifications(data)
+
+        uploads_dir = Path(__file__).resolve().parent.parent / "DB" / "uploads" / username
+        if uploads_dir.exists():
+            shutil.rmtree(uploads_dir, ignore_errors=True)
+
+        with self.online_users_lock:
+            self.online_users.pop(username, None)
+
+        self.logger.info(f"Account deleted: {username}")
+        return self._success("ACCOUNT_IS_DELETED")
+
+
 if __name__ == "__main__":
+    _parser = argparse.ArgumentParser(description="Aurex marketplace server")
+    _parser.add_argument(
+        "--debug-level", "--DEBUG_LEVEL",
+        default="DEBUG",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+    _args = _parser.parse_args()
+    from SharedResources.logging import Logger as _Logger
+    _Logger.set_level(_args.debug_level)
+
     server = ServerUpdated()
     print(f"[*] Starting ServerUpdated on {SERVER_IP}:{SERVER_PORT}...")
     server.start()

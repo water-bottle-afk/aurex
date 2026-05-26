@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import hashlib
@@ -33,7 +34,7 @@ try:
         build_marketplace_view,
         build_my_assets_view,
         build_notifications_view,
-        build_wallet_settings_view,
+        build_settings_view,
         build_signup_view,
         build_upload_view,
     )
@@ -45,7 +46,7 @@ except Exception:
         build_marketplace_view,
         build_my_assets_view,
         build_notifications_view,
-        build_wallet_settings_view,
+        build_settings_view,
         build_signup_view,
         build_upload_view,
     )
@@ -55,13 +56,18 @@ ASSETS_DIR = PROJECT_ROOT / "assets"
 ICON_PATH = ASSETS_DIR / "flet_assets" / "icon.ico"
 _ICON_FALLBACK = ASSETS_DIR / "flet_assets" / "aurex_icon.ico"
 
-# Push-only events the server sends proactively — routed to notification_queue, not response_queue.
+# Push-only events the server sends proactively — routed away from response_queue.
 _PUSH_EVENTS = frozenset({
     "NOTIFICATION",
     "BUY_SUCCESS", "BUY_FAILED",
     "BLOCK_ACCEPTED", "BLOCK_REJECTED",
-    "BALANCE_UPDATED",
+    "BALANCE_UPDATED", "BALANCE_IS",
+    "FULLY_UPLOADED",
+    "ASSET_SOLD",
+    "ASSET_REMOVED",
+    "ASSET_UNLISTED",
 })
+
 
 @dataclass
 class MarketItem:
@@ -74,7 +80,167 @@ class MarketItem:
     file_type: str
     price: float
     created_at: str
-    public_key_hex: str 
+    public_key_hex: str
+    asset_status: str = "PENDING"
+    version: int = 1
+
+
+class ImageCache:
+    """Per-user RAM + disk image cache with versioning.
+
+    metadata.json layout:
+    {
+      "balance": 0.0,
+      "<asset_id>": {
+        "path": "assets/<asset_id>.<ext>",
+        "version": <int>,
+        "asset_id": "...",
+        "asset_name": "...",
+        "description": "...",
+        "owner": "...",
+        "file_type": "png",
+        "cost": 100.0,
+        "created_at": "...",
+        "asset_status": "FOR_SALE",
+        "public_key": "..."
+      },
+      ...
+    }
+    """
+
+    def __init__(self, username: str):
+        self.username = username
+        self._ram: dict[str, bytes] = {}
+        self._lock = threading.Lock()
+        self._cache_dir = PROJECT_ROOT / "Client" / username / "cache"
+        self._assets_dir = self._cache_dir / "assets"
+        self._metadata_path = self._cache_dir / "metadata.json"
+        self._assets_dir.mkdir(parents=True, exist_ok=True)
+        self._metadata: dict = self._load_metadata()
+        self._validate_and_migrate()
+
+    def _load_metadata(self) -> dict:
+        try:
+            if self._metadata_path.exists():
+                return json.loads(self._metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def _save_metadata(self):
+        try:
+            self._metadata_path.write_text(
+                json.dumps(self._metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _validate_and_migrate(self):
+        """Detect old format (string values or nested 'meta' key) and clear/migrate."""
+        needs_clear = False
+        for k, v in list(self._metadata.items()):
+            if k == "balance":
+                continue
+            if isinstance(v, str):
+                needs_clear = True
+                break
+            if isinstance(v, dict) and "meta" in v:
+                # Old nested format — migrate in place
+                old_meta = v.get("meta", {})
+                v.update(old_meta)
+                del v["meta"]
+        if needs_clear:
+            self._clear_cache()
+
+    def _clear_cache(self):
+        try:
+            if self._assets_dir.exists():
+                shutil.rmtree(self._assets_dir)
+            self._assets_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        balance = self._metadata.get("balance", 0.0)
+        self._metadata = {"balance": balance}
+        self._ram = {}
+        self._save_metadata()
+
+    # ── Balance ────────────────────────────────────────────────────────────────
+
+    def get_balance(self) -> float:
+        return float(self._metadata.get("balance", 0.0))
+
+    def set_balance(self, amount: float):
+        with self._lock:
+            self._metadata["balance"] = float(amount)
+            self._save_metadata()
+
+    # ── Assets ─────────────────────────────────────────────────────────────────
+
+    def get_raw(self, asset_id: str) -> bytes | None:
+        with self._lock:
+            if asset_id in self._ram:
+                return self._ram[asset_id]
+            entry = self._metadata.get(asset_id)
+            if isinstance(entry, dict):
+                full = self._cache_dir / entry.get("path", "")
+                if full.exists():
+                    raw = full.read_bytes()
+                    self._ram[asset_id] = raw
+                    return raw
+        return None
+
+    def get_path(self, asset_id: str) -> "Path | None":
+        with self._lock:
+            entry = self._metadata.get(asset_id)
+            if not isinstance(entry, dict):
+                return None
+            full = self._cache_dir / entry.get("path", "")
+            if full.exists():
+                return full
+        return None
+
+    def get_if_current(self, asset_id: str, server_version: int) -> "tuple[dict, bytes] | None":
+        """Return (entry_dict, raw) if cached version >= server_version and entry is non-empty."""
+        with self._lock:
+            entry = self._metadata.get(asset_id)
+            if not isinstance(entry, dict):
+                return None
+            if int(entry.get("version", 0)) < server_version:
+                return None
+            if not entry.get("asset_name"):
+                return None
+            raw = self._ram.get(asset_id)
+            if raw is None:
+                full = self._cache_dir / entry.get("path", "")
+                if not full.exists():
+                    return None
+                raw = full.read_bytes()
+                self._ram[asset_id] = raw
+            return entry, raw
+
+    def store(self, asset_id: str, file_type: str, version: int, meta: dict, raw: bytes):
+        """Store image bytes and flattened metadata for an asset."""
+        with self._lock:
+            fname = f"{asset_id}.{file_type}"
+            path = self._assets_dir / fname
+            path.write_bytes(raw)
+            entry = dict(meta)
+            entry["path"] = f"assets/{fname}"
+            entry["version"] = version
+            self._metadata[asset_id] = entry
+            self._save_metadata()
+            self._ram[asset_id] = raw
+
+    def invalidate(self, asset_id: str):
+        with self._lock:
+            entry = self._metadata.pop(asset_id, None)
+            self._ram.pop(asset_id, None)
+            if isinstance(entry, dict):
+                try:
+                    (self._cache_dir / entry.get("path", "")).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._save_metadata()
 
 
 @dataclass
@@ -87,10 +253,12 @@ class ClientState:
     verified_reset_user: str | None = None
     market_items: list[MarketItem] = field(default_factory=list)
     notifications: list[str] = field(default_factory=list)
+    unseen_notifications: int = 0
     wallet_loaded: bool = False
     wallet_public_key: str | None = None
     wallet_username: str | None = None
     wallet_status_message: str = ""
+    balance: float = 0.0
 
 
 class ServerClient:
@@ -106,13 +274,16 @@ class ServerClient:
         self._stop_event = threading.Event()
         self._response_queue: "queue.Queue[dict | None]" = queue.Queue()
         self.notification_queue: "queue.Queue[str]" = queue.Queue()
+        self.asset_sold_queue: "queue.Queue[str]" = queue.Queue()
+        self.asset_removed_queue: "queue.Queue[str]" = queue.Queue()
+        self.asset_unlisted_queue: "queue.Queue[str]" = queue.Queue()
+        self.balance_queue: "queue.Queue[float]" = queue.Queue()
 
     def connect(self):
-        """Open TCP + RSA/AES session once."""
         with self._lock:
             if self._comm is not None:
                 return
-            self._transport = RSA_Client(self.host, self.port, name="ClientUI")
+            self._transport = RSA_Client(self.host, self.port, name="ClientUI", peer_label="Server")
             self._transport.sock.connect((self.host, self.port))
             self._transport.contact_with_RSA()
             self._comm = self._transport.communication
@@ -122,7 +293,6 @@ class ServerClient:
             self._receiver_thread.start()
 
     def close(self):
-        """Close transport safely."""
         with self._lock:
             self._stop_event.set()
             if self._comm is not None:
@@ -135,7 +305,7 @@ class ServerClient:
 
     def _recv_dispatch_loop(self):
         while not self._stop_event.is_set():
-            comm = self._comm  # snapshot to avoid race with close()
+            comm = self._comm
             if comm is None:
                 break
             msg = comm.recv_async(timeout=0.25)
@@ -150,22 +320,34 @@ class ServerClient:
                 if msg_type == "NOTIFICATION":
                     self.notification_queue.put(str(msg.get("msg", "")))
                 elif msg_type == "BUY_SUCCESS":
-                    self.notification_queue.put(
-                        f"Transaction confirmed — asset {msg.get('asset_id', '')} at {msg.get('price', '')} AUR"
-                    )
+                    text = str(msg.get("msg") or f"Transaction confirmed — asset {msg.get('asset_id', '')} at {msg.get('price', '')} AUR")
+                    self.notification_queue.put(text)
                 elif msg_type == "BUY_FAILED":
                     self.notification_queue.put(f"Transaction failed: {msg.get('message', 'Unknown reason')}")
                 elif msg_type == "BLOCK_ACCEPTED":
                     self.notification_queue.put(f"Block accepted for asset {msg.get('asset_id', '')}")
                 elif msg_type == "BLOCK_REJECTED":
                     self.notification_queue.put(f"Block rejected: {msg.get('message', 'Unknown reason')}")
-                elif msg_type == "BALANCE_UPDATED":
-                    self.notification_queue.put(f"Balance updated: {msg.get('balance', '')} AUR")
+                elif msg_type in ("BALANCE_UPDATED", "BALANCE_IS"):
+                    balance = float(msg.get("balance", 0.0))
+                    self.balance_queue.put(balance)
+                elif msg_type == "FULLY_UPLOADED":
+                    self.notification_queue.put(str(msg.get("msg", f"Asset {msg.get('asset_id', '')} fully uploaded")))
+                elif msg_type == "ASSET_SOLD":
+                    asset_id = str(msg.get("asset_id", ""))
+                    self.notification_queue.put(f"Asset {asset_id} was sold")
+                    if asset_id:
+                        self.asset_sold_queue.put(asset_id)
+                elif msg_type in ("ASSET_REMOVED", "ASSET_UNLISTED"):
+                    asset_id = str(msg.get("asset_id", ""))
+                    msg_text = str(msg.get("msg", f"Asset {asset_id} was unlisted"))
+                    self.notification_queue.put(msg_text)
+                    if asset_id:
+                        self.asset_unlisted_queue.put(asset_id)
                 continue
             self._response_queue.put(msg)
 
     def _request(self, payload, timeout=20):
-        """Send one dict request and receive dict response."""
         self.connect()
         with self._lock:
             self._comm.send_async(payload)
@@ -201,17 +383,38 @@ class ServerClient:
     def update_public_key(self, username, public_key):
         return self._request({"type": "UPDATE_PUBLIC_KEY", "username": username, "public_key": public_key})
 
-    def get_items(self):
-        return self._request({"type": "GET_ITEMS"})
+    def get_assets_ids(self, username: str = ""):
+        return self._request({"type": "GET_ASSETS_IDS", "username": username})
+
+    def delete_account(self, username: str):
+        return self._request({"type": "DELETE_ACCOUNT", "username": username})
 
     def get_my_assets(self, username):
         return self._request({"type": "GET_MY_ASSETS", "username": username})
 
+    def move_to_marketplace(self, username: str, asset_id: str):
+        return self._request({"type": "MOVE_TO_MARKETPLACE", "username": username, "asset_id": asset_id})
+
     def buy_asset(self, payload):
         return self._request({"type": "BUY_ASSET", "data": payload})
 
-    def upload_file(self, username, file_path, asset_name, description, file_type, cost, signature="", public_key="", signed_payload=None):
-        """Upload file with UPLOAD_INIT -> UPLOAD chunks -> UPLOAD_FINISH."""
+    def delete_asset(self, asset_id: str, owner: str):
+        return self._request({"type": "DELETE_ASSET", "asset_id": asset_id, "owner": owner})
+
+    def unlist_asset(self, username: str, asset_id: str, public_key: str = "", signature: str = ""):
+        return self._request({
+            "type": "UNLIST_ASSET",
+            "username": username,
+            "asset_id": asset_id,
+            "public_key": public_key,
+            "signature": signature,
+        })
+
+    def request_balance(self, public_key: str):
+        """Fire-and-forget: server acks immediately, result arrives via BALANCE_IS push."""
+        return self._request({"type": "GET_BALANCE", "user_public_key": public_key})
+
+    def upload_file(self, username, file_path, asset_name, description, file_type, cost, signature="", public_key="", signed_payload=None, for_sale=True):
         upload_id = uuid.uuid4().hex
         self._request(
             {
@@ -225,14 +428,52 @@ class ServerClient:
                 "signature": signature,
                 "public_key": public_key,
                 "signed_payload": signed_payload or {},
+                "for_sale": for_sale,
             }
         )
         raw = Path(file_path).read_bytes()
         b64 = base64.b64encode(raw).decode("ascii")
-        chunk_size = 32_000  # struct '!H' cap is 65535 bytes; 32k b64 + JSON + AES overhead fits safely
+        chunk_size = 32_000
         for i in range(0, len(b64), chunk_size):
             self._request({"type": "UPLOAD", "upload_id": upload_id, "chunk_b64": b64[i : i + chunk_size]})
         return self._request({"type": "UPLOAD_FINISH", "upload_id": upload_id})
+
+    def download_asset(self, asset_id: str, timeout: int = 30) -> tuple[dict, bytes]:
+        self.connect()
+        with self._lock:
+            self._comm.send_async({"type": "GET_ASSET_BY_ID", "id": asset_id})
+            try:
+                init_msg = self._response_queue.get(timeout=timeout)
+            except queue.Empty as exc:
+                raise RuntimeError("Download timeout (ASSET_INIT)") from exc
+            if not isinstance(init_msg, dict):
+                raise RuntimeError("Invalid server response during download")
+            if init_msg.get("type") == "ASSET_FAILED":
+                raise RuntimeError(str(init_msg.get("message", "Asset download failed")))
+            if init_msg.get("type") != "ASSET_INIT":
+                raise RuntimeError(f"Unexpected response: {init_msg.get('type')}")
+            total_chunks = int(init_msg.get("total_chunks", 0))
+            chunks: list[str] = []
+            for _ in range(total_chunks):
+                try:
+                    chunk_msg = self._response_queue.get(timeout=timeout)
+                except queue.Empty as exc:
+                    raise RuntimeError("Download timeout (chunk)") from exc
+                if not isinstance(chunk_msg, dict) or chunk_msg.get("type") != "ASSET_CHUNK":
+                    raise RuntimeError(
+                        f"Expected ASSET_CHUNK, got {chunk_msg.get('type') if isinstance(chunk_msg, dict) else '?'}"
+                    )
+                chunks.append(str(chunk_msg.get("chunk_b64", "")))
+            try:
+                end_msg = self._response_queue.get(timeout=timeout)
+            except queue.Empty as exc:
+                raise RuntimeError("Download timeout (ASSET_END)") from exc
+            if not isinstance(end_msg, dict) or end_msg.get("type") != "ASSET_END":
+                raise RuntimeError(
+                    f"Expected ASSET_END, got {end_msg.get('type') if isinstance(end_msg, dict) else '?'}"
+                )
+        raw = base64.b64decode("".join(chunks).encode("ascii"))
+        return init_msg, raw
 
 
 class ClientApp:
@@ -251,13 +492,18 @@ class ClientApp:
         self.page.bgcolor = "#090B0F"
         self.page.on_route_change = self._on_route_change
         self.page.on_view_pop = self._on_view_pop
+        self._image_cache: ImageCache | None = None
+        self._sold_asset_ids: set[str] = set()
+        self._removed_asset_ids: set[str] = set()
+        self._unlisted_asset_ids: set[str] = set()
+        # Refs to live header controls — updated by background monitors
+        self._balance_text: ft.Text | None = None
+        self._notification_badge: ft.Container | None = None
 
     def start(self):
-        """Render first route."""
         self.page.go("/login")
 
     def notify(self, message, error=False):
-        """Show snackbar notification."""
         if error:
             self.page.dialog = ft.AlertDialog(
                 modal=True,
@@ -276,6 +522,10 @@ class ClientApp:
         self.page.update()
 
     def _drain_server_notifications(self):
+        self._consume_notification_queue()
+
+    def _consume_notification_queue(self):
+        count = 0
         while True:
             try:
                 msg = self.client.notification_queue.get_nowait()
@@ -283,6 +533,77 @@ class ClientApp:
                 break
             if msg:
                 self.state.notifications.append(msg)
+                count += 1
+        if count > 0:
+            self.state.unseen_notifications += count
+            self._update_notification_badge()
+
+    def _update_notification_badge(self):
+        badge = self._notification_badge
+        if badge is None:
+            return
+        count = self.state.unseen_notifications
+        badge.visible = count > 0
+        label = badge.content
+        if label is not None:
+            label.value = str(min(count, 99))
+        try:
+            badge.update()
+        except Exception:
+            pass
+
+    def _start_notification_monitor(self):
+        def _monitor():
+            while True:
+                time.sleep(0.4)
+                self._consume_notification_queue()
+        threading.Thread(target=_monitor, daemon=True).start()
+
+    def _drain_asset_events(self):
+        while True:
+            try:
+                asset_id = self.client.asset_sold_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._sold_asset_ids.add(asset_id)
+            self.image_cache.invalidate(asset_id)
+        while True:
+            try:
+                asset_id = self.client.asset_removed_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._removed_asset_ids.add(asset_id)
+        while True:
+            try:
+                asset_id = self.client.asset_unlisted_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._unlisted_asset_ids.add(asset_id)
+
+    def _drain_balance_events(self):
+        """Drain balance queue, update state, update UI text if visible."""
+        while True:
+            try:
+                balance = self.client.balance_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.state.balance = balance
+            if self._image_cache:
+                self._image_cache.set_balance(balance)
+            if self._balance_text is not None:
+                try:
+                    self._balance_text.value = f"{balance:.2f} AUR"
+                    self._balance_text.update()
+                except Exception:
+                    pass
+
+    def _start_balance_monitor(self):
+        """Background thread that updates the UI balance display as events arrive."""
+        def _monitor():
+            while True:
+                time.sleep(0.5)
+                self._drain_balance_events()
+        threading.Thread(target=_monitor, daemon=True).start()
 
     def _close_error_dialog(self):
         if self.page.dialog:
@@ -291,19 +612,24 @@ class ClientApp:
 
     def _on_route_change(self, _):
         self._drain_server_notifications()
+        self._drain_asset_events()
+        self._drain_balance_events()
         route = self.page.route or "/login"
-        private_routes = {"/wallet", "/marketplace", "/upload", "/my_assets", "/notifications"}
+        if route == "/notifications":
+            self.state.unseen_notifications = 0
+            self._update_notification_badge()
+        private_routes = {"/settings", "/marketplace", "/upload", "/my_assets", "/notifications"}
         if route in private_routes and not self.state.is_authenticated:
             route = "/login"
             self.page.route = route
         if self.state.is_authenticated and route in {"/marketplace", "/upload", "/my_assets", "/notifications"} and not self.state.wallet_loaded:
-            route = "/wallet"
+            route = "/settings"
             self.page.route = route
         builders = {
             "/login": build_login_view,
             "/signup": build_signup_view,
             "/forgot": build_forgot_view,
-            "/wallet": build_wallet_settings_view,
+            "/settings": build_settings_view,
             "/marketplace": build_marketplace_view,
             "/upload": build_upload_view,
             "/notifications": build_notifications_view,
@@ -341,6 +667,9 @@ class ClientApp:
         self._load_wallet_session_from_default()
         self._drain_server_notifications()
         self.state.notifications.append("Logged in successfully")
+        # Load cached balance before requesting fresh one
+        if self._image_cache:
+            self.state.balance = self._image_cache.get_balance()
         return resp
 
     def signup(self, username, password, email):
@@ -361,39 +690,156 @@ class ClientApp:
     def update_password(self, email, new_password):
         return self.client.update_password(email, new_password)
 
+    @property
+    def image_cache(self) -> ImageCache:
+        username = self.state.username or "_anonymous"
+        if self._image_cache is None or self._image_cache.username != username:
+            self._image_cache = ImageCache(username)
+            self.state.balance = self._image_cache.get_balance()
+        return self._image_cache
+
+    def get_asset_image(self, asset_id: str, file_type: str) -> bytes | None:
+        try:
+            raw = self.image_cache.get_raw(asset_id)
+            if raw:
+                return raw
+            _, raw = self.client.download_asset(asset_id)
+            self.image_cache.store(asset_id, file_type, 0, {}, raw)
+            return raw
+        except Exception as exc:
+            logger.warning(f"Image download failed for {asset_id}: {exc}")
+            return None
+
     def logout(self):
         self.client.logout()
         self.client.close()
         self.state = ClientState()
         self.wallet_session = None
+        self._image_cache = None
+        self._sold_asset_ids = set()
+        self._removed_asset_ids = set()
+        self._unlisted_asset_ids = set()
+        self._balance_text = None
+        self._notification_badge = None
 
-    def _parse_items(self, raw_list):
-        items = []
-        for raw in raw_list:
-            items.append(MarketItem(
-                asset_id=str(raw.get("asset_id", "")),
-                owner=str(raw.get("owner", "")),
-                title=str(raw.get("asset_name", "")),
-                description=str(raw.get("description", "")),
-                file_type=str(raw.get("file_type", "")),
-                price=float(raw.get("cost", 0.0)),
-                created_at=str(raw.get("created_at", "")),
-                public_key_hex=str(raw.get("public_key", "")),
-            ))
-        return items
+    def delete_account(self):
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+        self.client.delete_account(self.state.username)
+        try:
+            self.client.close()
+        except Exception:
+            pass
+        self.state = ClientState()
+        self.wallet_session = None
+        self._image_cache = None
+        self._sold_asset_ids = set()
+        self._removed_asset_ids = set()
+        self._unlisted_asset_ids = set()
+        self._balance_text = None
+        self._notification_badge = None
 
-    def refresh_market_items(self):
-        resp = self.client.get_items()
-        self.state.market_items = self._parse_items(resp.get("items", []))
-        return self.state.market_items
+    def get_market_asset_ids(self) -> list[dict]:
+        resp = self.client.get_assets_ids(self.state.username or "")
+        return [
+            entry if isinstance(entry, dict) else {"id": str(entry), "version": 1}
+            for entry in resp.get("ids", [])
+        ]
 
-    def fetch_my_assets(self):
+    def load_asset_by_id(self, asset_id: str, version: int = 1) -> "MarketItem | None":
+        try:
+            cached = self.image_cache.get_if_current(asset_id, version)
+            if cached is not None:
+                entry, _ = cached
+                return MarketItem(
+                    asset_id=asset_id,
+                    owner=str(entry.get("owner", "")),
+                    title=str(entry.get("asset_name", "")),
+                    description=str(entry.get("description", "")),
+                    file_type=str(entry.get("file_type", "png")),
+                    price=float(entry.get("cost", 0.0)),
+                    created_at=str(entry.get("created_at", "")),
+                    public_key_hex=str(entry.get("public_key", "")),
+                    asset_status=str(entry.get("asset_status", "PENDING")),
+                    version=int(entry.get("version", 1)),
+                )
+            init_meta, raw = self.client.download_asset(asset_id)
+            file_type = str(init_meta.get("file_type", "png"))
+            server_version = int(init_meta.get("version", version))
+            meta_to_store = {
+                "asset_id": asset_id,
+                "version": server_version,
+                "owner": str(init_meta.get("owner", "")),
+                "asset_name": str(init_meta.get("asset_name", "")),
+                "description": str(init_meta.get("description", "")),
+                "file_type": file_type,
+                "cost": float(init_meta.get("cost", 0.0)),
+                "created_at": str(init_meta.get("created_at", "")),
+                "public_key": str(init_meta.get("public_key", "")),
+                "asset_status": str(init_meta.get("asset_status", "PENDING")),
+            }
+            self.image_cache.store(asset_id, file_type, server_version, meta_to_store, raw)
+            return MarketItem(
+                asset_id=asset_id,
+                owner=meta_to_store["owner"],
+                title=meta_to_store["asset_name"],
+                description=meta_to_store["description"],
+                file_type=file_type,
+                price=meta_to_store["cost"],
+                created_at=meta_to_store["created_at"],
+                public_key_hex=meta_to_store["public_key"],
+                asset_status=meta_to_store["asset_status"],
+                version=server_version,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to load asset {asset_id}: {exc}")
+            return None
+
+    def get_my_asset_ids(self) -> list[dict]:
         if not self.state.username:
             raise RuntimeError("Not authenticated")
         resp = self.client.get_my_assets(self.state.username)
-        return self._parse_items(resp.get("items", []))
+        return [
+            {"id": str(item.get("asset_id", "")), "version": int(item.get("version", 1))}
+            for item in resp.get("items", [])
+            if isinstance(item, dict) and item.get("asset_id")
+        ]
 
-    def upload_asset(self, file_path, asset_name, description, file_type, cost):
+    def move_to_marketplace(self, asset_id: str) -> dict:
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+        return self.client.move_to_marketplace(self.state.username, asset_id)
+
+    def delete_asset(self, asset_id: str):
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+        resp = self.client.delete_asset(asset_id, self.state.username)
+        # Invalidate local cache on success
+        self.image_cache.invalidate(asset_id)
+        return resp
+
+    def unlist_asset(self, asset_id: str):
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+        public_key = self.state.wallet_public_key or ""
+        signature = ""
+        if self.wallet_session:
+            try:
+                payload = {"asset_id": asset_id, "owner": self.state.username}
+                signature = self.sign_payload(payload)
+            except Exception:
+                pass
+        return self.client.unlist_asset(self.state.username, asset_id, public_key, signature)
+
+    def request_balance(self):
+        if not self.state.wallet_public_key:
+            return
+        try:
+            self.client.request_balance(self.state.wallet_public_key)
+        except Exception as exc:
+            logger.warning(f"GET_BALANCE request failed: {exc}")
+
+    def upload_asset(self, file_path, asset_name, description, file_type, cost, for_sale=True):
         if not self.state.username:
             raise RuntimeError("Not authenticated")
         if not self.wallet_session:
@@ -420,9 +866,28 @@ class ClientApp:
             signature=signature,
             public_key=self.wallet_session.public_key,
             signed_payload=tx_payload,
+            for_sale=for_sale,
         )
+        asset_id = str(resp.get("asset_id", ""))
+        if asset_id:
+            try:
+                meta_to_store = {
+                    "asset_id": asset_id,
+                    "version": 1,
+                    "owner": self.state.username,
+                    "asset_name": asset_name,
+                    "description": description,
+                    "file_type": file_type,
+                    "cost": float(cost),
+                    "asset_status": "PENDING",
+                    "public_key": self.wallet_session.public_key,
+                }
+                self.image_cache.store(asset_id, file_type, 1, meta_to_store, file_bytes)
+            except Exception:
+                pass
         self.state.notifications.append(f"Uploaded asset: {asset_name}")
-        self.state.notifications.append("Asset sent to mining process")
+        if for_sale:
+            self.state.notifications.append("Asset sent to mining process — will appear on marketplace once confirmed")
         return resp
 
     def buy_asset(self, item: MarketItem):
@@ -451,7 +916,10 @@ class ClientApp:
     def update_public_key(self, public_key):
         if not self.state.username:
             raise RuntimeError("Not authenticated")
-        return self.client.update_public_key(self.state.username, public_key)
+        resp = self.client.update_public_key(self.state.username, public_key)
+        # After registering key, request fresh balance
+        threading.Thread(target=self.request_balance, daemon=True).start()
+        return resp
 
     # ----- wallet session + actions -----
 
@@ -526,7 +994,6 @@ class ClientApp:
 
 
 def _setup_window(page) -> None:
-    """Set window icon and constraints early, before ClientApp construction."""
     try:
         _cwd = Path.cwd()
         _frozen = getattr(sys, "frozen", False)
@@ -554,13 +1021,16 @@ def main(page):
     """Desktop entrypoint."""
     _setup_window(page)
     app = ClientApp(page)
+    app._start_balance_monitor()
+    app._start_notification_monitor()
     app.start()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    import argparse as _argparse
+    _parser = _argparse.ArgumentParser(add_help=False)
+    _parser.add_argument("--debug-level", "--DEBUG_LEVEL", default="DEBUG",
+                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    _args, _ = _parser.parse_known_args()
+    Logger.set_level(_args.debug_level)
     ft.app(target=main, view=ft.AppView.FLET_APP, assets_dir=str(ASSETS_DIR))

@@ -9,6 +9,7 @@ import socket
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ class BlockchainNode:
             self.port,
             dir_for_keys=None,
             name="NodePeerServer",
+            peer_label="Bnode",
         )
         self.server_for_peers.handle_client = self.handle_peer_connection
 
@@ -107,7 +109,7 @@ class BlockchainNode:
 
             gw_ip, gw_port = discovered
             try:
-                client = RSA_Client(gw_ip, gw_port, name=f"{self.node_id}_to_gateway")
+                client = RSA_Client(gw_ip, gw_port, name=f"{self.node_id}_to_gateway", peer_label="Gateway")
                 client.sock.connect((gw_ip, gw_port))
                 client.contact_with_RSA()
                 self.gateway_client = client
@@ -188,12 +190,16 @@ class BlockchainNode:
 
     def mine(self, transaction: dict[str, Any]):
         if not self.validate_tx(transaction):
+            self.Print(f"[{self.node_id}] mine: tx validation failed for tx_type={transaction.get('tx_type', transaction.get('type', 'TX'))}")
             return None
+
+        tx_label = transaction.get("tx_type") or transaction.get("type") or "TX"
+        self.Print(f"[{self.node_id}] mine: starting PoW for {tx_label} difficulty={self.difficulty}...")
 
         new_block = {
             "index": len(self.chain),
             "prev_hash": self._last_hash(),
-            "timestamp": time.time(),
+            "timestamp": datetime.now().isoformat(),
             "tx": transaction,
             "public_key": str(transaction.get("public_key", "")),
             "signature": str(transaction.get("signature", "")),
@@ -210,6 +216,7 @@ class BlockchainNode:
 
         if "hash" not in new_block:
             return None
+        self.Print(f"[{self.node_id}] mine: block found nonce={new_block['nonce']} hash={new_block['hash'][:16]}...")
         self.add_block(new_block)
         return new_block
 
@@ -231,7 +238,6 @@ class BlockchainNode:
             self.chain.append(block)
             self.pending_txs = []
             self._persist_local_state()
-            self.register_blockchain_node()
 
     # -------- gateway communication --------
 
@@ -319,6 +325,12 @@ class BlockchainNode:
         if msg_type == "broadcast_tx_to_verify":
             self.handle_broadcast_tx_to_verify(msg)
             return
+        if msg_type in {"upload_asset", "start_mining"}:
+            threading.Thread(target=self._handle_mint_request, args=(msg,), daemon=True).start()
+            return
+        if msg_type == "unlist_asset":
+            threading.Thread(target=self._handle_unlist_request, args=(msg,), daemon=True).start()
+            return
         if msg_type == "create_balance":
             self.handle_create_balance(msg)
             return
@@ -346,12 +358,97 @@ class BlockchainNode:
             "receiver": str(payload.get("receiver") or payload.get("seller") or ""),
             "amount": float(payload.get("amount") or payload.get("price") or 0.0),
             "asset_id": payload.get("asset_id"),
-            "timestamp": payload.get("timestamp") or time.time(),
+            "timestamp": payload.get("timestamp") or datetime.now().isoformat(),
             "data": payload.get("data") if isinstance(payload.get("data"), dict) else payload,
             "signature": str(payload.get("signature", "")),
             "public_key": str(payload.get("public_key", "")),
         }
         return tx
+
+    def _handle_mint_request(self, msg: dict[str, Any]):
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        asset_id = str(data.get("asset_id", ""))
+        owner = str(data.get("owner", ""))
+        public_key = str(data.get("public_key", ""))
+        signature = str(data.get("signature", ""))
+        file_hash = str(data.get("file_hash", ""))
+
+        if not asset_id:
+            self.Print(f"[{self.node_id}] ASSET_MINT: missing asset_id, skipping")
+            return
+
+        tx = {
+            "tx_type": "ASSET_MINT",
+            "tx_id": f"mint-{asset_id}-{int(time.time() * 1000)}",
+            "asset_id": asset_id,
+            "owner_public_key": public_key,
+            "owner_username": owner,
+            "sender": public_key,
+            "receiver": "",
+            "amount": 0.0,
+            "signature": signature,
+            "public_key": public_key,
+            "timestamp": datetime.now().isoformat(),
+            "img_hash": file_hash,
+        }
+
+        self.Print(f"[{self.node_id}] ASSET_MINT: starting mining for asset_id={asset_id}")
+        block = self.mine(tx)
+        if block is not None:
+            self.Print(f"[{self.node_id}] ASSET_MINT: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
+            self._send_gateway({
+                "type": "ASSET_SIGNED_IN_BLOCKCHAIN",
+                "data": {
+                    "block": block,
+                    "asset_id": asset_id,
+                    "owner": owner,
+                },
+                "sender_ip": self._advertised_ip(),
+                "sender_port": self.port,
+            })
+        else:
+            self.Print(f"[{self.node_id}] ASSET_MINT: mining failed for asset_id={asset_id}")
+
+    def _handle_unlist_request(self, msg: dict[str, Any]):
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        asset_id = str(data.get("asset_id", ""))
+        owner = str(data.get("owner", ""))
+        public_key = str(data.get("public_key", ""))
+        signature = str(data.get("signature", ""))
+
+        if not asset_id:
+            self.Print(f"[{self.node_id}] UNLIST: missing asset_id, skipping")
+            return
+
+        tx = {
+            "tx_type": "UNLIST_ASSET_FROM_BLOCKCHAIN",
+            "tx_id": f"unlist-{asset_id}-{int(time.time() * 1000)}",
+            "asset_id": asset_id,
+            "owner_username": owner,
+            "sender": public_key,
+            "receiver": "",
+            "amount": 0.0,
+            "signature": signature,
+            "public_key": public_key,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        self.Print(f"[{self.node_id}] UNLIST: starting mining for asset_id={asset_id}")
+        block = self.mine(tx)
+        if block is not None:
+            self.Print(f"[{self.node_id}] UNLIST: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
+            self._send_gateway({
+                "type": "ASSET_UNLIST_SIGNED_IN_BLOCKCHAIN",
+                "data": {
+                    "block": block,
+                    "asset_id": asset_id,
+                    "owner": owner,
+                },
+                "sender_ip": self._advertised_ip(),
+                "sender_port": self.port,
+            })
+        else:
+            self.Print(f"[{self.node_id}] UNLIST: mining failed for asset_id={asset_id}")
 
     def handle_tx_request_buy(self, msg: dict[str, Any]):
         tx = self._tx_from_gateway_message(msg, "BUY")
@@ -398,6 +495,7 @@ class BlockchainNode:
         block = data.get("block") if isinstance(data.get("block"), dict) else {}
         if block and int(block.get("index", -1)) == len(self.chain) and str(block.get("prev_hash", "")) == self._last_hash():
             self.add_block(block)
+            self.register_blockchain_node()
 
     # -------- peer ledger sharing --------
 
@@ -473,7 +571,7 @@ class BlockchainNode:
         comm.send_one_message({"type": "LEDGER_SNAPSHOT_END"})
 
     def request_ledger_from_peer(self, peer_ip: str, peer_port: int):
-        client = RSA_Client(peer_ip, int(peer_port), name=f"{self.node_id}_peer_sync")
+        client = RSA_Client(peer_ip, int(peer_port), name=f"{self.node_id}_peer_sync", peer_label="Bnode")
         try:
             client.sock.connect((peer_ip, int(peer_port)))
             client.contact_with_RSA()
@@ -521,7 +619,7 @@ class BlockchainNode:
                 pass
 
     def request_balance_from_peer(self, peer_ip: str, peer_port: int, userpk: str):
-        client = RSA_Client(peer_ip, int(peer_port), name=f"{self.node_id}_balance_sync")
+        client = RSA_Client(peer_ip, int(peer_port), name=f"{self.node_id}_balance_sync", peer_label="Bnode")
         try:
             client.sock.connect((peer_ip, int(peer_port)))
             client.contact_with_RSA()
@@ -551,7 +649,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--difficulty", type=int, default=POW_DIFFICULTY)
+    parser.add_argument(
+        "--debug-level", "--DEBUG_LEVEL",
+        default="DEBUG",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
     args = parser.parse_args()
+
+    from SharedResources.logging import Logger as _Logger
+    _Logger.set_level(args.debug_level)
 
     if args.port == 0:
         print("[*] No --port provided. OS will assign a free port.")

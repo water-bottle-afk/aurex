@@ -85,13 +85,16 @@ class WalletData:
 
 class WalletManager:
     def __init__(self, base_dir: Path | None = None):
-        self.base_dir = base_dir if base_dir else Path(__file__).resolve().parent / "wallets"
+        self.base_dir = base_dir if base_dir else Path(__file__).resolve().parent
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def wallet_path_for_user(self, username: str) -> Path:
         user_dir = self.base_dir / username
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir / "wallet.json"
+
+    def _legacy_wallet_path(self, username: str) -> Path:
+        return self.base_dir / "wallets" / username / "wallet.json"
 
     def generate_wallet(self, username: str) -> WalletData:
         private_key = ec.generate_private_key(ec.SECP256K1())
@@ -123,5 +126,10 @@ class WalletManager:
     def load_wallet_for_user(self, username: str) -> WalletData | None:
         path = self.wallet_path_for_user(username)
         if not path.exists():
+            legacy = self._legacy_wallet_path(username)
+            if legacy.exists():
+                wallet = self.load_wallet_from_path(legacy)
+                self.save_wallet(wallet, path)
+                return wallet
             return None
         return self.load_wallet_from_path(path)

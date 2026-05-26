@@ -9,9 +9,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 import socket
 import hashlib
-from hashlib import md5
 import random
-import pickle
 import threading
 import struct
 import queue
@@ -25,21 +23,25 @@ import base64
 from cryptography.hazmat.primitives.asymmetric import dh, rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_parameters, load_pem_public_key
-import logging
-import sqlite3
+
 from SharedResources.logging import Logger
 
 PEPPER = "Aurex"
 
 class Communication:
     def log(self, dirct, data):
-        
+        try:
+            ip, port = self.sock.getpeername()
+            addr = f"{ip}:{port}"
+        except Exception:
+            addr = "?"
+        label = self.peer_label or "Peer"
         if dirct == 'recv':
-            self.Print("got <<<<< " + data)
+            self.Print(f"Recv From {label} at {addr} <<< {data}")
         else:
-            self.Print("sent >>>>> " + data)
+            self.Print(f"Sent to {label} at {addr} >>> {data}")
 
-    def __init__(self, sock, name=""):
+    def __init__(self, sock, name="", peer_label=""):
         self.sock = sock
         self.shared_key = None
         self.parameters = None
@@ -47,6 +49,7 @@ class Communication:
         self.logger = Logger(name or __file__)
         self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
         self.name = name
+        self.peer_label = peer_label
         self.AES_key = None
 
         self.user = None
@@ -229,11 +232,11 @@ class Communication:
         self.sock.close()
 
 class RSA_Client:
-    def __init__(self, ip, port, name="RSA_Client"):
+    def __init__(self, ip, port, name="RSA_Client", peer_label=""):
         self.ip = ip
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.communication = Communication(sock=self.sock, name=name)
+        self.communication = Communication(sock=self.sock, name=name, peer_label=peer_label)
         
     def start(self):
         self.sock.connect((self.ip, self.port))
@@ -294,9 +297,11 @@ class RSA_Client:
         self.sock.close()
 
 class RSA_Server:
-    def __init__(self, ip, port, dir_for_keys=None, Gateway=False,name="RSA_Server"):
+    def __init__(self, ip, port, dir_for_keys=None, Gateway=False, name="RSA_Server", peer_label="Peer"):
         self.ip = ip
         self.port = port
+        self.name = name
+        self.peer_label = peer_label
         self.dir_for_keys = dir_for_keys
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind((self.ip, self.port))
@@ -310,7 +315,7 @@ class RSA_Server:
         
 
     def communicate_with_client(self, client_socket):
-        communication = Communication(client_socket, name="Server")
+        communication = Communication(client_socket, name=self.name, peer_label=self.peer_label)
         self.contact_with_RSA(communication)
         
         self.handle_client(communication)

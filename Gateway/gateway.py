@@ -26,20 +26,18 @@ from SharedResources.config import (
     SERVER_PORT,
     GATEWAY_BLOCKCHAIN_PORT,
 )
+from SharedResources.logging import Logger
 
 
 class GatewayServer:
     """Single gateway runtime: server<->nodes transparent relay with lightweight routing."""
 
     def __init__(self, gui_bridge=None):
-        self.logger = logging.getLogger("gateway")
-        self.logger.setLevel(logging.INFO)
+        self.logger = Logger("gateway")
 
         self.base_dir = Path(__file__).resolve().parent
         self.keys_dir = self.base_dir / "GatewayKeys"
         self.keys_dir.mkdir(parents=True, exist_ok=True)
-
-        self.ledger_path = self.base_dir / "gateway_ledger.json"
 
         self.gui_bridge = gui_bridge
         self.stop_event = threading.Event()
@@ -49,18 +47,17 @@ class GatewayServer:
             GATEWAY_BLOCKCHAIN_PORT,
             dir_for_keys=str(self.keys_dir),
             name="GatewayNodeServer",
+            peer_label="Bnode",
         )
         self.node_listener.handle_client = self.handle_node_connection
 
-        self.server_client = RSA_Client(SERVER_IP, SERVER_PORT, name="GatewayToServer")
+        self.server_client = RSA_Client(SERVER_IP, SERVER_PORT, name="GatewayToServer", peer_label="Server")
         self.server_client.communicate_with_server = self.communicate_with_main_server
 
         self.udp_service = UDPServer(GATEWAY_IP, GATEWAY_UDP_PORT, GATEWAY_IP, GATEWAY_BLOCKCHAIN_PORT)
 
         self.nodes_lock = threading.Lock()
         self.nodes: dict[tuple[str, int], dict[str, Any]] = {}
-
-        self.gateway_ledger: list[dict[str, Any]] = self._load_gateway_ledger()
 
         self.gateway_operations = {
             "buy_asset": self.tx_request_buy,
@@ -71,6 +68,7 @@ class GatewayServer:
             "handle_get_balance": self.handle_get_balance,
             "get_balance": self.handle_get_balance,
             "create_balance": self.create_balance,
+            "unlist_asset": self.handle_unlist_to_nodes,
         }
         self.blockchain_operations = {
             "register_blockchain_node": self.register_blockchain_node,
@@ -82,6 +80,8 @@ class GatewayServer:
             "buy_success": self.notify_buy_success,
             "sell_success": self.notify_sell_success,
             "send_balance": self.notify_send_balance,
+            "asset_signed_in_blockchain": self.handle_asset_signed_in_blockchain,
+            "asset_unlist_signed_in_blockchain": self.handle_asset_unlist_signed_in_blockchain,
         }
 
     def start(self):
@@ -115,19 +115,6 @@ class GatewayServer:
 
     def _normalize_type(self, value: Any) -> str:
         return str(value or "").strip().lower()
-
-    def _load_gateway_ledger(self):
-        if not self.ledger_path.exists():
-            self.ledger_path.write_text("[]", encoding="utf-8")
-            return []
-        try:
-            raw = json.loads(self.ledger_path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, list) else []
-        except Exception:
-            return []
-
-    def _save_gateway_ledger(self):
-        self.ledger_path.write_text(json.dumps(self.gateway_ledger, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _extract_sender_addr(self, comm):
         try:
@@ -190,18 +177,9 @@ class GatewayServer:
             return False
 
     def _validate_block(self, block: dict[str, Any]) -> tuple[bool, str]:
+        """Validate a block by verifying its signature and PoW. No ledger state required."""
         if not isinstance(block, dict):
             return False, "block is not dict"
-
-        index = int(block.get("index", -1))
-        expected_index = len(self.gateway_ledger)
-        if index != expected_index:
-            return False, f"block index mismatch expected={expected_index} got={index}"
-
-        prev_hash = str(block.get("prev_hash", ""))
-        expected_prev_hash = "0" * 64 if not self.gateway_ledger else str(self.gateway_ledger[-1].get("hash", ""))
-        if prev_hash != expected_prev_hash:
-            return False, "prev_hash mismatch"
 
         tx = block.get("tx")
         if not isinstance(tx, dict):
@@ -210,14 +188,13 @@ class GatewayServer:
         signature_hex = str(block.get("signature") or tx.get("signature") or "")
         public_key_hex = str(block.get("public_key") or tx.get("public_key") or "")
 
-        payload = tx.get("data") if isinstance(tx.get("data"), dict) else tx
-        if not signature_hex or not public_key_hex:
-            return False, "missing signature/public_key"
-        if not self._verify_user_signature(public_key_hex, payload, signature_hex):
-            return False, "invalid user signature"
+        if signature_hex and public_key_hex:
+            payload = tx.get("data") if isinstance(tx.get("data"), dict) else tx
+            if not self._verify_user_signature(public_key_hex, payload, signature_hex):
+                return False, "invalid user signature"
 
-        block_for_hash = dict(block)
-        block_hash = str(block_for_hash.pop("hash", ""))
+        block_for_hash = {k: v for k, v in block.items() if k != "hash"}
+        block_hash = str(block.get("hash", ""))
         recomputed = hashlib.sha256(self._canonical_json_bytes(block_for_hash)).hexdigest()
         if block_hash and block_hash != recomputed:
             return False, "block hash mismatch"
@@ -321,6 +298,8 @@ class GatewayServer:
         "sell_acknowledged",
         "balance_acknowledged",
         "block_rejected_acknowledged",
+        "fully_upload_acknowledged",
+        "unlist_acknowledged",
     })
 
     def _communicate_with_main_server_comm(self, comm):
@@ -402,15 +381,13 @@ class GatewayServer:
 
         req_data = request.get("data") if isinstance(request.get("data"), dict) else {}
         block = req_data.get("block") if isinstance(req_data.get("block"), dict) else req_data
-        publisher_chain_length = int(req_data.get("publisher_chain_length") or request.get("publisher_chain_length") or len(self.gateway_ledger) + 1)
+        publisher_chain_length = int(req_data.get("publisher_chain_length") or request.get("publisher_chain_length") or 0)
 
         ok, reason = self._validate_block(block)
         if not ok:
             self.log_event(f"Rejected block: {reason}", status="warning")
             return
 
-        self.gateway_ledger.append(block)
-        self._save_gateway_ledger()
         self._update_node_length((publisher_addr[0], publisher_addr[1]), publisher_chain_length)
 
         tx = block.get("tx") if isinstance(block.get("tx"), dict) else (block.get("transaction") if isinstance(block.get("transaction"), dict) else {})
@@ -473,6 +450,29 @@ class GatewayServer:
         }
         self._route_to_server(payload)
 
+    def handle_asset_signed_in_blockchain(self, request: dict, comm=None):
+        _ = comm
+        data = request.get("data") if isinstance(request.get("data"), dict) else {}
+        block = data.get("block") if isinstance(data.get("block"), dict) else {}
+        asset_id = str(data.get("asset_id", ""))
+
+        if not block or not asset_id:
+            self.log_event("[ASSET_MINT] missing block or asset_id", status="warning")
+            return
+
+        ok, reason = self._validate_block(block)
+        if not ok:
+            self.log_event(f"[ASSET_MINT] block invalid for asset {asset_id}: {reason}", status="warning")
+            return
+
+        block_hash = str(block.get("hash", ""))
+        self.log_event(f"[ASSET_MINT] block verified for asset {asset_id}, hash={block_hash[:16]}...")
+        self._route_to_server({
+            "type": "FULLY_UPLOAD",
+            "asset_id": asset_id,
+            "block_hash": block_hash,
+        })
+
     def create_balance(self, request: dict, comm=None):
         _ = comm
         data = request.get("data") if isinstance(request.get("data"), dict) else request
@@ -486,13 +486,53 @@ class GatewayServer:
         }
         self._broadcast_to_nodes(outbound)
 
+    def handle_unlist_to_nodes(self, request: dict, comm=None):
+        """Forward UNLIST_ASSET request from server to all nodes for mining."""
+        _ = comm
+        outbound = {
+            "type": "unlist_asset",
+            "data": request.get("data", request),
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._broadcast_to_nodes(outbound)
+
+    def handle_asset_unlist_signed_in_blockchain(self, request: dict, comm=None):
+        """Validate UNLIST_ASSET_FROM_BLOCKCHAIN block from node and notify server."""
+        _ = comm
+        data = request.get("data") if isinstance(request.get("data"), dict) else {}
+        block = data.get("block") if isinstance(data.get("block"), dict) else {}
+        asset_id = str(data.get("asset_id", ""))
+
+        if not block or not asset_id:
+            self.log_event("[UNLIST] missing block or asset_id", status="warning")
+            return
+
+        ok, reason = self._validate_block(block)
+        if not ok:
+            self.log_event(f"[UNLIST] block invalid for asset {asset_id}: {reason}", status="warning")
+            return
+
+        block_hash = str(block.get("hash", ""))
+        self.log_event(f"[UNLIST] block verified for asset {asset_id}, hash={block_hash[:16]}...")
+        self._route_to_server({
+            "type": "ASSET_UNLISTED",
+            "asset_id": asset_id,
+            "block_hash": block_hash,
+        })
+
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
+    import argparse
+    _parser = argparse.ArgumentParser(description="Aurex gateway")
+    _parser.add_argument(
+        "--debug-level", "--DEBUG_LEVEL",
+        default="DEBUG",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+    _args, _ = _parser.parse_known_args()
+    Logger.set_level(_args.debug_level)
+
     gateway_server = GatewayServer()
 
     answer = input("Use gateway GUI dashboard? (y/n): ").strip().lower()

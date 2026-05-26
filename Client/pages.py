@@ -3,6 +3,7 @@ from __future__ import annotations
 import flet as ft
 import logging
 import threading
+import time
 from pathlib import Path
 
 _logger = logging.getLogger("aurex.pages")
@@ -78,18 +79,43 @@ def _logout(app):
 
 
 def _main_shell(app, route, title, body):
+    # Notification button with red badge overlay
+    _notif_count = app.state.unseen_notifications
+    _badge = ft.Container(
+        content=ft.Text(str(min(_notif_count, 99)), color="white", size=8, weight=ft.FontWeight.BOLD,
+            text_align=ft.TextAlign.CENTER),
+        bgcolor=ERROR,
+        width=16, height=16,
+        border_radius=8,
+        alignment=ft.Alignment(0, 0),
+        top=1, right=1,
+        visible=_notif_count > 0,
+    )
+    app._notification_badge = _badge
+    _notif_btn = _nav_btn(app, "Notifications", "/notifications")
+    _notif_with_badge = ft.Stack(
+        controls=[_notif_btn, _badge],
+        clip_behavior=ft.ClipBehavior.NONE,
+    )
+
     nav = ft.Row(wrap=True, run_spacing=6, spacing=6, controls=[
         _nav_btn(app, "Market", "/marketplace"),
-        _nav_btn(app, "Upload", "/upload"),
         _nav_btn(app, "My Assets", "/my_assets"),
-        _nav_btn(app, "Wallet", "/wallet"),
-        _nav_btn(app, "Alerts", "/notifications"),
+        _nav_btn(app, "Upload", "/upload"),
+        _nav_btn(app, "Settings", "/settings"),
+        _notif_with_badge,
         ft.FilledButton("Logout", bgcolor="#3A0C14", color="#FF8A8A",
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), padding=ft.padding.symmetric(horizontal=14, vertical=7)),
             on_click=lambda _: _logout(app)),
     ])
     back_btn = ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=GOLD_SOFT, icon_size=15,
         tooltip="Back", visible=route != "/marketplace", on_click=lambda _: app.page.go("/marketplace"))
+
+    # Balance display — reference stored on app so the balance monitor can update it
+    balance_text = ft.Text(f"{app.state.balance:.2f} AUR", color=GOLD_SOFT, size=11,
+        weight=ft.FontWeight.W_600)
+    app._balance_text = balance_text
+
     head = ft.Container(
         border_radius=16, bgcolor=GLASS, border=ft.border.all(1, "#5C4220"),
         padding=ft.padding.symmetric(horizontal=20, vertical=13), shadow=_SHADOW,
@@ -103,7 +129,17 @@ def _main_shell(app, route, title, body):
                     ft.Text(title, color=MUTED, size=11),
                 ]),
             ]),
-            nav,
+            ft.Row(spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+                ft.Container(
+                    bgcolor="#0A0C12", border=ft.border.all(1, BORDER_DIM), border_radius=8,
+                    padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                    content=ft.Row(spacing=5, controls=[
+                        ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, color=GOLD_DIM, size=13),
+                        balance_text,
+                    ]),
+                ),
+                nav,
+            ]),
         ]))
     return ft.View(route=route, bgcolor=BG, padding=0, controls=[
         _bg(ft.Container(expand=True, padding=ft.padding.symmetric(horizontal=20, vertical=16),
@@ -127,7 +163,7 @@ def build_login_view(app):
         try:
             app.login((username.value or "").strip(), password.value or "")
             app.notify("Welcome back")
-            app.page.go("/wallet")
+            app.page.go("/settings")
         except Exception as e:
             app.notify(str(e), error=True)
 
@@ -222,11 +258,59 @@ def build_forgot_view(app):
     return _auth_shell("/forgot", card)
 
 
-def _asset_card(app, item):
+_STATUS_COLOR = {
+    "FOR_SALE": SUCCESS,
+    "PENDING":  GOLD_DIM,
+    "UNLISTED": MUTED,
+    "SOLD":     ERROR,
+}
+_STATUS_LABEL = {
+    "FOR_SALE": "For Sale",
+    "PENDING":  "Pending",
+    "UNLISTED": "Unlisted",
+    "SOLD":     "Sold",
+}
+
+
+def _asset_card(app, item, context="marketplace"):
+    is_own = item.owner == (app.state.username or "")
+    status_color = _STATUS_COLOR.get(item.asset_status, MUTED)
+    status_label = _STATUS_LABEL.get(item.asset_status, item.asset_status)
+
+    # ── Action callbacks ────────────────────────────────────────────────────────
+
     def do_buy(_):
         try:
             app.buy_asset(item)
             app.notify("Purchase request signed and sent")
+        except Exception as e:
+            app.notify(str(e), error=True)
+
+    def do_upload_to_market(_):
+        try:
+            resp = app.move_to_marketplace(item.asset_id)
+            resp_type = str(resp.get("type", "")).upper()
+            if resp_type == "MOVE_PENDING":
+                app.notify("Asset sent to mining — will appear on marketplace once confirmed")
+            elif resp_type == "MOVE_SUCCESS":
+                app.notify("Asset listed on marketplace!")
+            app.page.go("/my_assets")
+        except Exception as e:
+            app.notify(str(e), error=True)
+
+    def do_delete(_):
+        try:
+            app.delete_asset(item.asset_id)
+            app.notify("Asset deleted")
+            app.page.go("/my_assets")
+        except Exception as e:
+            app.notify(str(e), error=True)
+
+    def do_unlist(_):
+        try:
+            app.unlist_asset(item.asset_id)
+            app.notify("Unlist request submitted — will update once confirmed")
+            app.page.go("/marketplace")
         except Exception as e:
             app.notify(str(e), error=True)
 
@@ -239,52 +323,229 @@ def _asset_card(app, item):
         padding=ft.padding.symmetric(horizontal=8, vertical=3),
         content=ft.Text((item.file_type or "?").upper(), color=GOLD_DIM, size=10, weight=ft.FontWeight.BOLD))
 
-    return ft.Container(bgcolor=CARD_SOFT, border_radius=14, border=ft.border.all(1, BORDER_DIM),
-        padding=14, on_hover=on_hover,
-        content=ft.Column(spacing=8, controls=[
-            ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.START, controls=[
-                ft.Text(item.title, color=TEXT, size=14, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
-                type_badge,
-            ]),
-            ft.Text(f"by {item.owner}", color=MUTED, size=11),
-            ft.Text(item.description or "—", color=MUTED, size=12, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-            ft.Container(height=1, bgcolor=BORDER_DIM, margin=ft.margin.symmetric(vertical=2)),
-            ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
-                ft.Column(spacing=0, tight=True, controls=[
-                    ft.Text(f"{item.price:.2f}", color=GOLD, size=18, weight=ft.FontWeight.BOLD),
-                    ft.Text("AUR", color=GOLD_DIM, size=10),
-                ]),
+    status_badge = ft.Container(
+        border_radius=6, bgcolor="#08090D",
+        border=ft.border.all(1, status_color),
+        padding=ft.padding.symmetric(horizontal=8, vertical=3),
+        content=ft.Text(status_label, color=status_color, size=9, weight=ft.FontWeight.BOLD),
+        visible=context == "my_assets",
+    )
+
+    img_container = ft.Container(
+        height=160,
+        bgcolor="#08090E",
+        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        alignment=ft.Alignment(0, 0),
+        content=ft.Icon(ft.Icons.IMAGE_OUTLINED, color="#1E2030", size=40),
+    )
+
+    def _load_image():
+        try:
+            path = app.image_cache.get_path(item.asset_id)
+            if path and path.exists():
+                img_container.content = ft.Image(
+                    src=str(path),
+                    fit=ft.BoxFit.COVER,
+                    expand=True,
+                    height=160,
+                )
+                try:
+                    img_container.update()
+                except Exception:
+                    pass
+        except Exception as exc:
+            _logger.warning(f"Card image load error {item.asset_id}: {exc}")
+
+    threading.Thread(target=_load_image, daemon=True).start()
+
+    # ── Action buttons ──────────────────────────────────────────────────────────
+    action_controls = []
+
+    if context == "my_assets":
+        # Delete always available in My Assets
+        action_controls.append(
+            ft.OutlinedButton("Delete", on_click=do_delete,
+                style=ft.ButtonStyle(
+                    color=ERROR,
+                    side=ft.BorderSide(1, ERROR),
+                    shape=ft.RoundedRectangleBorder(radius=8),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                ))
+        )
+        # Upload To Market for PENDING / UNLISTED
+        if item.asset_status in ("PENDING", "UNLISTED"):
+            action_controls.append(
+                ft.FilledButton("→ Upload To Market", bgcolor="#0E1C0E", color=SUCCESS,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
+                        side=ft.BorderSide(1, SUCCESS),
+                        padding=ft.padding.symmetric(horizontal=12, vertical=8)),
+                    on_click=do_upload_to_market)
+            )
+
+    elif context == "marketplace":
+        if is_own:
+            # User's own FOR_SALE asset: offer Unlist
+            action_controls.append(
+                ft.OutlinedButton("Unlist", on_click=do_unlist,
+                    style=ft.ButtonStyle(
+                        color=GOLD_DIM,
+                        side=ft.BorderSide(1, GOLD_DIM),
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                        padding=ft.padding.symmetric(horizontal=14, vertical=8),
+                    ))
+            )
+        else:
+            action_controls.append(
                 ft.FilledButton("Buy Now", bgcolor=GOLD, color="#130E00", on_click=do_buy,
                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
-                        padding=ft.padding.symmetric(horizontal=18, vertical=8))),
+                        padding=ft.padding.symmetric(horizontal=18, vertical=8)))
+            )
+
+    price_row = ft.Row(
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        controls=[
+            ft.Column(spacing=0, tight=True, controls=[
+                ft.Text(f"{item.price:.2f}", color=GOLD, size=18, weight=ft.FontWeight.BOLD),
+                ft.Text("AUR", color=GOLD_DIM, size=10),
             ]),
+            ft.Row(spacing=6, controls=action_controls),
+        ])
+
+    return ft.Container(
+        bgcolor=CARD_SOFT, border_radius=14, border=ft.border.all(1, BORDER_DIM),
+        padding=0, on_hover=on_hover, clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        content=ft.Column(spacing=0, controls=[
+            img_container,
+            ft.Container(padding=14, content=ft.Column(spacing=8, controls=[
+                ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.START, controls=[
+                    ft.Text(item.title, color=TEXT, size=14, weight=ft.FontWeight.BOLD,
+                        max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
+                    ft.Row(spacing=4, controls=[status_badge, type_badge]),
+                ]),
+                ft.Text(f"by {item.owner}", color=MUTED, size=11),
+                ft.Text(item.description or "—", color=MUTED, size=12,
+                    max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Container(height=1, bgcolor=BORDER_DIM, margin=ft.margin.symmetric(vertical=2)),
+                price_row,
+            ])),
         ]))
 
 
 def build_marketplace_view(app):
-    try:
-        items = app.refresh_market_items()
-    except Exception as e:
-        app.notify(str(e), error=True)
-        items = []
+    # Clear stale event sets so assets just loaded aren't immediately removed
+    app._sold_asset_ids.clear()
+    app._removed_asset_ids.clear()
+    app._unlisted_asset_ids.clear()
 
-    grid = ft.ResponsiveRow(spacing=10, run_spacing=10,
-        controls=[ft.Container(col={"xs": 12, "sm": 6, "md": 4, "lg": 3}, content=_asset_card(app, it)) for it in items]
-    ) if items else ft.Container(padding=60, alignment=ft.Alignment(0, 0),
-        content=ft.Column(horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12, controls=[
-            ft.Icon(ft.Icons.STORE_MALL_DIRECTORY_OUTLINED, color="#2A2A3A", size=64),
-            ft.Text("No assets listed yet", color=MUTED, size=15),
-        ]))
+    grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
+    status_text = ft.Text("Loading...", color=MUTED, size=12)
+    card_map: dict[str, ft.Container] = {}
+    _active = [True]
+
+    def _load():
+        try:
+            id_entries = app.get_market_asset_ids()
+        except Exception as exc:
+            status_text.value = f"Error: {exc}"
+            try:
+                status_text.update()
+            except Exception:
+                pass
+            return
+
+        if not id_entries:
+            status_text.value = "No assets listed yet"
+            try:
+                status_text.update()
+            except Exception:
+                pass
+            return
+
+        status_text.value = f"Loading {len(id_entries)} asset(s)…"
+        try:
+            status_text.update()
+        except Exception:
+            return
+
+        loaded = 0
+        for entry in id_entries:
+            if not _active[0]:
+                return
+            asset_id = entry.get("id", "") if isinstance(entry, dict) else str(entry)
+            version = entry.get("version", 1) if isinstance(entry, dict) else 1
+            if not asset_id:
+                continue
+            item = app.load_asset_by_id(asset_id, version)
+            if not item:
+                continue
+            card = _asset_card(app, item)
+            wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4, "lg": 3}, content=card)
+            card_map[asset_id] = wrapper
+            grid.controls.append(wrapper)
+            loaded += 1
+            try:
+                grid.update()
+                status_text.value = f"{loaded} / {len(id_entries)} loaded"
+                status_text.update()
+            except Exception:
+                _active[0] = False
+                return
+
+        n = loaded
+        status_text.value = f"{n} asset{'s' if n != 1 else ''} listed"
+        try:
+            status_text.update()
+        except Exception:
+            pass
+
+    def _monitor():
+        while _active[0]:
+            time.sleep(2)
+            if not _active[0]:
+                return
+            app._drain_asset_events()
+            removed_ids = list(app._sold_asset_ids | app._removed_asset_ids | app._unlisted_asset_ids)
+            changed = False
+            for asset_id in removed_ids:
+                wrapper = card_map.pop(asset_id, None)
+                if wrapper and wrapper in grid.controls:
+                    grid.controls.remove(wrapper)
+                    changed = True
+            if changed:
+                try:
+                    grid.update()
+                    n = len(card_map)
+                    status_text.value = f"{n} asset{'s' if n != 1 else ''} listed"
+                    status_text.update()
+                except Exception:
+                    _active[0] = False
+                    return
+
+    def do_refresh(_):
+        _active[0] = False
+        # Clear grid immediately then reload
+        grid.controls.clear()
+        card_map.clear()
+        try:
+            grid.update()
+        except Exception:
+            pass
+        app.page.go("/marketplace")
+
+    threading.Thread(target=_load, daemon=True).start()
+    threading.Thread(target=_monitor, daemon=True).start()
 
     body = ft.Column(spacing=14, controls=[
         ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Column(spacing=2, tight=True, controls=[
                 ft.Text("Marketplace", color=TEXT, size=22, weight=ft.FontWeight.BOLD),
-                ft.Text(f"{len(items)} asset{'s' if len(items) != 1 else ''} listed", color=MUTED, size=12),
+                status_text,
             ]),
             ft.FilledButton("↺  Refresh", bgcolor="#0E1018", color=GOLD_SOFT,
                 style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), side=ft.BorderSide(1, BORDER)),
-                on_click=lambda _: app.page.go("/marketplace")),
+                on_click=do_refresh),
         ]),
         grid,
     ])
@@ -292,7 +553,7 @@ def build_marketplace_view(app):
 
 
 def build_upload_view(app):
-    picked = {"path": ""}
+    picked = {"path": "", "for_sale": True}
     selected = ft.Text("No file selected", color=MUTED, size=12)
     asset_name = _input("Asset Name", icon=ft.Icons.TITLE_ROUNDED)
     description = ft.TextField(label="Description", multiline=True, min_lines=2, max_lines=4,
@@ -302,6 +563,43 @@ def build_upload_view(app):
     upload_btn = ft.FilledButton("Upload Asset", height=46, bgcolor=GOLD, color="#130E00",
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12)),
         disabled=True)
+
+    def _btn_style(active):
+        return ft.ButtonStyle(
+            color=GOLD if active else MUTED,
+            side=ft.BorderSide(1.5 if active else 1, GOLD if active else "#252535"),
+            bgcolor="#1E1800" if active else "#0A0C14",
+            shape=ft.RoundedRectangleBorder(radius=9),
+            padding=ft.padding.symmetric(horizontal=18, vertical=9),
+        )
+
+    btn_marketplace = ft.OutlinedButton("Marketplace", style=_btn_style(True))
+    btn_my_assets = ft.OutlinedButton("My Assets", style=_btn_style(False))
+
+    def _select_marketplace(_):
+        picked["for_sale"] = True
+        btn_marketplace.style = _btn_style(True)
+        btn_my_assets.style = _btn_style(False)
+        btn_marketplace.update()
+        btn_my_assets.update()
+
+    def _select_my_assets(_):
+        picked["for_sale"] = False
+        btn_marketplace.style = _btn_style(False)
+        btn_my_assets.style = _btn_style(True)
+        btn_marketplace.update()
+        btn_my_assets.update()
+
+    btn_marketplace.on_click = _select_marketplace
+    btn_my_assets.on_click = _select_my_assets
+
+    upload_to_row = ft.Row(spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+        ft.Text("Upload To:", color=MUTED, size=12),
+        ft.Container(width=10),
+        btn_marketplace,
+        ft.Container(width=6),
+        btn_my_assets,
+    ])
 
     picker = getattr(app.page, "_upload_picker", None)
     if picker is None:
@@ -350,7 +648,6 @@ def build_upload_view(app):
             app.notify("Only .png, .jpg, .jpeg are allowed", error=True)
             return
         file_type = "jpg" if ext == "jpeg" else ext
-        # Snapshot everything from UI controls before entering the thread
         path_snap = picked["path"]
         desc_snap = (description.value or "").strip()
 
@@ -358,6 +655,8 @@ def build_upload_view(app):
         status_text.value = "Uploading..."
         status_text.color = GOLD_SOFT
         app.page.update()
+
+        for_sale_snap = picked["for_sale"]
 
         def _upload_thread():
             def _set_status(msg, color=MUTED):
@@ -375,18 +674,17 @@ def build_upload_view(app):
                 app.page.update()
 
             try:
-                _logger.info(f"[upload] start  path={path_snap!r}  name={name_val!r}  type={file_type}  cost={cost_val}")
+                _logger.info(f"[upload] start  path={path_snap!r}  name={name_val!r}  type={file_type}  cost={cost_val}  for_sale={for_sale_snap}")
                 _set_status("Sending UPLOAD_INIT...")
-                app.upload_asset(path_snap, name_val, desc_snap, file_type, cost_val)
+                app.upload_asset(path_snap, name_val, desc_snap, file_type, cost_val, for_sale=for_sale_snap)
                 _logger.info("[upload] UPLOAD_SUCCESS — asset saved")
                 status_text.value = ""
                 app.page.snack_bar = ft.SnackBar(
                     content=ft.Text("Upload complete!"), bgcolor="#136F3A")
                 app.page.snack_bar.open = True
                 app.page.update()
-                async def _nav():
-                    await app.page.go("/marketplace")
-                app.page.run_task(_nav)
+                dest = "/marketplace" if for_sale_snap else "/my_assets"
+                app.page.go(dest)
             except Exception as exc:
                 _show_error(str(exc))
 
@@ -401,7 +699,7 @@ def build_upload_view(app):
                 ft.Icon(ft.Icons.ADD_PHOTO_ALTERNATE_OUTLINED, color=GOLD, size=22),
                 ft.Column(spacing=0, tight=True, controls=[
                     ft.Text("Mint New Asset", color=TEXT, size=20, weight=ft.FontWeight.BOLD),
-                    ft.Text("List an image on the Aurex marketplace.", color=MUTED, size=11),
+                    ft.Text("Upload an image asset to Aurex.", color=MUTED, size=11),
                 ]),
             ]),
             _divider(),
@@ -413,16 +711,17 @@ def build_upload_view(app):
                 selected,
             ]),
             asset_name, description, cost,
+            upload_to_row,
             status_text,
             upload_btn,
         ]))
     return _main_shell(app, "/upload", "Mint a new asset", body)
 
 
-def build_wallet_settings_view(app):
+def build_settings_view(app):
     status = ft.Text("Wallet not loaded", color=ERROR, size=13)
     preview = ft.Text("", color="#5A6A7A", selectable=True, size=11, font_family="monospace")
-    local_wallet_path = "Client/wallets/{}/wallet.json".format(app.state.username or "")
+    local_wallet_path = "Client/{}/wallet.json".format(app.state.username or "")
 
     def refresh_wallet_ui():
         if app.state.wallet_loaded and app.wallet_session:
@@ -507,7 +806,67 @@ def build_wallet_settings_view(app):
             return
         app.page.go("/marketplace")
 
+    def do_delete_account(_):
+        def on_confirm(e):
+            app.page.dialog.open = False
+            app.page.update()
+            try:
+                app.delete_account()
+            except Exception as exc:
+                app.notify(str(exc), error=True)
+                return
+            app.page.go("/login")
+
+        def on_cancel(e):
+            app.page.dialog.open = False
+            app.page.update()
+
+        app.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Delete Account", color=ERROR),
+            content=ft.Text(
+                "By clicking OK you agree to delete your account and all your assets. "
+                "This action cannot be undone.",
+                color=TEXT,
+            ),
+            bgcolor="#1A0808",
+            actions=[
+                ft.TextButton("Cancel", on_click=on_cancel,
+                    style=ft.ButtonStyle(color=MUTED)),
+                ft.FilledButton("OK — Delete My Account", bgcolor=ERROR, color="white",
+                    on_click=on_confirm,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9))),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        app.page.dialog.open = True
+        app.page.update()
+
     refresh_wallet_ui()
+
+    danger_section = ft.Container(
+        bgcolor="#0D0808", border=ft.border.all(1, "#5A1010"), border_radius=14, padding=20,
+        content=ft.Column(spacing=12, controls=[
+            ft.Row(spacing=8, controls=[
+                ft.Icon(ft.Icons.WARNING_ROUNDED, color=ERROR, size=18),
+                ft.Text("Danger Zone", color=ERROR, size=15, weight=ft.FontWeight.BOLD),
+            ]),
+            ft.Text(
+                "Permanently delete your account, all your assets, and marketplace listings.",
+                color=MUTED, size=12,
+            ),
+            ft.OutlinedButton(
+                "Delete Account",
+                on_click=do_delete_account,
+                style=ft.ButtonStyle(
+                    color=ERROR,
+                    side=ft.BorderSide(1, ERROR),
+                    shape=ft.RoundedRectangleBorder(radius=9),
+                    padding=ft.padding.symmetric(horizontal=16, vertical=9),
+                ),
+            ),
+        ]),
+    )
 
     body = ft.Container(width=800, bgcolor=CARD, border_radius=22, border=ft.border.all(1, BORDER),
         shadow=_GLOW, padding=28,
@@ -547,8 +906,10 @@ def build_wallet_settings_view(app):
                 ft.FilledButton("Continue to Marketplace  →", bgcolor=SUCCESS, color="white",
                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)), on_click=continue_market),
             ]),
+            ft.Container(height=1, bgcolor=BORDER_DIM, margin=ft.margin.symmetric(vertical=4)),
+            danger_section,
         ]))
-    return _main_shell(app, "/wallet", "Identity & keys", body)
+    return _main_shell(app, "/settings", "Identity & settings", body)
 
 
 def build_notifications_view(app):
@@ -574,24 +935,87 @@ def build_notifications_view(app):
 
 
 def build_my_assets_view(app):
-    try:
-        mine = app.fetch_my_assets()
-    except Exception as e:
-        app.notify(str(e), error=True)
-        mine = []
+    grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
+    status_text = ft.Text("Loading...", color=MUTED, size=12)
+    _active = [True]
+
+    def _load():
+        try:
+            id_entries = app.get_my_asset_ids()
+        except Exception as exc:
+            status_text.value = f"Error: {exc}"
+            try:
+                status_text.update()
+            except Exception:
+                pass
+            return
+
+        if not id_entries:
+            status_text.value = "No assets yet"
+            try:
+                status_text.update()
+            except Exception:
+                pass
+            return
+
+        status_text.value = f"Loading {len(id_entries)} asset(s)..."
+        try:
+            status_text.update()
+        except Exception:
+            return
+
+        loaded = 0
+        for entry in id_entries:
+            if not _active[0]:
+                return
+            asset_id = entry.get("id", "") if isinstance(entry, dict) else str(entry)
+            version = entry.get("version", 1) if isinstance(entry, dict) else 1
+            if not asset_id:
+                continue
+            item = app.load_asset_by_id(asset_id, version)
+            if not item:
+                continue
+            card = _asset_card(app, item, context="my_assets")
+            wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=card)
+            grid.controls.append(wrapper)
+            loaded += 1
+            try:
+                grid.update()
+                status_text.value = f"{loaded} / {len(id_entries)} loaded"
+                status_text.update()
+            except Exception:
+                _active[0] = False
+                return
+
+        n = loaded
+        status_text.value = f"{n} asset{'s' if n != 1 else ''} owned"
+        try:
+            status_text.update()
+        except Exception:
+            pass
+
+    def do_refresh(_):
+        _active[0] = False
+        grid.controls.clear()
+        try:
+            grid.update()
+        except Exception:
+            pass
+        app.page.go("/my_assets")
+
+    threading.Thread(target=_load, daemon=True).start()
+
     body = ft.Column(spacing=14, controls=[
-        ft.Row(controls=[
+        ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Column(spacing=2, tight=True, controls=[
                 ft.Text("My Collection", color=TEXT, size=22, weight=ft.FontWeight.BOLD),
-                ft.Text(f"{len(mine)} asset{'s' if len(mine) != 1 else ''} owned", color=MUTED, size=12),
+                status_text,
             ]),
+            ft.FilledButton("↺  Refresh", bgcolor="#0E1018", color=GOLD_SOFT,
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), side=ft.BorderSide(1, BORDER)),
+                on_click=do_refresh),
         ]),
-        ft.ResponsiveRow(spacing=10, run_spacing=10,
-            controls=[ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=_asset_card(app, it)) for it in mine]
-        ) if mine else ft.Container(padding=60, alignment=ft.Alignment(0, 0),
-            content=ft.Column(horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=12, controls=[
-                ft.Icon(ft.Icons.COLLECTIONS_OUTLINED, color="#2A2A3A", size=64),
-                ft.Text("You don't own any assets yet.", color=MUTED, size=14),
-            ])),
+        grid,
     ])
     return _main_shell(app, "/my_assets", "Personal portfolio", body)

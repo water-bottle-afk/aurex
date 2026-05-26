@@ -1,18 +1,21 @@
 """
-Marketplace Database - User Authentication & JSON storage
+Aurex Database ORM — unified class for users + marketplace + notifications.
+JSON-backed, thread-safe, no pickle.
 """
 
 from __future__ import annotations
 
-import json
 import hashlib
-import pickle
+import json
 import random
 import smtplib
 import ssl
-from datetime import datetime
+import threading
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
+
 from SharedResources.logging import Logger
 
 logger = Logger(__file__)
@@ -23,6 +26,12 @@ DB_FOLDER.mkdir(exist_ok=True)
 
 _EMAIL_SENDER = "aurex.main.service@gmail.com"
 _EMAIL_APP_PASSWORD = "sshb anri wzom zybg"
+
+# Valid asset status values
+ASSET_STATUS_PENDING  = "PENDING"
+ASSET_STATUS_FOR_SALE = "FOR_SALE"
+ASSET_STATUS_UNLISTED = "UNLISTED"
+ASSET_STATUS_SOLD     = "SOLD"
 
 
 def send_reset_email(recipient: str, otp: str) -> bool:
@@ -38,7 +47,6 @@ def send_reset_email(recipient: str, otp: str) -> bool:
         f"Your Code is: {otp}. "
         f"Available until {expiry.strftime('%d/%m/%Y %H:%M:%S')}."
     )
-
     ctx = ssl.create_default_context()
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as smtp:
@@ -51,20 +59,13 @@ def send_reset_email(recipient: str, otp: str) -> bool:
         return False
 
 
-class User:
-    """User model with password hash + verification fields + hex public key."""
+# ── Domain models ─────────────────────────────────────────────────────────────
 
-    def __init__(
-        self,
-        username,
-        password,
-        email,
-        salt=None,
-        public_key="",
-        verification_code=None,
-        reset_time=None,
-        password_hash=None,
-    ):
+class User:
+    """User model with salted+peppered password hash."""
+
+    def __init__(self, username, password, email, salt=None, public_key="",
+                 verification_code=None, reset_time=None, password_hash=None):
         self.username = str(username or "").strip()
         self.email = str(email or "").strip().lower()
         self.salt = str(salt) if salt else self._create_salt()
@@ -77,8 +78,7 @@ class User:
         return str(random.randint(1000000, 9999999))
 
     def _hash_password(self, password):
-        combined = PEPPER + str(password) + self.salt
-        return hashlib.sha256(combined.encode()).hexdigest()
+        return hashlib.sha256((PEPPER + str(password) + self.salt).encode()).hexdigest()
 
     def verify_password(self, password):
         return self.password_hash == self._hash_password(password)
@@ -125,110 +125,362 @@ class User:
         )
 
     def __repr__(self):
-        key_tail = self.public_key[-10:] if self.public_key else "none"
         return (
-            "User("  # intentionally explicit for JSON re-hydration debug
-            f"username='{self.username}', "
-            f"email='{self.email}', "
-            f"salt='{self.salt}', "
-            f"password_hash='{self.password_hash[:12]}...', "
-            f"public_key_tail='{key_tail}', "
-            f"verification_code={'set' if self.verification_code else 'none'}, "
-            f"reset_time='{self.reset_time}'"
-            ")"
+            f"User(username='{self.username}', email='{self.email}', "
+            f"public_key_tail='{self.public_key[-10:] if self.public_key else 'none'}')"
         )
 
 
+def _migrate_asset_status(raw: dict) -> str:
+    """Derive asset_status from old blockchain_status/for_sale fields when upgrading."""
+    if "asset_status" in raw:
+        return str(raw["asset_status"])
+    bc = str(raw.get("blockchain_status", "")).strip().lower()
+    fs = bool(raw.get("for_sale", True))
+    if bc in ("verified",):
+        return ASSET_STATUS_FOR_SALE if fs else ASSET_STATUS_UNLISTED
+    return ASSET_STATUS_PENDING
+
+
+@dataclass
+class MarketplaceItem:
+    """Marketplace asset stored in DB/marketplace_items.json."""
+
+    asset_id: str
+    owner: str
+    asset_name: str
+    description: str
+    file_type: str
+    cost: float
+    storage_path: str
+    created_at: str
+    version: int = 1
+    asset_status: str = ASSET_STATUS_PENDING
+    public_key: str = ""
+
+    def to_dict(self):
+        return {
+            "asset_id": self.asset_id,
+            "owner": self.owner,
+            "asset_name": self.asset_name,
+            "description": self.description,
+            "file_type": self.file_type,
+            "cost": self.cost,
+            "storage_path": self.storage_path,
+            "created_at": self.created_at,
+            "version": self.version,
+            "asset_status": self.asset_status,
+            "public_key": self.public_key,
+        }
+
+    @classmethod
+    def from_dict(cls, raw):
+        return cls(
+            asset_id=str(raw.get("asset_id", "")),
+            owner=str(raw.get("owner", "")),
+            asset_name=str(raw.get("asset_name", "")),
+            description=str(raw.get("description", "")),
+            file_type=str(raw.get("file_type", "")),
+            cost=float(raw.get("cost", 0.0)),
+            storage_path=str(raw.get("storage_path", "")),
+            created_at=str(raw.get("created_at", "")),
+            version=int(raw.get("version", 1)),
+            asset_status=_migrate_asset_status(raw),
+            public_key=str(raw.get("public_key", "")),
+        )
+
+    def __repr__(self):
+        return (
+            f"MarketplaceItem(asset_id='{self.asset_id}', owner='{self.owner}', "
+            f"asset_name='{self.asset_name}', cost={self.cost}, status={self.asset_status})"
+        )
+
+
+# ── Unified ORM ───────────────────────────────────────────────────────────────
+
 class ORM:
-    """JSON-based ORM for users: DB/users.json -> {username: user_dict}"""
+    """
+    Unified JSON ORM for users, marketplace assets, and notifications.
+    All DB I/O goes through this class — no direct file access from the server.
+    """
 
-    def __init__(self, users_json_path=None, users_pickle_path=None):
-        self.users_json_path = Path(users_json_path) if users_json_path else (DB_FOLDER / "users.json")
-        self.users_pickle_path = Path(users_pickle_path) if users_pickle_path else (DB_FOLDER / "users.pickle")
-        self.users_json_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.users_json_path.exists():
-            self.users_json_path.write_text("{}", encoding="utf-8")
-        self._migrate_users_pickle_once()
+    def __init__(self, users_json_path=None, marketplace_json_path=None, notifications_json_path=None):
+        self.users_json_path = (
+            Path(users_json_path) if users_json_path else DB_FOLDER / "users.json"
+        )
+        self.marketplace_json_path = (
+            Path(marketplace_json_path) if marketplace_json_path else DB_FOLDER / "marketplace_items.json"
+        )
+        self.notifications_json_path = (
+            Path(notifications_json_path) if notifications_json_path else DB_FOLDER / "notifications.json"
+        )
+        for path in (self.users_json_path, self.marketplace_json_path, self.notifications_json_path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("{}", encoding="utf-8")
+        self._lock = threading.RLock()
 
-    def _migrate_users_pickle_once(self):
-        if self.users_json_path.exists():
-            try:
-                existing = json.loads(self.users_json_path.read_text(encoding="utf-8"))
-                if isinstance(existing, dict) and existing:
-                    return
-            except Exception:
-                pass
-        if not self.users_pickle_path.exists():
-            return
-        try:
-            with self.users_pickle_path.open("rb") as f:
-                old_data = pickle.load(f)
-            users_map = {}
-            if isinstance(old_data, dict):
-                for uname, raw in old_data.items():
-                    if isinstance(raw, User):
-                        user = raw
-                    elif isinstance(raw, dict):
-                        user = User.from_dict(raw)
-                    else:
-                        # best effort fallback for legacy objects
-                        user = User(
-                            username=getattr(raw, "username", uname),
-                            password="",
-                            email=getattr(raw, "email", ""),
-                            salt=getattr(raw, "salt", None),
-                            public_key=getattr(raw, "public_key", ""),
-                            verification_code=getattr(raw, "verification_code", None),
-                            reset_time=getattr(raw, "reset_time", None),
-                            password_hash=getattr(raw, "password_hash", ""),
-                        )
-                    users_map[str(user.username)] = user.to_dict()
-            tmp_path = self.users_json_path.with_suffix(".json.tmp")
-            tmp_path.write_text(json.dumps(users_map, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp_path.replace(self.users_json_path)
-            logger.info(f"Migrated users.pickle -> users.json ({len(users_map)} users)")
-        except Exception as exc:
-            logger.error(f"Failed migrating users pickle: {exc}")
+    # ── Users ─────────────────────────────────────────────────────────────────
 
-    def _load_users(self):
+    def _load_users(self) -> dict[str, User]:
         try:
             raw = json.loads(self.users_json_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 return {}
-            return {uname: User.from_dict(data) for uname, data in raw.items() if isinstance(data, dict)}
+            return {k: User.from_dict(v) for k, v in raw.items() if isinstance(v, dict)}
         except Exception as e:
-            logger.error(f"Error loading users json: {e}")
+            logger.error(f"Error loading users: {e}")
             return {}
 
-    def _save_users(self, users):
-        payload = {}
-        for uname, user in users.items():
-            if isinstance(user, User):
-                payload[str(uname)] = user.to_dict()
-            elif isinstance(user, dict):
-                payload[str(uname)] = user
+    def _save_users(self, users: dict):
+        payload = {
+            str(k): (v.to_dict() if isinstance(v, User) else v)
+            for k, v in users.items()
+        }
         self.users_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def add_user(self, username, password, email):
+    def add_user(self, username: str, password: str, email: str):
         username = (username or "").strip()
         email = (email or "").strip().lower()
-        password = password or ""
         if not username or not email or not password:
             return False, "Missing required fields"
-
-        users = self._load_users()
-        if username in users:
-            return False, "Username already exists"
-        if any((u.email or "").lower() == email for u in users.values()):
-            return False, "Email already exists"
-
-        users[username] = User(username, password, email)
-        self._save_users(users)
+        with self._lock:
+            users = self._load_users()
+            if username in users:
+                return False, "Username already exists"
+            if any(u.email == email for u in users.values()):
+                return False, "Email already exists"
+            users[username] = User(username, password, email)
+            self._save_users(users)
         return True, "User created successfully"
 
-    def get_user(self, username):
+    def get_user(self, username: str):
+        return self._load_users().get((username or "").strip())
+
+    def save_user(self, user: User):
+        with self._lock:
+            users = self._load_users()
+            users[user.username] = user
+            self._save_users(users)
+
+    def get_user_by_email(self, email: str):
+        email = (email or "").strip().lower()
+        for user in self._load_users().values():
+            if user.email == email:
+                return user
+        return None
+
+    def set_user_public_key(self, username: str, public_key: str) -> bool:
+        user = self.get_user(username)
+        if not user:
+            return False
+        user.set_public_key(public_key)
+        self.save_user(user)
+        return True
+
+    def issue_reset_code(self, email: str, minutes_valid: int = 5):
+        user = self.get_user_by_email(email)
+        if not user:
+            return False, "Email not found", None
+        code = str(random.randint(100000, 999999))
+        user.set_verification_code(code)
+        user.set_reset_time((datetime.now() + timedelta(minutes=minutes_valid)).isoformat())
+        self.save_user(user)
+        return True, "Code issued", code
+
+    def verify_reset_code(self, email: str, code: str):
+        user = self.get_user_by_email(email)
+        if not user:
+            return False, "Email not found", None
+        if user.is_code_match_and_available(datetime.now(), code):
+            return True, "Code verified", user
+        return False, "Invalid or expired code", None
+
+    def update_password_by_email(self, email: str, new_password: str):
+        user = self.get_user_by_email(email)
+        if not user:
+            return False, "Email not found"
+        user.set_password(new_password)
+        self.save_user(user)
+        return True, "Password updated"
+
+    def delete_user(self, username: str) -> bool:
         username = (username or "").strip()
         if not username:
+            return False
+        with self._lock:
+            users = self._load_users()
+            if username not in users:
+                return False
+            del users[username]
+            self._save_users(users)
+        return True
+
+    def delete_user_assets(self, username: str):
+        username = (username or "").strip()
+        if not username:
+            return
+        with self._lock:
+            market = self._load_marketplace()
+            market.pop(username, None)
+            self._save_marketplace(market)
+
+    # ── Marketplace ───────────────────────────────────────────────────────────
+
+    def _load_marketplace(self) -> dict:
+        """Load marketplace, migrating old fields and deduplicating by asset_id (keep highest version)."""
+        try:
+            raw = json.loads(self.marketplace_json_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return {}
+            result = {}
+            for owner, items in raw.items():
+                if not isinstance(items, list):
+                    continue
+                by_id: dict[str, dict] = {}
+                for i in items:
+                    if not isinstance(i, dict):
+                        continue
+                    item_dict = MarketplaceItem.from_dict(i).to_dict()
+                    aid = item_dict.get("asset_id", "")
+                    if not aid:
+                        continue
+                    existing = by_id.get(aid)
+                    if existing is None or int(item_dict.get("version", 0)) > int(existing.get("version", 0)):
+                        by_id[aid] = item_dict
+                result[str(owner)] = list(by_id.values())
+            return result
+        except Exception:
+            return {}
+
+    def _save_marketplace(self, market: dict):
+        self.marketplace_json_path.write_text(
+            json.dumps(market, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def add_asset(self, username: str, asset: MarketplaceItem) -> bool:
+        with self._lock:
+            market = self._load_marketplace()
+            market.setdefault(username, [])
+            market[username].append(asset.to_dict())
+            self._save_marketplace(market)
+        return True
+
+    def get_all_assets(self) -> list[MarketplaceItem]:
+        market = self._load_marketplace()
+        assets = [MarketplaceItem.from_dict(a) for items in market.values() for a in items]
+        assets.sort(key=lambda a: a.created_at, reverse=True)
+        return assets
+
+    def get_all_for_sale_assets(self) -> list[MarketplaceItem]:
+        """Return all FOR_SALE assets regardless of owner."""
+        market = self._load_marketplace()
+        assets = [
+            MarketplaceItem.from_dict(a)
+            for items in market.values()
+            for a in items if isinstance(a, dict)
+        ]
+        assets = [a for a in assets if a.asset_status == ASSET_STATUS_FOR_SALE]
+        assets.sort(key=lambda a: a.created_at, reverse=True)
+        return assets
+
+    def get_all_for_sale_asset_ids(self) -> list[dict]:
+        return [{"id": a.asset_id, "version": a.version} for a in self.get_all_for_sale_assets() if a.asset_id]
+
+    def update_asset_status(self, asset_id: str, status: str,
+                            increment_version: bool = False) -> bool:
+        asset_id = (asset_id or "").strip()
+        if not asset_id:
+            return False
+        with self._lock:
+            market = self._load_marketplace()
+            for owner_items in market.values():
+                for item_dict in owner_items:
+                    if isinstance(item_dict, dict) and item_dict.get("asset_id") == asset_id:
+                        item_dict["asset_status"] = status
+                        if increment_version:
+                            item_dict["version"] = int(item_dict.get("version", 1)) + 1
+                        self._save_marketplace(market)
+                        return True
+        return False
+
+    def delete_asset(self, asset_id: str, owner: str) -> bool:
+        """Remove asset from DB entirely (no blockchain change)."""
+        asset_id = (asset_id or "").strip()
+        owner = (owner or "").strip()
+        if not asset_id or not owner:
+            return False
+        with self._lock:
+            market = self._load_marketplace()
+            items = market.get(owner, [])
+            new_items = [
+                d for d in items
+                if not (isinstance(d, dict) and d.get("asset_id") == asset_id)
+            ]
+            if len(new_items) == len(items):
+                return False
+            market[owner] = new_items
+            self._save_marketplace(market)
+        return True
+
+    def get_assets_for_user(self, username: str) -> list[MarketplaceItem]:
+        """Return assets owned by user that are NOT currently on the marketplace (not FOR_SALE)."""
+        username = (username or "").strip()
+        if not username:
+            return []
+        market = self._load_marketplace()
+        assets = [MarketplaceItem.from_dict(a) for a in market.get(username, []) if isinstance(a, dict)]
+        assets = [a for a in assets if a.asset_status != ASSET_STATUS_FOR_SALE]
+        assets.sort(key=lambda a: a.created_at, reverse=True)
+        return assets
+
+    def find_asset_by_id(self, asset_id: str):
+        asset_id = (asset_id or "").strip()
+        if not asset_id:
             return None
-        users = self._load_users()
-        return users.get(username)
+        for items in self._load_marketplace().values():
+            for d in items:
+                if isinstance(d, dict) and d.get("asset_id") == asset_id:
+                    return MarketplaceItem.from_dict(d)
+        return None
+
+    # ── Notifications ─────────────────────────────────────────────────────────
+
+    def _load_notifications(self) -> dict:
+        try:
+            data = json.loads(self.notifications_json_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_notifications(self, data: dict):
+        self.notifications_json_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def queue_notification(self, username: str, msg: str):
+        username = str(username or "").strip()
+        if not username:
+            return
+        with self._lock:
+            data = self._load_notifications()
+            items = data.get(username, [])
+            if not isinstance(items, list):
+                items = []
+            items.append({"msg": str(msg)})
+            data[username] = items
+            self._save_notifications(data)
+
+    def flush_notifications(self, username: str) -> list[str]:
+        """Return and clear all queued notifications for the user."""
+        username = str(username or "").strip()
+        if not username:
+            return []
+        with self._lock:
+            data = self._load_notifications()
+            items = data.get(username, [])
+            data[username] = []
+            self._save_notifications(data)
+        if not isinstance(items, list):
+            return []
+        return [str(i.get("msg", "")) if isinstance(i, dict) else str(i) for i in items if i]
