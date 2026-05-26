@@ -60,28 +60,27 @@ class GatewayServer:
         self.nodes: dict[tuple[str, int], dict[str, Any]] = {}
 
         self.gateway_operations = {
-            "buy_asset": self.tx_request_buy,
-            "sell_asset": self.tx_request_sell,
-            "publish_tx": self.broadcast_tx_to_verify,
-            "tx_request_buy": self.tx_request_buy,
-            "tx_request_sell": self.tx_request_sell,
-            "handle_get_balance": self.handle_get_balance,
-            "get_balance": self.handle_get_balance,
-            "create_balance": self.create_balance,
-            "unlist_asset": self.handle_unlist_to_nodes,
+            "BUY_ASSET": self.tx_request_buy,
+            "SELL_ASSET": self.tx_request_sell,
+            "PUBLISH_TX": self.broadcast_tx_to_verify,
+            "TX_REQUEST_BUY": self.tx_request_buy,
+            "TX_REQUEST_SELL": self.tx_request_sell,
+            "GET_BALANCE": self.handle_get_balance,
+            "CREATE_BALANCE": self.create_balance,
+            "UNLIST_ASSET": self.handle_unlist_to_nodes,
+            "UPLOAD_ASSET": self.upload_asset_to_nodes,
         }
         self.blockchain_operations = {
-            "register_blockchain_node": self.register_blockchain_node,
-            "tx_request_buy": self.tx_request_buy,
-            "tx_request_sell": self.tx_request_sell,
-            "broadcast_tx_to_verify": self.broadcast_tx_to_verify,
-            "handle_get_balance": self.handle_get_balance,
-            "get_balance": self.handle_get_balance,
-            "buy_success": self.notify_buy_success,
-            "sell_success": self.notify_sell_success,
-            "send_balance": self.notify_send_balance,
-            "asset_signed_in_blockchain": self.handle_asset_signed_in_blockchain,
-            "asset_unlist_signed_in_blockchain": self.handle_asset_unlist_signed_in_blockchain,
+            "REGISTER_BLOCKCHAIN_NODE": self.register_blockchain_node,
+            "TX_REQUEST_BUY": self.tx_request_buy,
+            "TX_REQUEST_SELL": self.tx_request_sell,
+            "BROADCAST_TX_TO_VERIFY": self.broadcast_tx_to_verify,
+            "GET_BALANCE": self.handle_get_balance,
+            "BUY_SUCCESS": self.notify_buy_success,
+            "SELL_SUCCESS": self.notify_sell_success,
+            "SEND_BALANCE": self.notify_send_balance,
+            "ASSET_SIGNED_IN_BLOCKCHAIN": self.handle_asset_signed_in_blockchain,
+            "ASSET_UNLIST_SIGNED_IN_BLOCKCHAIN": self.handle_asset_unlist_signed_in_blockchain,
         }
 
     def start(self):
@@ -114,7 +113,7 @@ class GatewayServer:
             pass
 
     def _normalize_type(self, value: Any) -> str:
-        return str(value or "").strip().lower()
+        return str(value or "").strip().upper()
 
     def _extract_sender_addr(self, comm):
         try:
@@ -225,7 +224,7 @@ class GatewayServer:
             try:
                 comm.send_one_message(
                     {
-                        "type": "get_ledger",
+                        "type": "GET_LEDGER",
                         "publisher_ip": publisher_addr[0],
                         "publisher_port": publisher_addr[1],
                         "publisher_chain_length": int(publisher_chain_length),
@@ -233,7 +232,7 @@ class GatewayServer:
                 )
                 comm.send_one_message(
                     {
-                        "type": "get_balance",
+                        "type": "GET_BALANCE",
                         "publisher_ip": publisher_addr[0],
                         "publisher_port": publisher_addr[1],
                         "publisher_chain_length": int(publisher_chain_length),
@@ -292,14 +291,14 @@ class GatewayServer:
 
     # Server acknowledgement types that require no further action.
     _SERVER_ACK_TYPES = frozenset({
-        "ok", "ready",
-        "gateway_registered",
-        "buy_acknowledged", "buy_failed_acknowledged",
-        "sell_acknowledged",
-        "balance_acknowledged",
-        "block_rejected_acknowledged",
-        "fully_upload_acknowledged",
-        "unlist_acknowledged",
+        "OK", "READY",
+        "GATEWAY_REGISTERED",
+        "BUY_ACKNOWLEDGED", "BUY_FAILED_ACKNOWLEDGED",
+        "SELL_ACKNOWLEDGED",
+        "BALANCE_ACKNOWLEDGED",
+        "BLOCK_REJECTED_ACKNOWLEDGED",
+        "FULLY_UPLOAD_ACKNOWLEDGED",
+        "UNLIST_ACKNOWLEDGED",
     })
 
     def _communicate_with_main_server_comm(self, comm):
@@ -315,7 +314,7 @@ class GatewayServer:
             msg_type = self._normalize_type(request.get("type"))
             if msg_type in self._SERVER_ACK_TYPES:
                 continue
-            if msg_type == "error":
+            if msg_type == "ERROR":
                 self.log_event(f"Server error message: {request.get('message')}", status="warning")
                 continue
             handler = self.gateway_operations.get(msg_type)
@@ -358,7 +357,7 @@ class GatewayServer:
     def tx_request_buy(self, request: dict, comm=None):
         _ = comm
         outbound = {
-            "type": "tx_request_buy",
+            "type": "TX_REQUEST_BUY",
             "data": request.get("data", request),
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
@@ -368,7 +367,7 @@ class GatewayServer:
     def tx_request_sell(self, request: dict, comm=None):
         _ = comm
         outbound = {
-            "type": "tx_request_sell",
+            "type": "TX_REQUEST_SELL",
             "data": request.get("data", request),
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
@@ -395,7 +394,7 @@ class GatewayServer:
         self._maybe_sync_lagging_nodes((publisher_addr[0], publisher_addr[1]), publisher_chain_length, userpk)
 
         outbound = {
-            "type": "broadcast_tx_to_verify",
+            "type": "BROADCAST_TX_TO_VERIFY",
             "data": {
                 "block": block,
                 "publisher_chain_length": publisher_chain_length,
@@ -412,7 +411,7 @@ class GatewayServer:
             userpk = request["data"].get("userpk")
 
         outbound = {
-            "type": "handle_get_balance",
+            "type": "GET_BALANCE",
             "userpk": userpk,
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
@@ -422,7 +421,7 @@ class GatewayServer:
     def notify_buy_success(self, request: dict, comm=None):
         _ = comm
         payload = {
-            "type": "buy_success",
+            "type": "BUY_SUCCESS",
             "data": request.get("data", request),
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
@@ -432,7 +431,7 @@ class GatewayServer:
     def notify_sell_success(self, request: dict, comm=None):
         _ = comm
         payload = {
-            "type": "sell_success",
+            "type": "SELL_SUCCESS",
             "data": request.get("data", request),
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
@@ -442,7 +441,7 @@ class GatewayServer:
     def notify_send_balance(self, request: dict, comm=None):
         _ = comm
         payload = {
-            "type": "send_balance",
+            "type": "SEND_BALANCE",
             "data": request.get("data", request),
             "userpk": request.get("userpk"),
             "sender_ip": request.get("sender_ip"),
@@ -486,11 +485,29 @@ class GatewayServer:
         }
         self._broadcast_to_nodes(outbound)
 
+    def upload_asset_to_nodes(self, request: dict, comm=None):
+        """Forward UPLOAD_ASSET request from server to all nodes for PoW minting."""
+        _ = comm
+        data = request.get("data") if isinstance(request.get("data"), dict) else request
+        asset_id = str(data.get("asset_id", "?"))
+        outbound = {
+            "type": "UPLOAD_ASSET",
+            "data": data,
+            "sender_ip": request.get("sender_ip"),
+            "sender_port": request.get("sender_port"),
+        }
+        self._broadcast_to_nodes(outbound)
+        self.log_event(
+            f"Broadcasted UPLOAD_ASSET to nodes for asset {asset_id}",
+            event_type="route",
+            direction="outbound",
+        )
+
     def handle_unlist_to_nodes(self, request: dict, comm=None):
         """Forward UNLIST_ASSET request from server to all nodes for mining."""
         _ = comm
         outbound = {
-            "type": "unlist_asset",
+            "type": "UNLIST_ASSET",
             "data": request.get("data", request),
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),

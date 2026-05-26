@@ -231,7 +231,11 @@ def build_forgot_view(app):
 
     def do_reset(_):
         try:
-            app.update_password((email.value or "").strip(), new_pass.value or "")
+            app.update_password(
+                (email.value or "").strip(),
+                new_pass.value or "",
+                (code.value or "").strip(),
+            )
             app.notify("Password updated")
             app.page.go("/login")
         except Exception as e:

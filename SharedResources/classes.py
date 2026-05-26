@@ -425,9 +425,9 @@ class UDPServer:
             while True:
                 bin_data, addr = self.sock.recvfrom(1024)
                 if bin_data == b"WHRSV":
-                    self.Print(f"got a message from {addr}", 20)
+                    self.Print(f"Recv From Bnode at {addr[0]}:{addr[1]} <<< WHRSV")
                     self.sock.sendto(self.message_to_send, addr)
-                    self.Print(f"sent a message to {addr}", 20)
+                    self.Print(f"Sent to Bnode at {addr[0]}:{addr[1]} >>> {self.message_to_send.decode()}")
         except OSError as e:
             self.Print(f"CONNECTION ERROR! {e}", 50)
         except Exception as e:

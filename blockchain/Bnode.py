@@ -88,9 +88,12 @@ class BlockchainNode:
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(float(BROADCAST_DISCOVERY_FREQUENCY))
+            self.logger.debug(f"[{self.node_id}] Sent to Gateway at 255.255.255.255:{GATEWAY_UDP_PORT} >>> WHRSV")
             sock.sendto(b"WHRSV", ("255.255.255.255", int(GATEWAY_UDP_PORT)))
-            raw, _ = sock.recvfrom(1024)
-            parts = raw.decode("utf-8", errors="ignore").split("|")
+            raw, addr = sock.recvfrom(1024)
+            response = raw.decode("utf-8", errors="ignore")
+            self.logger.debug(f"[{self.node_id}] Recv From Gateway at {addr[0]}:{addr[1]} <<< {response}")
+            parts = response.split("|")
             if len(parts) != 3 or parts[0] != "SRVAT":
                 return None
             return parts[1], int(parts[2])
@@ -179,6 +182,26 @@ class BlockchainNode:
         content = json.dumps(block, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(content).hexdigest()
 
+    def _find_asset_owner_pk(self, asset_id: str) -> str:
+        """Search ledger for the current owner's public key for a given asset.
+
+        Returns the ASSET_MINT owner PK for a fresh asset, or the most recent
+        BUY sender PK (the buyer who is now the owner and will be the next seller).
+        """
+        owner_pk = ""
+        with self.lock:
+            for block in self.chain:
+                tx = block.get("tx") if isinstance(block.get("tx"), dict) else {}
+                tx_type = str(tx.get("tx_type") or tx.get("type") or "")
+                if str(tx.get("asset_id", "")) != asset_id:
+                    continue
+                if tx_type == "ASSET_MINT":
+                    owner_pk = str(tx.get("owner_public_key") or tx.get("sender") or "")
+                elif tx_type == "BUY":
+                    # After each BUY the buyer (sender) becomes the new owner
+                    owner_pk = str(tx.get("sender", ""))
+        return owner_pk
+
     def validate_tx(self, tx: dict[str, Any]):
         sender = str(tx.get("sender", ""))
         amount = float(tx.get("amount", 0.0))
@@ -230,9 +253,9 @@ class BlockchainNode:
         amount = float(tx_data.get("amount", tx.get("amount", 0.0)))
 
         with self.lock:
-            if sender:
+            if sender and amount > 0:
                 self.balances[sender] = round(float(self.balances.get(sender, 0.0)) - amount, 8)
-            if receiver:
+            if receiver and amount > 0:
                 self.balances[receiver] = round(float(self.balances.get(receiver, 0.0)) + amount, 8)
 
             self.chain.append(block)
@@ -262,7 +285,7 @@ class BlockchainNode:
     def register_blockchain_node(self):
         self._send_gateway(
             {
-                "type": "register_blockchain_node",
+                "type": "REGISTER_BLOCKCHAIN_NODE",
                 "data": {"ip": self._advertised_ip(), "port": self.port, "chain_length": len(self.chain)},
                 "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
@@ -272,7 +295,7 @@ class BlockchainNode:
     def notify_gateway(self, block: dict[str, Any]):
         self._send_gateway(
             {
-                "type": "broadcast_tx_to_verify",
+                "type": "BROADCAST_TX_TO_VERIFY",
                 "data": {
                     "block": block,
                     "publisher_chain_length": len(self.chain),
@@ -285,7 +308,7 @@ class BlockchainNode:
     def notify_buy_success(self, tx_data: dict[str, Any]):
         self._send_gateway(
             {
-                "type": "buy_success",
+                "type": "BUY_SUCCESS",
                 "data": tx_data,
                 "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
@@ -295,7 +318,7 @@ class BlockchainNode:
     def notify_sell_success(self, tx_data: dict[str, Any]):
         self._send_gateway(
             {
-                "type": "sell_success",
+                "type": "SELL_SUCCESS",
                 "data": tx_data,
                 "sender_ip": self._advertised_ip(),
                 "sender_port": self.port,
@@ -305,7 +328,7 @@ class BlockchainNode:
     def send_balance(self, userpk: str):
         self._send_gateway(
             {
-                "type": "send_balance",
+                "type": "SEND_BALANCE",
                 "userpk": userpk,
                 "data": {"userpk": userpk, "balance": self.get_balance(userpk)},
                 "sender_ip": self._advertised_ip(),
@@ -314,30 +337,30 @@ class BlockchainNode:
         )
 
     def _handle_gateway_message(self, msg: dict[str, Any]):
-        msg_type = str(msg.get("type", "")).strip().lower()
+        msg_type = str(msg.get("type", "")).strip().upper()
 
-        if msg_type == "tx_request_buy":
+        if msg_type == "TX_REQUEST_BUY":
             self.handle_tx_request_buy(msg)
             return
-        if msg_type == "tx_request_sell":
+        if msg_type == "TX_REQUEST_SELL":
             self.handle_tx_request_sell(msg)
             return
-        if msg_type == "broadcast_tx_to_verify":
+        if msg_type == "BROADCAST_TX_TO_VERIFY":
             self.handle_broadcast_tx_to_verify(msg)
             return
-        if msg_type in {"upload_asset", "start_mining"}:
+        if msg_type in {"UPLOAD_ASSET", "START_MINING"}:
             threading.Thread(target=self._handle_mint_request, args=(msg,), daemon=True).start()
             return
-        if msg_type == "unlist_asset":
+        if msg_type == "UNLIST_ASSET":
             threading.Thread(target=self._handle_unlist_request, args=(msg,), daemon=True).start()
             return
-        if msg_type == "create_balance":
+        if msg_type == "CREATE_BALANCE":
             self.handle_create_balance(msg)
             return
-        if msg_type == "get_ledger":
+        if msg_type == "GET_LEDGER":
             self.handle_get_ledger_sync(msg)
             return
-        if msg_type in {"handle_get_balance", "get_balance"}:
+        if msg_type == "GET_BALANCE":
             if msg.get("publisher_ip") and msg.get("publisher_port"):
                 self.handle_get_balance_sync(msg)
                 return
@@ -351,17 +374,28 @@ class BlockchainNode:
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         payload = data.get("data") if isinstance(data.get("data"), dict) else data
 
+        buyer_username = str(payload.get("buyer") or payload.get("sender_username") or "")
+        # sender = buyer's public key (they deduct balance); NOT their username
+        buyer_pk = str(payload.get("public_key") or payload.get("sender") or "")
+        asset_id = str(payload.get("asset_id") or "")
+
+        # For BUY txs find the current asset owner PK from the ledger — they are the seller (receiver of AUR)
+        seller_pk = ""
+        if tx_type == "BUY" and asset_id:
+            seller_pk = self._find_asset_owner_pk(asset_id)
+
         tx = {
             "type": tx_type,
             "tx_id": payload.get("tx_id") or f"{tx_type}-{int(time.time() * 1000)}",
-            "sender": str(payload.get("sender") or payload.get("buyer") or ""),
-            "receiver": str(payload.get("receiver") or payload.get("seller") or ""),
+            "sender": buyer_pk,
+            "receiver": seller_pk,
+            "buyer_username": buyer_username,
             "amount": float(payload.get("amount") or payload.get("price") or 0.0),
-            "asset_id": payload.get("asset_id"),
+            "asset_id": asset_id,
             "timestamp": payload.get("timestamp") or datetime.now().isoformat(),
             "data": payload.get("data") if isinstance(payload.get("data"), dict) else payload,
             "signature": str(payload.get("signature", "")),
-            "public_key": str(payload.get("public_key", "")),
+            "public_key": buyer_pk,
         }
         return tx
 
@@ -456,6 +490,13 @@ class BlockchainNode:
         block = self.mine(tx)
         if block is not None:
             self.notify_buy_success(tx)
+            # Send fresh balance to both buyer and seller so UI updates immediately
+            buyer_pk = str(tx.get("sender", ""))
+            seller_pk = str(tx.get("receiver", ""))
+            if buyer_pk:
+                self.send_balance(buyer_pk)
+            if seller_pk and seller_pk != buyer_pk:
+                self.send_balance(seller_pk)
             self.notify_gateway(block)
 
     def handle_tx_request_sell(self, msg: dict[str, Any]):

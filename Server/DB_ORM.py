@@ -20,9 +20,16 @@ from SharedResources.logging import Logger
 
 logger = Logger(__file__)
 
-PEPPER = "aurex_marketplace_2026_secret"
 DB_FOLDER = Path(__file__).parent.parent / "DB"
 DB_FOLDER.mkdir(exist_ok=True)
+
+def _load_pepper() -> str:
+    p = DB_FOLDER / "pepper.txt"
+    if p.exists():
+        return p.read_text(encoding="utf-8").strip()
+    return "aurex_marketplace_2026_secret"
+
+PEPPER = _load_pepper()
 
 _EMAIL_SENDER = "aurex.main.service@gmail.com"
 _EMAIL_APP_PASSWORD = "sshb anri wzom zybg"
@@ -270,6 +277,15 @@ class ORM:
                 return user
         return None
 
+    def get_user_by_public_key(self, public_key: str):
+        public_key = (public_key or "").strip()
+        if not public_key:
+            return None
+        for user in self._load_users().values():
+            if user.public_key == public_key:
+                return user
+        return None
+
     def set_user_public_key(self, username: str, public_key: str) -> bool:
         user = self.get_user(username)
         if not user:
@@ -292,9 +308,11 @@ class ORM:
         user = self.get_user_by_email(email)
         if not user:
             return False, "Email not found", None
-        if user.is_code_match_and_available(datetime.now(), code):
-            return True, "Code verified", user
-        return False, "Invalid or expired code", None
+        if user.verification_code != code:
+            return False, "Invalid verification code", None
+        if not user.reset_time or datetime.now() >= datetime.fromisoformat(user.reset_time):
+            return False, "Code expired", None
+        return True, "Code verified", user
 
     def update_password_by_email(self, email: str, new_password: str):
         user = self.get_user_by_email(email)
@@ -403,6 +421,34 @@ class ORM:
                         self._save_marketplace(market)
                         return True
         return False
+
+    def transfer_asset(self, asset_id: str, from_owner: str, to_owner: str) -> bool:
+        """Move asset from seller to buyer after a successful blockchain purchase."""
+        asset_id = (asset_id or "").strip()
+        from_owner = (from_owner or "").strip()
+        to_owner = (to_owner or "").strip()
+        if not asset_id or not from_owner or not to_owner:
+            return False
+        with self._lock:
+            market = self._load_marketplace()
+            from_list = market.get(from_owner, [])
+            asset_dict = None
+            new_from_list = []
+            for item in from_list:
+                if isinstance(item, dict) and item.get("asset_id") == asset_id:
+                    asset_dict = dict(item)
+                else:
+                    new_from_list.append(item)
+            if asset_dict is None:
+                return False
+            market[from_owner] = new_from_list
+            asset_dict["owner"] = to_owner
+            asset_dict["asset_status"] = ASSET_STATUS_UNLISTED
+            asset_dict["version"] = int(asset_dict.get("version", 1)) + 1
+            market.setdefault(to_owner, [])
+            market[to_owner].append(asset_dict)
+            self._save_marketplace(market)
+        return True
 
     def delete_asset(self, asset_id: str, owner: str) -> bool:
         """Remove asset from DB entirely (no blockchain change)."""

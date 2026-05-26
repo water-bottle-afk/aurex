@@ -63,6 +63,7 @@ _PUSH_EVENTS = frozenset({
     "BLOCK_ACCEPTED", "BLOCK_REJECTED",
     "BALANCE_UPDATED", "BALANCE_IS",
     "FULLY_UPLOADED",
+    "ASSET_LISTED",
     "ASSET_SOLD",
     "ASSET_REMOVED",
     "ASSET_UNLISTED",
@@ -117,6 +118,8 @@ class ImageCache:
         self._metadata_path = self._cache_dir / "metadata.json"
         self._assets_dir.mkdir(parents=True, exist_ok=True)
         self._metadata: dict = self._load_metadata()
+        if "balance" not in self._metadata:
+            self._metadata["balance"] = 0.0
         self._validate_and_migrate()
 
     def _load_metadata(self) -> dict:
@@ -278,6 +281,7 @@ class ServerClient:
         self.asset_removed_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_unlisted_queue: "queue.Queue[str]" = queue.Queue()
         self.balance_queue: "queue.Queue[float]" = queue.Queue()
+        self.bought_asset_queue: "queue.Queue[str]" = queue.Queue()
 
     def connect(self):
         with self._lock:
@@ -320,8 +324,11 @@ class ServerClient:
                 if msg_type == "NOTIFICATION":
                     self.notification_queue.put(str(msg.get("msg", "")))
                 elif msg_type == "BUY_SUCCESS":
-                    text = str(msg.get("msg") or f"Transaction confirmed — asset {msg.get('asset_id', '')} at {msg.get('price', '')} AUR")
+                    asset_id = str(msg.get("asset_id", ""))
+                    text = str(msg.get("msg") or f"Purchase confirmed — asset {asset_id} at {msg.get('price', '')} AUR is now yours!")
                     self.notification_queue.put(text)
+                    if asset_id:
+                        self.bought_asset_queue.put(asset_id)
                 elif msg_type == "BUY_FAILED":
                     self.notification_queue.put(f"Transaction failed: {msg.get('message', 'Unknown reason')}")
                 elif msg_type == "BLOCK_ACCEPTED":
@@ -331,11 +338,12 @@ class ServerClient:
                 elif msg_type in ("BALANCE_UPDATED", "BALANCE_IS"):
                     balance = float(msg.get("balance", 0.0))
                     self.balance_queue.put(balance)
-                elif msg_type == "FULLY_UPLOADED":
-                    self.notification_queue.put(str(msg.get("msg", f"Asset {msg.get('asset_id', '')} fully uploaded")))
+                elif msg_type in ("FULLY_UPLOADED", "ASSET_LISTED"):
+                    self.notification_queue.put(str(msg.get("msg", f"Asset {msg.get('asset_id', '')} is now live on the marketplace")))
                 elif msg_type == "ASSET_SOLD":
                     asset_id = str(msg.get("asset_id", ""))
-                    self.notification_queue.put(f"Asset {asset_id} was sold")
+                    text = str(msg.get("msg") or f"Your asset {asset_id} was sold")
+                    self.notification_queue.put(text)
                     if asset_id:
                         self.asset_sold_queue.put(asset_id)
                 elif msg_type in ("ASSET_REMOVED", "ASSET_UNLISTED"):
@@ -358,7 +366,7 @@ class ServerClient:
         if not isinstance(resp, dict):
             raise RuntimeError("Invalid server response")
         resp_type = str(resp.get("type", "")).upper()
-        if resp_type == "ERROR" or resp_type.endswith("_FAILED"):
+        if resp_type == "ERROR":
             raise RuntimeError(str(resp.get("message", "Unknown server error")))
         return resp
 
@@ -374,8 +382,8 @@ class ServerClient:
     def verify_code(self, email, code):
         return self._request({"type": "VERIFY_CODE", "email": email, "code": code})
 
-    def update_password(self, email, new_password):
-        return self._request({"type": "UPDATE_PASSWORD", "email": email, "new_password": new_password})
+    def update_password(self, email, new_password, code):
+        return self._request({"type": "UPDATE_PASSWORD", "email": email, "new_password": new_password, "code": code})
 
     def logout(self):
         return self._request({"type": "LOGOUT"})
@@ -388,9 +396,6 @@ class ServerClient:
 
     def delete_account(self, username: str):
         return self._request({"type": "DELETE_ACCOUNT", "username": username})
-
-    def get_my_assets(self, username):
-        return self._request({"type": "GET_MY_ASSETS", "username": username})
 
     def move_to_marketplace(self, username: str, asset_id: str):
         return self._request({"type": "MOVE_TO_MARKETPLACE", "username": username, "asset_id": asset_id})
@@ -448,7 +453,7 @@ class ServerClient:
                 raise RuntimeError("Download timeout (ASSET_INIT)") from exc
             if not isinstance(init_msg, dict):
                 raise RuntimeError("Invalid server response during download")
-            if init_msg.get("type") == "ASSET_FAILED":
+            if init_msg.get("type") == "ERROR":
                 raise RuntimeError(str(init_msg.get("message", "Asset download failed")))
             if init_msg.get("type") != "ASSET_INIT":
                 raise RuntimeError(f"Unexpected response: {init_msg.get('type')}")
@@ -605,6 +610,23 @@ class ClientApp:
                 self._drain_balance_events()
         threading.Thread(target=_monitor, daemon=True).start()
 
+    def _start_bought_asset_downloader(self):
+        """Background thread that auto-downloads assets the user just purchased."""
+        def _worker():
+            while True:
+                try:
+                    asset_id = self.client.bought_asset_queue.get(timeout=10)
+                except queue.Empty:
+                    continue
+                if not self.state.is_authenticated:
+                    continue
+                try:
+                    self.load_asset_by_id(asset_id)
+                    logger.info(f"Auto-downloaded bought asset {asset_id}")
+                except Exception as exc:
+                    logger.warning(f"Auto-download failed for bought asset {asset_id}: {exc}")
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _close_error_dialog(self):
         if self.page.dialog:
             self.page.dialog.open = False
@@ -687,8 +709,8 @@ class ClientApp:
         self.state.email = email
         return resp
 
-    def update_password(self, email, new_password):
-        return self.client.update_password(email, new_password)
+    def update_password(self, email, new_password, code):
+        return self.client.update_password(email, new_password, code)
 
     @property
     def image_cache(self) -> ImageCache:
@@ -740,11 +762,21 @@ class ClientApp:
         self._notification_badge = None
 
     def get_market_asset_ids(self) -> list[dict]:
-        resp = self.client.get_assets_ids(self.state.username or "")
-        return [
+        resp = self.client.get_assets_ids()
+        entries = [
             entry if isinstance(entry, dict) else {"id": str(entry), "version": 1}
             for entry in resp.get("ids", [])
         ]
+        # Evict cached FOR_SALE assets that are no longer in the server's marketplace list
+        server_ids = {e["id"] for e in entries if isinstance(e, dict)}
+        cache = self._image_cache
+        if cache:
+            for aid, meta in list(cache._metadata.items()):
+                if aid == "balance":
+                    continue
+                if isinstance(meta, dict) and meta.get("asset_status") == "FOR_SALE" and aid not in server_ids:
+                    cache.invalidate(aid)
+        return entries
 
     def load_asset_by_id(self, asset_id: str, version: int = 1) -> "MarketItem | None":
         try:
@@ -798,11 +830,10 @@ class ClientApp:
     def get_my_asset_ids(self) -> list[dict]:
         if not self.state.username:
             raise RuntimeError("Not authenticated")
-        resp = self.client.get_my_assets(self.state.username)
+        resp = self.client.get_assets_ids(self.state.username)
         return [
-            {"id": str(item.get("asset_id", "")), "version": int(item.get("version", 1))}
-            for item in resp.get("items", [])
-            if isinstance(item, dict) and item.get("asset_id")
+            entry if isinstance(entry, dict) else {"id": str(entry), "version": 1}
+            for entry in resp.get("ids", [])
         ]
 
     def move_to_marketplace(self, asset_id: str) -> dict:
@@ -886,8 +917,13 @@ class ClientApp:
             except Exception:
                 pass
         self.state.notifications.append(f"Uploaded asset: {asset_name}")
-        if for_sale:
-            self.state.notifications.append("Asset sent to mining process — will appear on marketplace once confirmed")
+        if for_sale and asset_id:
+            try:
+                self.client.move_to_marketplace(self.state.username, asset_id)
+                self.state.notifications.append("Asset sent to mining — will appear on marketplace once confirmed")
+            except Exception as exc:
+                logger.warning(f"[upload] move_to_marketplace failed: {exc}")
+                self.state.notifications.append("Upload complete — go to My Assets to list it on the marketplace")
         return resp
 
     def buy_asset(self, item: MarketItem):
@@ -1023,6 +1059,7 @@ def main(page):
     app = ClientApp(page)
     app._start_balance_monitor()
     app._start_notification_monitor()
+    app._start_bought_asset_downloader()
     app.start()
 
 

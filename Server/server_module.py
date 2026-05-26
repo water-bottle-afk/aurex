@@ -143,23 +143,6 @@ class ORMExtended(ORM):
         except Exception as exc:
             logger.error(f"Failed marketplace pickle migration: {exc}")
 
-    def _load_marketplace(self):
-        try:
-            raw = json.loads(self.marketplace_json_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return {}
-            normalized = {}
-            for owner, items in raw.items():
-                if not isinstance(items, list):
-                    continue
-                normalized[str(owner)] = [MarketplaceItem.from_dict(item).to_dict() for item in items if isinstance(item, dict)]
-            return normalized
-        except Exception:
-            return {}
-
-    def _save_marketplace(self, market):
-        self.marketplace_json_path.write_text(json.dumps(market, ensure_ascii=False, indent=2), encoding="utf-8")
-
     def save_user(self, user):
         with self._lock:
             users = self._load_users()
@@ -198,44 +181,21 @@ class ORMExtended(ORM):
         user = self.get_user_by_email(email)
         if not user:
             return False, "Email not found", None
-        if user.is_code_match_and_available(datetime.now(), code):
-            return True, "Code verified", user
-        return False, "Invalid or expired code", None
+        if user.verification_code != code:
+            return False, "Invalid verification code", None
+        if not user.reset_time or datetime.now() >= datetime.fromisoformat(user.reset_time):
+            return False, "Code expired", None
+        return True, "Code verified", user
 
     def update_password_by_email(self, email, new_password):
         user = self.get_user_by_email(email)
         if not user:
             return False, "Email not found"
+        old_hash = user.password_hash
         user.set_password(new_password)
         self.save_user(user)
+        logger.info(f"[update_password] hash changed for {email}: {old_hash[:12]}... -> {user.password_hash[:12]}...")
         return True, "Password updated"
-
-    def add_asset(self, username, asset):
-        with self._lock:
-            market = self._load_marketplace()
-            market.setdefault(username, [])
-            market[username].append(asset.to_dict() if isinstance(asset, MarketplaceItem) else MarketplaceItem.from_dict(asset).to_dict())
-            self._save_marketplace(market)
-        return True
-
-    def get_all_assets(self):
-        market = self._load_marketplace()
-        assets = []
-        for owner_assets in market.values():
-            for asset in owner_assets:
-                assets.append(MarketplaceItem.from_dict(asset))
-        assets.sort(key=lambda a: a.created_at, reverse=True)
-        return assets
-
-    def get_assets_for_user(self, username):
-        username = (username or "").strip()
-        if not username:
-            return []
-        market = self._load_marketplace()
-        raw_list = market.get(username, [])
-        assets = [MarketplaceItem.from_dict(a) for a in raw_list if isinstance(a, dict)]
-        assets.sort(key=lambda a: a.created_at, reverse=True)
-        return assets
 
 
 class ServerUpdated:
@@ -273,7 +233,6 @@ class ServerUpdated:
             "UPLOAD_INIT": self.handle_upload_init,
             "UPLOAD_FINISH": self.handle_upload_finish,
             "GET_ITEMS": self.handle_get_items,
-            "GET_MY_ASSETS": self.handle_get_my_assets,
             "UPDATE_PUBLIC_KEY": self.handle_update_public_key,
             "REGISTER_GATEWAY": self.handle_register_gateway,
             "BUY_ASSET": self.handle_buy_asset,
@@ -286,6 +245,9 @@ class ServerUpdated:
             "GET_ASSET_BY_ID": self.handle_get_asset_by_id,
             "DELETE_ACCOUNT": self.handle_delete_account,
             "GET_BALANCE": self.handle_get_balance,
+            "FULLY_UPLOAD": self.handle_fully_upload,
+            "ASSET_UNLISTED": self.handle_asset_unlisted,
+            "MOVE_TO_MARKETPLACE": self.handle_move_to_marketplace,
         }
 
     def start(self):
@@ -337,8 +299,9 @@ class ServerUpdated:
         payload.update(extra)
         return payload
 
-    def _fail(self, event_type, message):
-        return {"type": event_type, "message": str(message)}
+    def _fail(self, *args):
+        message = args[-1]
+        return {"type": "ERROR", "message": str(message)}
 
     def _load_notifications(self):
         try:
@@ -425,8 +388,12 @@ class ServerUpdated:
         if not username or not password:
             return self._fail("LOGIN_FAILED", "Missing username/password")
         user = self.db.get_user(username)
-        if not user or not user.verify_password(password):
-            return self._fail("LOGIN_FAILED", "Invalid username or password")
+        if not user:
+            self.logger.warning(f"[login] username '{username}' not found in DB")
+            return self._fail("LOGIN_FAILED", f"Username '{username}' not found")
+        if not user.verify_password(password):
+            self.logger.warning(f"[login] wrong password attempt for '{username}'")
+            return self._fail("LOGIN_FAILED", f"Incorrect password for '{username}'")
         if hasattr(comm, "set_user"):
             comm.set_user(user)
         else:
@@ -434,12 +401,15 @@ class ServerUpdated:
         with self.online_users_lock:
             self.online_users[username] = comm
         self._flush_notifications_for_user(username, comm)
+        # Proactively push fresh balance from blockchain on every login
+        if user.public_key:
+            self._notify_gateways({"type": "GET_BALANCE", "userpk": user.public_key})
         return self._success("LOGIN_SUCCESS", username=username)
 
     def handle_signup(self, comm, msg):
         _ = comm
         username = str(self._param(msg, "username", 0, "")).strip()
-        password = str(self._param(msg, "password", 1, "")).strip()
+        password = str(self._param(msg, "password", 1, ""))
         email = str(self._param(msg, "email", 2, "")).strip().lower()
         if not username or not password or not email:
             return self._fail("SIGNUP_FAILED", "Missing required fields")
@@ -479,14 +449,23 @@ class ServerUpdated:
     def handle_update_password(self, comm, msg):
         _ = comm
         email = str(self._param(msg, "email", 0, "")).strip().lower()
-        new_password = str(self._param(msg, "new_password", 1, self._param(msg, "password", 1, ""))).strip()
-        if not email or not new_password:
-            return self._fail("UPDATE_FAILED", "Missing email/new_password")
+        new_password = str(self._param(msg, "new_password", 1, self._param(msg, "password", 1, "")))
+        code = str(self._param(msg, "code", 2, "")).strip()
+        if not email or not new_password or not code:
+            return self._fail("UPDATE_FAILED", "Missing email/code/new_password")
         if len(new_password) < 6:
             return self._fail("UPDATE_FAILED", "Password must be at least 6 characters")
-        ok, message = self.db.update_password_by_email(email, new_password)
+        ok, message, _ = self.db.verify_reset_code(email, code)
         if not ok:
-            return self._fail("UPDATE_FAILED", message)
+            self.logger.warning(f"[update_password] code check failed for {email}: {message}")
+            if "expired" in message.lower():
+                return self._fail("UPDATE_FAILED", "Code expired — press 'Send Code' to get a new one")
+            return self._fail("UPDATE_FAILED", "Invalid verification code")
+        update_ok, update_msg = self.db.update_password_by_email(email, new_password)
+        if not update_ok:
+            self.logger.error(f"[update_password] DB update failed for {email}: {update_msg}")
+            return self._fail("UPDATE_FAILED", update_msg)
+        self.logger.info(f"[update_password] password updated successfully for {email}")
         return self._success("PASSWORD_UPDATED")
 
     def handle_logout(self, comm, msg):
@@ -590,14 +569,6 @@ class ServerUpdated:
         items = [item.to_dict() for item in self.db.get_all_assets()]
         return self._success("ITEMS_LIST", items=items)
 
-    def handle_get_my_assets(self, comm, msg):
-        _ = comm
-        username = str(self._param(msg, "username", 0, "")).strip()
-        if not username:
-            return self._fail("FETCH_FAILED", "Missing username")
-        items = [item.to_dict() for item in self.db.get_assets_for_user(username)]
-        return self._success("MY_ASSETS_LIST", items=items)
-
     def handle_update_public_key(self, comm, msg):
         _ = comm
         username = str(self._param(msg, "username", 0, "")).strip()
@@ -634,28 +605,54 @@ class ServerUpdated:
         signature = str(data.get("signature", "")).strip()
         if not buyer or not public_key or not signature:
             return self._fail("BUY_FAILED", "Missing buyer/public_key/signature")
-        self._notify_gateways({"type": "tx_request_buy", "data": data})
+        self._notify_gateways({"type": "TX_REQUEST_BUY", "data": data})
         return self._success("BUY_SUBMITTED")
 
     def handle_buy_success(self, comm, msg):
         _ = comm
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        buyer = str(data.get("buyer") or data.get("sender") or "").strip()
-        seller = str(data.get("seller") or data.get("receiver") or "").strip()
+
+        # sender = buyer PK (paid), receiver = seller PK (received AUR)
+        buyer_pk = str(data.get("sender") or data.get("public_key") or "").strip()
+        seller_pk = str(data.get("receiver") or "").strip()
+        buyer_username = str(data.get("buyer_username") or data.get("buyer") or "").strip()
         asset_id = str(data.get("asset_id") or "").strip()
         price = data.get("price") if data.get("price") is not None else data.get("amount")
-        if buyer:
-            self._push_event(buyer, {
+
+        # Resolve usernames from public keys for DB operations
+        buyer_user = self.db.get_user_by_public_key(buyer_pk) if buyer_pk else None
+        seller_user = self.db.get_user_by_public_key(seller_pk) if seller_pk else None
+        buyer_name = (buyer_user.username if buyer_user else None) or buyer_username
+        seller_name = seller_user.username if seller_user else ""
+
+        if asset_id and seller_name and buyer_name:
+            ok = self.db.transfer_asset(asset_id, seller_name, buyer_name)
+            if ok:
+                self.logger.info(f"[buy_success] asset {asset_id} transferred {seller_name} -> {buyer_name}")
+            else:
+                self.logger.warning(f"[buy_success] transfer_asset failed for {asset_id} ({seller_name} -> {buyer_name})")
+
+        # Push BUY_SUCCESS to buyer
+        if buyer_name:
+            self._push_event(buyer_name, {
                 "type": "BUY_SUCCESS",
                 "asset_id": asset_id,
                 "price": price,
+                "msg": f"Purchase confirmed — asset {asset_id} at {price} AUR is now yours!",
             })
-        if seller:
-            self._push_event(seller, {
-                "type": "BUY_SUCCESS",
+
+        # Push ASSET_SOLD to seller with asset name for a readable notification
+        if seller_name:
+            asset = self.db.find_asset_by_id(asset_id)
+            asset_label = asset.asset_name if asset else asset_id
+            self._push_event(seller_name, {
+                "type": "ASSET_SOLD",
                 "asset_id": asset_id,
+                "buyer": buyer_name,
                 "price": price,
+                "msg": f"Your asset '{asset_label}' was sold to {buyer_name} for {price} AUR",
             })
+
         return self._success("BUY_ACKNOWLEDGED")
 
     def handle_buy_failed(self, comm, msg):
@@ -704,7 +701,15 @@ class ServerUpdated:
         userpk = str(msg.get("userpk") or data.get("userpk") or "").strip()
         balance = data.get("balance")
         if userpk:
-            self.logger.info(f"Balance update from blockchain userpk={userpk} balance={balance}")
+            balance_val = float(balance) if balance is not None else 0.0
+            self.logger.info(f"Balance update from blockchain userpk={userpk} balance={balance_val}")
+            user = self.db.get_user_by_public_key(userpk)
+            if user:
+                self._push_event(user.username, {
+                    "type": "BALANCE_IS",
+                    "balance": balance_val,
+                    "msg": f"Your new balance is {balance_val:.2f} AUR",
+                })
         return self._success("BALANCE_ACKNOWLEDGED")
 
 
@@ -715,17 +720,92 @@ class ServerUpdated:
         self._notify_gateways({"type": "GET_BALANCE", "userpk": public_key})
         return self._success("BALANCE_REQUESTED")
 
+    def handle_move_to_marketplace(self, comm, msg):
+        """Client requests asset be listed on marketplace via blockchain mining."""
+        _ = comm
+        username = str(self._param(msg, "username", 0, "")).strip()
+        asset_id = str(self._param(msg, "asset_id", 1, "")).strip()
+        if not username or not asset_id:
+            return self._fail("MOVE_FAILED", "Missing username/asset_id")
+        asset = self.db.find_asset_by_id(asset_id)
+        if not asset:
+            return self._fail("MOVE_FAILED", f"Asset {asset_id} not found")
+        if asset.owner != username:
+            return self._fail("MOVE_FAILED", "Asset does not belong to this user")
+        user = self.db.get_user(username)
+        public_key = getattr(user, "public_key", "") if user else ""
+        file_hash = ""
+        try:
+            storage_path = Path(asset.storage_path)
+            if storage_path.exists():
+                file_hash = hashlib.sha256(storage_path.read_bytes()).hexdigest()
+        except Exception:
+            pass
+        self._notify_gateways({
+            "type": "UPLOAD_ASSET",
+            "data": {
+                "asset_id": asset_id,
+                "owner": username,
+                "public_key": public_key,
+                "file_hash": file_hash,
+            },
+        })
+        self.logger.info(f"[move_to_marketplace] asset {asset_id} sent to gateway for mining (owner={username})")
+        return self._success("MOVE_PENDING")
+
+    def handle_fully_upload(self, comm, msg):
+        """Gateway confirms asset block was mined — mark asset FOR_SALE."""
+        _ = comm
+        asset_id = str(self._param(msg, "asset_id", 0, "")).strip()
+        block_hash = str(self._param(msg, "block_hash", 1, "")).strip()
+        if not asset_id:
+            return self._fail("FULLY_UPLOAD_FAILED", "Missing asset_id")
+        ok = self.db.update_asset_status(asset_id, "FOR_SALE")
+        if ok:
+            self.logger.info(f"[fully_upload] asset {asset_id} is now FOR_SALE hash={block_hash[:16] if block_hash else '?'}...")
+            asset = self.db.find_asset_by_id(asset_id)
+            if asset and asset.owner:
+                self._push_event(asset.owner, {"type": "FULLY_UPLOADED", "asset_id": asset_id})
+                # Refresh balance for owner after blockchain state changes
+                user = self.db.get_user(asset.owner)
+                owner_pk = getattr(user, "public_key", "") if user else ""
+                if owner_pk:
+                    self._notify_gateways({"type": "GET_BALANCE", "userpk": owner_pk})
+        else:
+            self.logger.warning(f"[fully_upload] update_asset_status failed for {asset_id}")
+        return self._success("FULLY_UPLOAD_ACKNOWLEDGED")
+
+    def handle_asset_unlisted(self, comm, msg):
+        """Gateway confirms unlist block was mined — mark asset UNLISTED."""
+        _ = comm
+        asset_id = str(self._param(msg, "asset_id", 0, "")).strip()
+        block_hash = str(self._param(msg, "block_hash", 1, "")).strip()
+        if not asset_id:
+            return self._fail("ASSET_UNLISTED_FAILED", "Missing asset_id")
+        ok = self.db.update_asset_status(asset_id, "UNLISTED", increment_version=True)
+        if ok:
+            self.logger.info(f"[asset_unlisted] asset {asset_id} is now UNLISTED hash={block_hash[:16] if block_hash else '?'}...")
+            asset = self.db.find_asset_by_id(asset_id)
+            if asset and asset.owner:
+                self._push_event(asset.owner, {"type": "ASSET_UNLISTED", "asset_id": asset_id})
+        else:
+            self.logger.warning(f"[asset_unlisted] update_asset_status failed for {asset_id}")
+        return self._success("UNLIST_ACKNOWLEDGED")
+
     def handle_get_assets_ids(self, comm, msg):
         _ = comm
-        _ = msg
-        items = self.db.get_all_assets()
+        username = str(msg.get("username") or "").strip()
+        if username:
+            items = self.db.get_assets_for_user(username)   # owned, NOT for sale
+        else:
+            items = self.db.get_all_for_sale_assets()        # marketplace: only FOR_SALE
         ids = [{"id": item.asset_id, "version": getattr(item, "version", 1)} for item in items if item.asset_id]
         return self._success("ASSETS_IDS_LIST", ids=ids)
 
     def handle_get_asset_by_id(self, comm, msg):
         asset_id = str(self._param(msg, "id", 0, "")).strip()
         if not asset_id:
-            comm.send_async({"type": "ASSET_FAILED", "message": "Missing asset id"})
+            comm.send_async({"type": "ERROR", "message": "Missing asset id"})
             return None
 
         item = None
@@ -735,7 +815,7 @@ class ServerUpdated:
                 break
 
         if not item:
-            comm.send_async({"type": "ASSET_FAILED", "message": "Asset not found"})
+            comm.send_async({"type": "ERROR", "message": "Asset not found"})
             return None
 
         content_b64 = getattr(item, "content_b64", "") or ""
@@ -744,7 +824,7 @@ class ServerUpdated:
                 raw = Path(item.storage_path).read_bytes()
                 content_b64 = base64.b64encode(raw).decode("ascii")
             except Exception:
-                comm.send_async({"type": "ASSET_FAILED", "message": "Asset file not found"})
+                comm.send_async({"type": "ERROR", "message": "Asset file not found"})
                 return None
 
         chunk_size = 32_000

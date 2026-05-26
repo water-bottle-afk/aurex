@@ -23,5 +23,54 @@
     "asset_status": "PENDING",
     "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
     "path": "assets/caf3eeaf9030b3e9.jpg"
+  },
+  "2675ccc1eabe955a": {
+    "asset_id": "2675ccc1eabe955a",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "Lion",
+    "description": "lion",
+    "file_type": "jpg",
+    "cost": 4.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/2675ccc1eabe955a.jpg"
+  },
+  "balance": 100.0,
+  "e6c7aecbba75a628": {
+    "asset_id": "e6c7aecbba75a628",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "bird",
+    "description": "Image of a bird",
+    "file_type": "jpg",
+    "cost": 8.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/e6c7aecbba75a628.jpg"
+  },
+  "9c8bc96fef5d4138": {
+    "asset_id": "9c8bc96fef5d4138",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "Wolf",
+    "description": "wolf image",
+    "file_type": "jpg",
+    "cost": 5.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/9c8bc96fef5d4138.jpg"
+  },
+  "de987ea86ed2333a": {
+    "asset_id": "de987ea86ed2333a",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "TIGER",
+    "description": "tiger",
+    "file_type": "jpg",
+    "cost": 32.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/de987ea86ed2333a.jpg"
   }
 }
