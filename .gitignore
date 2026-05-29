@@ -53,5 +53,8 @@ devtools_options.yaml
 DB/*.db
 DB/upload_tmp/
 
+aurex_presentation.pptx
+make_docx.py
+
 # Generated keys
 blockchain/keys/

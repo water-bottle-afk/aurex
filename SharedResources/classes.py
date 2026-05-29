@@ -456,74 +456,20 @@ class UDPClient:
             self.sock.sendto(message, (self.broadcast_ip, self.udp_srv_port))  # broadcast msg
             bin_data, addr = self.sock.recvfrom(1024)
 
-            self.Print(f"UDP client received raw info from {addr}", 20)
+            self.Print(f"UDP client received raw info from {addr}")
             self.Print(bin_data, 10)
             try:
                 query, tcp_ip, tcp_port = bin_data.decode().split('|')
                 tcp_port = int(tcp_port)
-                self.Print(f"Server's At {tcp_ip}:{tcp_port}", 20)
+                self.Print(f"Server's At {tcp_ip}:{tcp_port}")
                 self.tcp_port = tcp_port
                 self.tcp_ip = tcp_ip
                 break
             except Exception as e:
-                self.Print(f"UDP client Error: {e}", 40)
+                self.Print(f"UDP client Error: {e}")
         self.sock.close()
         return self.tcp_ip, self.tcp_port
     
-
-
-#-------------------------------------------------------------------
-
-
-class User:
-    """User class with salt + pepper hashing and email verification"""
-    
-    def __init__(self, username, password, email, salt=None, pubkey=False,
-        verification_code=None, reset_time=None, wallet_balance=0.0,):
-        self.username = username
-        self.email = email
-        self.salt = salt if salt else self._create_salt()
-        self.password_hash = self._hash_password(password)
-        
-        self.pubkey = pubkey
-        self.verification_code = verification_code
-        self.reset_time = reset_time
-        self.wallet_balance = float(wallet_balance)
-    
-    def _create_salt(self):
-        """Generate unique salt"""
-        num = random.randint(1000000, 9999999)
-        return str(num)
-    
-    def _hash_password(self, password):
-        """Hash password with salt + pepper"""
-        combined = PEPPER + password + self.salt
-        return hashlib.sha256(combined.encode()).hexdigest()
-    
-    def verify_password(self, password):
-        """Verify password matches hash"""
-        return self.password_hash == self._hash_password(password)
-    
-    def set_verification_code(self, code):
-        """Set email verification code"""
-        self.verification_code = code
-    
-    def set_reset_time(self, time):
-        """Set code expiration time"""
-        self.reset_time = time
-    
-    def is_code_match_and_available(self, current_time, code_to_check):
-        """Check if code matches and hasn't expired"""
-        if self.verification_code == code_to_check and self.reset_time:
-            return current_time < datetime.fromisoformat(self.reset_time)
-        return False
-
-    def set_password(self, new_password):
-        """Update password hash (e.g. after password reset)."""
-        self.password_hash = self._hash_password(new_password)
-
-    def __repr__(self):
-        return f"User(username={self.username}, email={self.email}, has_keys={self.has_keys})"
 
     
 @dataclass
