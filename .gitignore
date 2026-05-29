@@ -58,3 +58,28 @@ make_docx.py
 
 # Generated keys
 blockchain/keys/
+
+# Build artifacts
+Client/build/
+dist/
+build/
+
+# Executables
+*.exe
+*.pkg
+*.pyz
+
+# Archives
+*.zip
+
+# SQL tools
+sql/
+
+# Keys
+*.pem
+ServerKeys/
+Server/ServerKeys/
+
+# Python
+__pycache__/
+*.pyc
