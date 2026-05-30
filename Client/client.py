@@ -397,22 +397,31 @@ class ServerClient:
     def delete_account(self, username: str):
         return self._request({"type": "DELETE_ACCOUNT", "username": username})
 
-    def move_to_marketplace(self, username: str, asset_id: str):
-        return self._request({"type": "MOVE_TO_MARKETPLACE", "username": username, "asset_id": asset_id})
+    def move_to_marketplace(self, username: str, asset_id: str, tx_id: str = ""):
+        return self._request({
+            "type": "MOVE_TO_MARKETPLACE",
+            "username": username,
+            "asset_id": asset_id,
+            "tx_id": tx_id or uuid.uuid4().hex,
+        })
 
     def buy_asset(self, payload):
+        if "tx_id" not in payload:
+            payload = dict(payload)
+            payload["tx_id"] = uuid.uuid4().hex
         return self._request({"type": "BUY_ASSET", "data": payload})
 
     def delete_asset(self, asset_id: str, owner: str):
         return self._request({"type": "DELETE_ASSET", "asset_id": asset_id, "owner": owner})
 
-    def unlist_asset(self, username: str, asset_id: str, public_key: str = "", signature: str = ""):
+    def unlist_asset(self, username: str, asset_id: str, public_key: str = "", signature: str = "", tx_id: str = ""):
         return self._request({
             "type": "UNLIST_ASSET",
             "username": username,
             "asset_id": asset_id,
             "public_key": public_key,
             "signature": signature,
+            "tx_id": tx_id or uuid.uuid4().hex,
         })
 
     def request_balance(self, public_key: str):
@@ -839,7 +848,7 @@ class ClientApp:
     def move_to_marketplace(self, asset_id: str) -> dict:
         if not self.state.username:
             raise RuntimeError("Not authenticated")
-        return self.client.move_to_marketplace(self.state.username, asset_id)
+        return self.client.move_to_marketplace(self.state.username, asset_id, uuid.uuid4().hex)
 
     def delete_asset(self, asset_id: str):
         if not self.state.username:
@@ -860,7 +869,7 @@ class ClientApp:
                 signature = self.sign_payload(payload)
             except Exception:
                 pass
-        return self.client.unlist_asset(self.state.username, asset_id, public_key, signature)
+        return self.client.unlist_asset(self.state.username, asset_id, public_key, signature, uuid.uuid4().hex)
 
     def request_balance(self):
         if not self.state.wallet_public_key:
@@ -946,6 +955,7 @@ class ClientApp:
             "signature": signature,
             "public_key": self.wallet_session.public_key,
             "signed_payload": payload,
+            "tx_id": uuid.uuid4().hex,
         }
         return self.client.buy_asset(req)
 

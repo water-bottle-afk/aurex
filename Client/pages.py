@@ -453,6 +453,7 @@ def build_marketplace_view(app):
             id_entries = app.get_market_asset_ids()
         except Exception as exc:
             status_text.value = f"Error: {exc}"
+            app.notify(str(exc), error=True)
             try:
                 status_text.update()
             except Exception:
@@ -529,13 +530,16 @@ def build_marketplace_view(app):
 
     def do_refresh(_):
         _active[0] = False
-        # Clear grid immediately then reload
         grid.controls.clear()
         card_map.clear()
         try:
             grid.update()
         except Exception:
             pass
+        try:
+            app.request_balance()
+        except Exception as e:
+            app.notify(str(e), error=True)
         app.page.go("/marketplace")
 
     threading.Thread(target=_load, daemon=True).start()
@@ -948,6 +952,7 @@ def build_my_assets_view(app):
             id_entries = app.get_my_asset_ids()
         except Exception as exc:
             status_text.value = f"Error: {exc}"
+            app.notify(str(exc), error=True)
             try:
                 status_text.update()
             except Exception:
@@ -1005,6 +1010,10 @@ def build_my_assets_view(app):
             grid.update()
         except Exception:
             pass
+        try:
+            app.request_balance()
+        except Exception as e:
+            app.notify(str(e), error=True)
         app.page.go("/my_assets")
 
     threading.Thread(target=_load, daemon=True).start()
