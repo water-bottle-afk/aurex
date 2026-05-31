@@ -397,12 +397,15 @@ class ServerClient:
     def delete_account(self, username: str):
         return self._request({"type": "DELETE_ACCOUNT", "username": username})
 
-    def move_to_marketplace(self, username: str, asset_id: str, tx_id: str = ""):
+    def move_to_marketplace(self, username: str, asset_id: str, tx_id: str = "",
+                           signature: str = "", public_key: str = ""):
         return self._request({
             "type": "MOVE_TO_MARKETPLACE",
             "username": username,
             "asset_id": asset_id,
             "tx_id": tx_id or uuid.uuid4().hex,
+            "signature": signature,
+            "public_key": public_key,
         })
 
     def buy_asset(self, payload):
@@ -518,22 +521,46 @@ class ClientApp:
         self.page.go("/login")
 
     def notify(self, message, error=False):
-        if error:
-            self.page.dialog = ft.AlertDialog(
-                modal=True,
-                title=ft.Text("Error", color="#F6D2D2"),
-                content=ft.Text(str(message), color="#F1F4F8"),
-                bgcolor="#2A0E12",
-                actions=[ft.TextButton("Close", on_click=lambda e: self._close_error_dialog())],
-                actions_alignment=ft.MainAxisAlignment.END,
-            )
-            self.page.dialog.open = True
-            self.page.snack_bar = ft.SnackBar(content=ft.Text(str(message)), bgcolor="#7D2032")
-            self.page.snack_bar.open = True
-        else:
-            self.page.snack_bar = ft.SnackBar(content=ft.Text(message), bgcolor="#136F3A")
-            self.page.snack_bar.open = True
-        self.page.update()
+        """Show a snackbar (and dialog for errors). Safe to call from any thread."""
+        _msg = str(message)
+        _error = error
+
+        async def _show():
+            try:
+                if _error:
+                    dlg = ft.AlertDialog(
+                        modal=True,
+                        title=ft.Text("Error", color="#F6D2D2"),
+                        content=ft.Text(_msg, color="#F1F4F8"),
+                        bgcolor="#2A0E12",
+                        actions=[ft.TextButton("Close", on_click=lambda e: self._close_error_dialog())],
+                        actions_alignment=ft.MainAxisAlignment.END,
+                    )
+                    self.page.dialog = dlg
+                    self.page.dialog.open = True
+                snack = ft.SnackBar(
+                    content=ft.Text(_msg),
+                    bgcolor="#7D2032" if _error else "#136F3A",
+                    show_close_icon=True,
+                    duration=5000,
+                )
+                self.page.snack_bar = snack
+                snack.open = True
+                self.page.update()
+            except Exception as _e:
+                logger.warning(f"notify display error: {_e}")
+
+        try:
+            self.page.run_task(_show)
+        except Exception:
+            # Fallback for very early calls before the event loop is ready
+            try:
+                self.page.snack_bar = ft.SnackBar(content=ft.Text(_msg),
+                    bgcolor="#7D2032" if _error else "#136F3A")
+                self.page.snack_bar.open = True
+                self.page.update()
+            except Exception:
+                pass
 
     def _drain_server_notifications(self):
         self._consume_notification_queue()
@@ -561,10 +588,13 @@ class ClientApp:
         label = badge.content
         if label is not None:
             label.value = str(min(count, 99))
-        try:
-            badge.update()
-        except Exception:
-            pass
+        _b = badge
+        def _do(b=_b):
+            try:
+                b.update()
+            except Exception:
+                pass
+        self._schedule_ui(_do)
 
     def _start_notification_monitor(self):
         def _monitor():
@@ -596,20 +626,24 @@ class ClientApp:
 
     def _drain_balance_events(self):
         """Drain balance queue, update state, update UI text if visible."""
+        latest = None
         while True:
             try:
-                balance = self.client.balance_queue.get_nowait()
+                latest = self.client.balance_queue.get_nowait()
             except queue.Empty:
                 break
-            self.state.balance = balance
-            if self._image_cache:
-                self._image_cache.set_balance(balance)
-            if self._balance_text is not None:
-                try:
-                    self._balance_text.value = f"{balance:.2f} AUR"
-                    self._balance_text.update()
-                except Exception:
-                    pass
+        if latest is None:
+            return
+        self.state.balance = latest
+        if self._image_cache:
+            self._image_cache.set_balance(latest)
+        if self._balance_text is not None:
+            _val = f"{latest:.2f} AUR"
+            _ctrl = self._balance_text
+            def _do(v=_val, c=_ctrl):
+                c.value = v
+                c.update()
+            self._schedule_ui(_do)
 
     def _start_balance_monitor(self):
         """Background thread that updates the UI balance display as events arrive."""
@@ -636,10 +670,28 @@ class ClientApp:
                     logger.warning(f"Auto-download failed for bought asset {asset_id}: {exc}")
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _schedule_ui(self, fn):
+        """Run a UI-mutating callable on Flet's event loop. Safe from any thread."""
+        async def _run():
+            try:
+                fn()
+            except Exception as _e:
+                logger.debug(f"_schedule_ui error: {_e}")
+        try:
+            self.page.run_task(_run)
+        except Exception:
+            # Fallback for older Flet or pre-loop calls
+            try:
+                fn()
+            except Exception:
+                pass
+
     def _close_error_dialog(self):
-        if self.page.dialog:
-            self.page.dialog.open = False
-            self.page.update()
+        def _do():
+            if self.page.dialog:
+                self.page.dialog.open = False
+                self.page.update()
+        self._schedule_ui(_do)
 
     def _on_route_change(self, _):
         self._drain_server_notifications()
@@ -848,7 +900,19 @@ class ClientApp:
     def move_to_marketplace(self, asset_id: str) -> dict:
         if not self.state.username:
             raise RuntimeError("Not authenticated")
-        return self.client.move_to_marketplace(self.state.username, asset_id, uuid.uuid4().hex)
+        if not self.wallet_session:
+            raise RuntimeError("Wallet not loaded — cannot sign the listing transaction")
+        tx_id = uuid.uuid4().hex
+        signed_payload = {"asset_id": asset_id, "owner": self.state.username, "tx_id": tx_id}
+        try:
+            signature = self.sign_payload(signed_payload)
+        except Exception:
+            signature = ""
+        return self.client.move_to_marketplace(
+            self.state.username, asset_id, tx_id,
+            signature=signature,
+            public_key=self.wallet_session.public_key,
+        )
 
     def delete_asset(self, asset_id: str):
         if not self.state.username:
@@ -928,11 +992,11 @@ class ClientApp:
         self.state.notifications.append(f"Uploaded asset: {asset_name}")
         if for_sale and asset_id:
             try:
-                self.client.move_to_marketplace(self.state.username, asset_id)
-                self.state.notifications.append("Asset sent to mining — will appear on marketplace once confirmed")
+                self.move_to_marketplace(asset_id)
+                self.state.notifications.append(f"'{asset_name}' sent to mining — will appear on marketplace once confirmed")
             except Exception as exc:
                 logger.warning(f"[upload] move_to_marketplace failed: {exc}")
-                self.state.notifications.append("Upload complete — go to My Assets to list it on the marketplace")
+                self.state.notifications.append(f"'{asset_name}' uploaded — go to My Assets to list it on the marketplace")
         return resp
 
     def buy_asset(self, item: MarketItem):

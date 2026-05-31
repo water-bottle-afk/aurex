@@ -72,5 +72,18 @@
     "asset_status": "PENDING",
     "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
     "path": "assets/de987ea86ed2333a.jpg"
+  },
+  "d9c4cf3c37ff9de1": {
+    "asset_id": "d9c4cf3c37ff9de1",
+    "version": 2,
+    "owner": "Yossi",
+    "asset_name": "another",
+    "description": "5hjdhwsj",
+    "file_type": "jpg",
+    "cost": 4.0,
+    "created_at": "2026-05-31T14:24:36.264801",
+    "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c",
+    "asset_status": "UNLISTED",
+    "path": "assets/d9c4cf3c37ff9de1.jpg"
   }
 }

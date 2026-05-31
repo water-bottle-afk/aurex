@@ -25,6 +25,19 @@
       "version": 3,
       "asset_status": "UNLISTED",
       "public_key": ""
+    },
+    {
+      "asset_id": "7876b091a42ee071",
+      "owner": "Michael",
+      "asset_name": "gd",
+      "description": "4",
+      "file_type": "jpg",
+      "cost": 2.0,
+      "storage_path": "C:\\dev\\aurex\\DB\\uploads\\Michael\\7876b091a42ee0711e1d26eaea06cb0b21e459692b3cff26d848fbae00281a5e.jpg",
+      "created_at": "2026-05-31T16:21:28.157299",
+      "version": 1,
+      "asset_status": "FOR_SALE",
+      "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c"
     }
   ],
   "Yossi": [
@@ -79,6 +92,19 @@
       "version": 1,
       "asset_status": "FOR_SALE",
       "public_key": ""
+    },
+    {
+      "asset_id": "d9c4cf3c37ff9de1",
+      "owner": "Yossi",
+      "asset_name": "another",
+      "description": "5hjdhwsj",
+      "file_type": "jpg",
+      "cost": 4.0,
+      "storage_path": "C:\\dev\\aurex\\DB\\uploads\\Michael\\d9c4cf3c37ff9de184fec421bd747683723b0617e87da0bf68981d2dfc547c9e.jpg",
+      "created_at": "2026-05-31T14:24:36.264801",
+      "version": 2,
+      "asset_status": "UNLISTED",
+      "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c"
     }
   ]
 }

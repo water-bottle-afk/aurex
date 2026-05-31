@@ -194,6 +194,9 @@ class BlockchainNode:
             balances = self._load_json(self.balances_path, {})
             self.chain = ledger if isinstance(ledger, list) else []
             self.balances = balances if isinstance(balances, dict) else {}
+            if self.chain and not self.balances:
+                # balances.json is stale — will be fixed when this node syncs from a peer
+                self.Print(f"[{self.node_id}] WARNING: chain has {len(self.chain)} blocks but balances.json is empty — will sync from peer on connect")
             self._save_json(self.ledger_path, self.chain)
             self._save_json(self.balances_path, self.balances)
 
@@ -411,9 +414,15 @@ class BlockchainNode:
         return self.ip
 
     def register_blockchain_node(self):
+        # node_server_ip/port = the P2P peer-server address (for other nodes to sync from).
+        # This is distinct from the ephemeral port used for the gateway TCP connection.
         self._send_gateway({
             "type": "REGISTER_BLOCKCHAIN_NODE",
-            "data": {"ip": self._advertised_ip(), "port": self.port, "chain_length": len(self.chain)},
+            "data": {
+                "node_server_ip": self._advertised_ip(),
+                "node_server_port": self.port,
+                "chain_length": len(self.chain),
+            },
             "sender_ip": self._advertised_ip(),
             "sender_port": self.port,
         })
@@ -753,7 +762,7 @@ class BlockchainNode:
                 self.balances = {k: float(v) for k, v in balances.items()}
                 self._persist_local_state()
 
-            self.Print(f"[{self.node_id}] ledger synced from {peer_ip}:{peer_port}")
+            self.Print(f"[{self.node_id}] ledger synced from {peer_ip}:{peer_port} (chain={len(ledger)} blocks, balances={len(self.balances)} entries)")
             return True
         except Exception as exc:
             self.Print(f"[{self.node_id}] ledger sync failed from {peer_ip}:{peer_port}: {exc}")

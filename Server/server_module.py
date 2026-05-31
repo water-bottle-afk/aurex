@@ -410,6 +410,8 @@ class ServerUpdated:
         public_key = str(self._param(msg, "public_key", 1, "")).strip()
         if not username or not public_key:
             return self._fail("KEY_FAILED", "Missing username/public_key")
+        if self.db.is_public_key_taken(public_key, exclude_username=username):
+            return self._fail("KEY_FAILED", "Public key update failed: another user has this public key")
         ok = self.db.set_user_public_key(username, public_key)
         if not ok:
             return self._fail("KEY_FAILED", "User not found")
@@ -462,14 +464,17 @@ class ServerUpdated:
         buyer_name = (buyer_user.username if buyer_user else None) or buyer_username
         seller_name = seller_user.username if seller_user else ""
 
+        transfer_ok = False
         if asset_id and seller_name and buyer_name:
-            ok = self.db.transfer_asset(asset_id, seller_name, buyer_name)
-            if ok:
+            transfer_ok = self.db.transfer_asset(asset_id, seller_name, buyer_name)
+            if transfer_ok:
                 self.logger.info(f"[buy_success] asset {asset_id} transferred {seller_name} -> {buyer_name}")
             else:
-                self.logger.warning(f"[buy_success] transfer_asset failed for {asset_id}")
+                self.logger.info(f"[buy_success] transfer skipped for {asset_id} — already transferred (duplicate BUY_SUCCESS)")
+                return self._success("BUY_ACKNOWLEDGED")  # idempotent — already handled
 
-        if buyer_name:
+        # Only push notifications on the FIRST successful transfer
+        if transfer_ok and buyer_name:
             self._push_event(buyer_name, {
                 "type": "BUY_SUCCESS",
                 "asset_id": asset_id,
@@ -477,7 +482,7 @@ class ServerUpdated:
                 "msg": f"Purchase confirmed — asset {asset_id} at {price} AUR is now yours!",
             })
 
-        if seller_name:
+        if transfer_ok and seller_name:
             asset = self.db.find_asset_by_id(asset_id)
             asset_label = asset.asset_name if asset else asset_id
             self._push_event(seller_name, {
@@ -533,11 +538,16 @@ class ServerUpdated:
             self.logger.info(f"Balance update userpk={userpk[:12]}... balance={balance_val}")
             user = self.db.get_user_by_public_key(userpk)
             if user:
-                self._push_event(user.username, {
-                    "type": "BALANCE_IS",
-                    "balance": balance_val,
-                    "msg": f"Your new balance is {balance_val:.2f} AUR",
-                })
+                # Only push to ONLINE users — balance updates are real-time only.
+                # Don't queue as text notification: the user will get a fresh balance
+                # on their next login, and stale balance strings pollute notifications.
+                with self.online_users_lock:
+                    online_comm = self.online_users.get(user.username)
+                if online_comm:
+                    try:
+                        online_comm.send_async({"type": "BALANCE_IS", "balance": balance_val})
+                    except Exception:
+                        pass
         return self._success("BALANCE_ACKNOWLEDGED")
 
     def handle_get_balance(self, comm, msg):
@@ -557,6 +567,7 @@ class ServerUpdated:
         username = str(self._param(msg, "username", 0, "")).strip()
         asset_id = str(self._param(msg, "asset_id", 1, "")).strip()
         tx_id = str(self._param(msg, "tx_id", 2, "")).strip() or uuid.uuid4().hex
+        signature = str(self._param(msg, "signature", 3, "")).strip()
         if not username or not asset_id:
             return self._fail("MOVE_FAILED", "Missing username/asset_id")
         err = self._gateway_required()
@@ -568,7 +579,7 @@ class ServerUpdated:
         if asset.owner != username:
             return self._fail("MOVE_FAILED", "Asset does not belong to this user")
         user = self.db.get_user(username)
-        public_key = getattr(user, "public_key", "") if user else ""
+        public_key = str(self._param(msg, "public_key", 4, "")).strip() or (getattr(user, "public_key", "") if user else "")
         file_hash = ""
         try:
             storage_path = Path(asset.storage_path)
@@ -584,6 +595,7 @@ class ServerUpdated:
                 "public_key": public_key,
                 "file_hash": file_hash,
                 "tx_id": tx_id,
+                "signature": signature,
             },
         })
         self.logger.info(f"[move_to_marketplace] asset {asset_id} sent to gateway for mining (owner={username})")
@@ -631,7 +643,12 @@ class ServerUpdated:
             self.logger.info(f"[fully_upload] asset {asset_id} is now FOR_SALE hash={block_hash[:16] if block_hash else '?'}...")
             asset = self.db.find_asset_by_id(asset_id)
             if asset and asset.owner:
-                self._push_event(asset.owner, {"type": "FULLY_UPLOADED", "asset_id": asset_id})
+                asset_name = asset.asset_name or asset_id
+                self._push_event(asset.owner, {
+                    "type": "FULLY_UPLOADED",
+                    "asset_id": asset_id,
+                    "msg": f"'{asset_name}' is now live on the marketplace!",
+                })
                 user = self.db.get_user(asset.owner)
                 owner_pk = getattr(user, "public_key", "") if user else ""
                 if owner_pk:
@@ -656,7 +673,12 @@ class ServerUpdated:
             self.logger.info(f"[asset_unlisted] asset {asset_id} is now UNLISTED hash={block_hash[:16] if block_hash else '?'}...")
             asset = self.db.find_asset_by_id(asset_id)
             if asset and asset.owner:
-                self._push_event(asset.owner, {"type": "ASSET_UNLISTED", "asset_id": asset_id})
+                asset_name = asset.asset_name or asset_id
+                self._push_event(asset.owner, {
+                    "type": "ASSET_UNLISTED",
+                    "asset_id": asset_id,
+                    "msg": f"'{asset_name}' has been unlisted from the marketplace",
+                })
         else:
             self.logger.warning(f"[asset_unlisted] update_asset_status failed for {asset_id}")
         return self._success("UNLIST_ACKNOWLEDGED")

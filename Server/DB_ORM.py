@@ -286,6 +286,17 @@ class ORM:
                 return user
         return None
 
+    def is_public_key_taken(self, public_key: str, exclude_username: str = "") -> bool:
+        """Return True if this public key is already registered to a DIFFERENT user."""
+        public_key = (public_key or "").strip()
+        if not public_key:
+            return False
+        exclude = (exclude_username or "").strip()
+        for user in self._load_users().values():
+            if user.public_key == public_key and user.username != exclude:
+                return True
+        return False
+
     def set_user_public_key(self, username: str, public_key: str) -> bool:
         user = self.get_user(username)
         if not user:

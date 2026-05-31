@@ -150,7 +150,32 @@ class GatewayServer:
                 "comm": comm,
                 "chain_length": int(chain_length),
                 "registered": prev_registered,
+                # Explicit P2P (node-to-node) address — distinct from the ephemeral gateway connection port
+                "p2p_ip": ip,
+                "p2p_port": int(port),
             }
+
+    def _best_node_addr(self) -> "tuple[str, int] | None":
+        """Return the (p2p_ip, p2p_port) of the node with the longest chain."""
+        with self.nodes_lock:
+            if not self.nodes:
+                return None
+            return max(self.nodes.keys(), key=lambda a: int(self.nodes[a].get("chain_length", 0)))
+
+    def _send_to_node(self, addr: "tuple[str, int]", msg: dict) -> bool:
+        with self.nodes_lock:
+            info = self.nodes.get(addr)
+        if not info:
+            return False
+        comm = info.get("comm")
+        if not comm:
+            return False
+        try:
+            comm.send_one_message(msg)
+            return True
+        except Exception as exc:
+            self.log_event(f"Node send failed {addr[0]}:{addr[1]}: {exc}", status="warning")
+            return False
 
     def _update_node_length(self, addr: tuple[str, int], chain_length: int):
         with self.nodes_lock:
@@ -367,8 +392,12 @@ class GatewayServer:
     def register_blockchain_node(self, request: dict, comm=None):
         ip, port = self._extract_sender_addr(comm) if comm else ("", 0)
         data = request.get("data") if isinstance(request.get("data"), dict) else {}
-        reg_ip = str(data.get("ip") or request.get("sender_ip") or ip)
-        reg_port = int(data.get("port") or request.get("sender_port") or port or 0)
+        # reg_ip:reg_port = the node's P2P server address (for node-to-node sync).
+        # Prefer node_server_ip/node_server_port set explicitly by Bnode, fall back to
+        # legacy "ip"/"port" fields, then to sender_ip/sender_port from the message, then
+        # to the raw TCP connection source address (ephemeral — last resort only).
+        reg_ip = str(data.get("node_server_ip") or data.get("ip") or request.get("sender_ip") or ip)
+        reg_port = int(data.get("node_server_port") or data.get("port") or request.get("sender_port") or port or 0)
         chain_length = int(data.get("chain_length") or request.get("chain_length") or 0)
 
         if comm:
@@ -384,6 +413,27 @@ class GatewayServer:
             node_id=f"{reg_ip}:{reg_port}",
             address=f"{reg_ip}:{reg_port}",
         )
+
+        # If this node's chain is shorter than the current best, tell it to sync immediately
+        if comm and reg_ip and reg_port:
+            best = self._best_node_addr()
+            if best and best != (reg_ip, reg_port):
+                with self.nodes_lock:
+                    best_len = int(self.nodes[best].get("chain_length", 0))
+                if chain_length < best_len:
+                    try:
+                        comm.send_one_message({
+                            "type": "GET_LEDGER",
+                            "publisher_ip": best[0],
+                            "publisher_port": best[1],
+                            "publisher_chain_length": best_len,
+                        })
+                        self.log_event(
+                            f"Told new node {reg_ip}:{reg_port} to sync from {best[0]}:{best[1]} (len={best_len})",
+                            status="info",
+                        )
+                    except Exception:
+                        pass
 
     def _check_tx_id(self, data: dict, label: str) -> bool:
         """Returns True if tx_id is a duplicate (should be rejected)."""
@@ -488,7 +538,13 @@ class GatewayServer:
             "sender_ip": request.get("sender_ip"),
             "sender_port": request.get("sender_port"),
         }
-        self._broadcast_to_nodes(outbound)
+        # Only ask the node with the longest chain — prevents duplicate BALANCE_IS
+        # responses from multiple nodes with stale/divergent balances.
+        best = self._best_node_addr()
+        if best:
+            self._send_to_node(best, outbound)
+        else:
+            self._broadcast_to_nodes(outbound)
 
     def notify_buy_success(self, request: dict, comm=None):
         _ = comm
