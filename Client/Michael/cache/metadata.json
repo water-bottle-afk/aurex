@@ -2,7 +2,7 @@
   "balance": 100.0,
   "de987ea86ed2333a": {
     "asset_id": "de987ea86ed2333a",
-    "version": 1,
+    "version": 3,
     "owner": "Yossi",
     "asset_name": "TIGER",
     "description": "tiger",

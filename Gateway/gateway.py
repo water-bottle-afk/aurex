@@ -90,6 +90,7 @@ class GatewayServer:
         }
 
     def start(self):
+        """Start all gateway services: UDP discovery, server relay, node listener."""
         threading.Thread(target=self.udp_service.run, daemon=True).start()
         threading.Thread(target=self.server_client.start, daemon=True).start()
         threading.Thread(target=self.node_listener.start, daemon=True).start()
@@ -156,7 +157,16 @@ class GatewayServer:
             }
 
     def _best_node_addr(self) -> "tuple[str, int] | None":
-        """Return the (p2p_ip, p2p_port) of the node with the longest chain."""
+        """
+        Return the P2P address of the node with the longest known chain.
+
+        Used when routing ``GET_BALANCE`` requests — only the most up-to-date
+        node is queried so clients receive a single, consistent balance value
+        rather than one response per node.
+
+        Returns:
+            (p2p_ip, p2p_port) tuple, or None if no nodes are connected.
+        """
         with self.nodes_lock:
             if not self.nodes:
                 return None
@@ -390,6 +400,22 @@ class GatewayServer:
                 )
 
     def register_blockchain_node(self, request: dict, comm=None):
+        """
+        Register a newly connected blockchain node in ``self.nodes``.
+
+        Extracts the node's P2P server address (``node_server_ip``,
+        ``node_server_port``) from the message data.  This address is stored as
+        the dict key and used in sync messages (GET_LEDGER / GET_BALANCE) so
+        other nodes know where to connect for peer-to-peer sync.
+
+        If the registering node's chain is shorter than the current best node's
+        chain, a ``GET_LEDGER`` message is immediately sent to it pointing at
+        the best node, triggering an automatic ledger sync.
+
+        Args:
+            request: REGISTER_BLOCKCHAIN_NODE message from the node.
+            comm:    The node's gateway communication object.
+        """
         ip, port = self._extract_sender_addr(comm) if comm else ("", 0)
         data = request.get("data") if isinstance(request.get("data"), dict) else {}
         # reg_ip:reg_port = the node's P2P server address (for node-to-node sync).
@@ -436,7 +462,24 @@ class GatewayServer:
                         pass
 
     def _check_tx_id(self, data: dict, label: str) -> bool:
-        """Returns True if tx_id is a duplicate (should be rejected)."""
+        """
+        Deduplicate incoming transactions by their client-generated TX_ID.
+
+        The first time a TX_ID is seen it is added to ``self.seen_tx_ids`` and
+        the function returns False (not a duplicate — proceed).  On subsequent
+        calls with the same TX_ID it returns True (duplicate — reject).
+
+        This prevents double-execution when a network retry or two near-
+        simultaneous users submit the same transaction.
+
+        Args:
+            data:  Message data dict that may contain a ``tx_id`` key.
+            label: Human-readable label used in the warning log entry.
+
+        Returns:
+            True  — duplicate, caller should reject the transaction.
+            False — first-time seen, caller should process it.
+        """
         tx_id = str(data.get("tx_id") or "")
         if not tx_id:
             return False
@@ -495,6 +538,21 @@ class GatewayServer:
         self._broadcast_to_nodes(request)
 
     def broadcast_tx_to_verify(self, request: dict, comm=None):
+        """
+        Validate a mined block from a node and broadcast it to all other nodes.
+
+        Steps:
+          1. Calls ``_validate_block`` — checks index, prev_hash, signature, PoW.
+          2. If valid: appends to ``self.gateway_ledger``, updates the publisher
+             node's chain-length, and broadcasts ``BROADCAST_TX_TO_VERIFY`` to
+             every other node so they can stop mining and add the block.
+          3. Calls ``_maybe_sync_lagging_nodes`` to push ``GET_LEDGER`` to any
+             nodes whose chain length is behind the publisher's.
+
+        Args:
+            request: Raw message from the publishing node.
+            comm:    The publisher node's communication object (for address extraction).
+        """
         sender_ip, sender_port = self._extract_sender_addr(comm) if comm else ("", 0)
         publisher_addr = (request.get("sender_ip") or sender_ip, int(request.get("sender_port") or sender_port or 0))
 
@@ -593,6 +651,20 @@ class GatewayServer:
         return True, block_hash
 
     def handle_asset_signed_in_blockchain(self, request: dict, comm=None):
+        """
+        Handle an ASSET_MINT block that a node successfully mined.
+
+        Validates the block's hash and PoW, appends it to the gateway ledger,
+        broadcasts ``BROADCAST_TX_TO_VERIFY`` to all other nodes so they stop
+        their parallel mining subprocesses, then tells the server to mark the
+        asset as ``FOR_SALE`` via ``FULLY_UPLOAD``.
+
+        Args:
+            request: Message from the mining node containing the mined block,
+                     asset_id, and owner username.
+            comm:    Sender's communication object (unused — sender info is
+                     read from request fields).
+        """
         sender_ip = str(request.get("sender_ip") or "")
         sender_port = int(request.get("sender_port") or 0)
         data = request.get("data") if isinstance(request.get("data"), dict) else {}

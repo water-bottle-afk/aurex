@@ -36,6 +36,85 @@ logger = Logger(__file__)
 # Keys are stored in Server/ServerKeys/ — always relative to this file.
 _SERVER_KEYS_DIR = str(Path(__file__).resolve().parent / "ServerKeys")
 
+_MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB hard limit
+
+try:
+    from PIL import Image as _PILImage
+    import io as _io
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PILImage = None
+    _io = None
+    _PIL_AVAILABLE = False
+    logger.warning("[security] Pillow not installed — image sanitization disabled. pip install Pillow")
+
+
+def sanitize_and_save_image(file_bytes: bytes, output_path: str, file_format: str) -> bool:
+    """
+    Sanitize an uploaded image by re-rendering it from raw pixel data only.
+
+    Security model:
+      • The file bytes are never executed — PIL decodes them into pixel arrays.
+      • ``Image.verify()`` checks structural integrity.
+      • A brand-new Image object is built from the pixel data, discarding ALL
+        metadata, EXIF, embedded scripts, and steganographic payloads.
+      • The clean image is saved to *output_path* from scratch, so the file on
+        disk can never contain the original binary payload.
+
+    If Pillow is not installed the function falls back to a magic-bytes check
+    only and writes the raw bytes directly (less secure but functional).
+
+    Args:
+        file_bytes:  Raw (decoded) image bytes received from the upload.
+        output_path: Absolute path where the sanitized file will be written.
+        file_format: Claimed format string ('jpg', 'jpeg', or 'png').
+
+    Returns:
+        True  — sanitization and save succeeded.
+        False — file is structurally invalid or appears malicious.
+    """
+    pil_fmt = "JPEG" if file_format.lower() in ("jpg", "jpeg") else "PNG"
+
+    if not _PIL_AVAILABLE:
+        # Fallback: magic-bytes only
+        sigs = {"jpg": b"\xFF\xD8\xFF", "jpeg": b"\xFF\xD8\xFF", "png": b"\x89PNG\r\n\x1a\n"}
+        if not file_bytes[:8].startswith(sigs.get(file_format.lower(), b"")):
+            logger.warning("[security] magic-byte check failed (Pillow unavailable)")
+            return False
+        try:
+            Path(output_path).write_bytes(file_bytes)
+            return True
+        except Exception as exc:
+            logger.error(f"[security] write failed: {exc}")
+            return False
+
+    try:
+        buf = _io.BytesIO(file_bytes)
+
+        # Structural integrity check (closes internal stream — re-open afterwards)
+        probe = _PILImage.open(buf)
+        probe.verify()
+
+        # Re-open after verify()
+        buf.seek(0)
+        raw_img = _PILImage.open(buf)
+
+        # JPEG does not support alpha or palette modes — normalise to RGB
+        if pil_fmt == "JPEG" and raw_img.mode not in ("RGB", "L"):
+            raw_img = raw_img.convert("RGB")
+
+        # Build a new image from pixels ONLY — strips every byte of metadata
+        clean = _PILImage.new(raw_img.mode, raw_img.size)
+        clean.putdata(list(raw_img.getdata()))
+
+        clean.save(output_path, format=pil_fmt)
+        logger.info(f"[security] Image sanitized and saved to {output_path}")
+        return True
+
+    except Exception as exc:
+        logger.warning(f"[SECURITY ALERT] Image sanitization failed — possible exploit attempt: {exc}")
+        return False
+
 
 @dataclass
 class UploadSession:
@@ -105,11 +184,22 @@ class ServerUpdated:
         }
 
     def start(self):
+        """Start the RSA server — blocks until the server stops."""
         self.client_listener.start()
 
     # ── Connection handling ───────────────────────────────────────────────────
 
     def handle_client(self, comm):
+        """
+        Entry point for every new TCP connection (client or gateway).
+
+        Starts async message reading, then loops dispatching messages to
+        ``dispatch()`` until the connection closes.  Cleans up online-user
+        and gateway-comm state on disconnect.
+
+        Args:
+            comm: Communication object for the connected peer.
+        """
         self.logger.info("Client connected")
         comm.start_async(default_encryption=True)
         while True:
@@ -137,6 +227,20 @@ class ServerUpdated:
                 comm.send_async(response)
 
     def dispatch(self, comm, msg):
+        """
+        Route an incoming message dict to the correct handler.
+
+        Looks up ``msg["type"]`` in ``self.handlers`` and calls the matching
+        method.  Returns an error dict for unknown or malformed messages.
+
+        Args:
+            comm: The sender's communication object.
+            msg:  Decoded message dictionary.
+
+        Returns:
+            A response dict to send back, or None if the handler already
+            sent its own response (e.g. chunked asset download).
+        """
         if not isinstance(msg, dict):
             return {"type": "ERROR", "message": "Invalid message format"}
         action = str(msg.get("type", "")).strip().upper()
@@ -161,14 +265,37 @@ class ServerUpdated:
         return {"type": "ERROR", "message": str(message)}
 
     def _gateway_required(self):
-        """Return an error dict if no gateway is connected, else None."""
+        """
+        Guard helper — returns an error response dict when the gateway is
+        offline, or None when it is connected.
+
+        Use this at the top of any handler that must forward work to the
+        blockchain network.  The returned dict can be returned directly from
+        the handler so the client sees a clear "Gateway Server isn't online."
+        error message.
+
+        Returns:
+            None if the gateway is connected and ready.
+            dict {"type": "ERROR", "message": "Gateway Server isn't online."} otherwise.
+        """
         with self.gateway_lock:
             if self.gateway_comm is None:
                 return self._fail("GATEWAY_OFFLINE", "Gateway Server isn't online.")
         return None
 
     def _notify_gateway(self, payload):
-        """Send payload to the single connected gateway. Returns False if offline."""
+        """
+        Forward a message dict to the single connected gateway.
+
+        Thread-safe.  Clears ``self.gateway_comm`` if the send fails so
+        subsequent ``_gateway_required()`` calls correctly report offline.
+
+        Args:
+            payload: Message dict to forward (will be encrypted in transit).
+
+        Returns:
+            True if the message was sent successfully, False otherwise.
+        """
         with self.gateway_lock:
             comm = self.gateway_comm
         if comm is None:
@@ -196,8 +323,38 @@ class ServerUpdated:
                 self.db.queue_notification(username, msg)
                 return
 
+    def _push_to_all_online(self, event: dict):
+        """
+        Broadcast a real-time event to every currently connected user.
+
+        Unlike ``_push_event``, this never queues the message for offline
+        users — it is intended for ephemeral UI updates (e.g. "remove this
+        asset from the marketplace grid").
+
+        Args:
+            event: Message dict to broadcast (must include a "type" key).
+        """
+        with self.online_users_lock:
+            targets = list(self.online_users.items())
+        for _username, comm in targets:
+            try:
+                comm.send_async(event)
+            except Exception:
+                pass
+
     def _push_event(self, username: str, event: dict):
-        """Push typed event to online user; queue as notification if offline."""
+        """
+        Send a typed protocol event to a specific user.
+
+        If the user is currently connected the event is sent immediately over
+        their live socket.  If they are offline the ``msg`` field (or a
+        key=value summary) is queued in the ORM notifications store so they
+        see it on their next login.
+
+        Args:
+            username: Target username (must be in the ORM users table).
+            event:    Dict with at least ``"type"`` and optionally ``"msg"``.
+        """
         username = str(username or "").strip()
         if not username or not event:
             return
@@ -362,6 +519,18 @@ class ServerUpdated:
         return self._success("CHUNK_RECEIVED")
 
     def handle_upload_finish(self, comm, msg):
+        """
+        Finalise an in-progress upload: decode chunks, enforce limits,
+        sanitize the image via PIL, and register the asset in the ORM.
+
+        Security steps applied (in order):
+          1. Base-64 decode — rejects malformed payloads.
+          2. 5 MB hard limit — rejects oversized files before touching disk.
+          3. PIL sanitize_and_save_image — re-renders from pixels only,
+             stripping metadata and any embedded payload.
+
+        On success returns ``UPLOAD_SUCCESS`` with the new ``asset_id``.
+        """
         _ = comm
         upload_id = str(self._param(msg, "upload_id", 0, "")).strip()
         if not upload_id:
@@ -375,14 +544,26 @@ class ServerUpdated:
             raw = base64.b64decode(content_b64.encode("utf-8"), validate=True)
         except Exception:
             return self._fail("UPLOAD_FAILED", "Invalid upload payload")
+
+        # ── 5 MB hard limit ───────────────────────────────────────────────────
+        if len(raw) > _MAX_UPLOAD_BYTES:
+            return self._fail(
+                "UPLOAD_FAILED",
+                f"File exceeds 5 MB limit ({len(raw) / 1024 / 1024:.1f} MB received)",
+            )
+
+        # ── PIL sanitization — re-render from pixels, discard all metadata ───
         asset_hash = hashlib.sha256(raw).hexdigest()
         uploads_dir = Path(__file__).resolve().parent.parent / "DB" / "uploads" / session.username
         uploads_dir.mkdir(parents=True, exist_ok=True)
         file_path = uploads_dir / f"{asset_hash}.{session.file_type}"
-        try:
-            file_path.write_bytes(raw)
-        except Exception as exc:
-            return self._fail("UPLOAD_FAILED", f"Failed writing upload file: {exc}")
+
+        if not sanitize_and_save_image(raw, str(file_path), session.file_type):
+            return self._fail(
+                "UPLOAD_FAILED",
+                f"File is invalid or contains unsupported content — "
+                f"only clean PNG/JPEG images are accepted",
+            )
         user = self.db.get_user(session.username)
         public_key = getattr(user, "public_key", "") if user else ""
         item = MarketplaceItem(
@@ -437,6 +618,16 @@ class ServerUpdated:
         return self._success("GATEWAY_REGISTERED")
 
     def handle_buy_asset(self, comm, msg):
+        """
+        Forward a signed buy request from the client to the gateway.
+
+        Validates that the buyer, public key and signature are present, then
+        forwards a ``TX_REQUEST_BUY`` message to the gateway which broadcasts
+        it to all blockchain nodes for mining.  The actual transfer happens
+        asynchronously when a node sends ``BUY_SUCCESS``.
+
+        Returns ``BUY_SUBMITTED`` immediately so the UI stays responsive.
+        """
         _ = comm
         err = self._gateway_required()
         if err:
@@ -451,6 +642,19 @@ class ServerUpdated:
         return self._success("BUY_SUBMITTED")
 
     def handle_buy_success(self, comm, msg):
+        """
+        Process a confirmed purchase from the gateway/node.
+
+        Resolves buyer and seller usernames from their public keys, transfers
+        the asset in the ORM, and pushes real-time events:
+          • ``BUY_SUCCESS``  → buyer
+          • ``ASSET_SOLD``   → seller
+          • ``ASSET_REMOVED``→ all online users (removes card from marketplace)
+
+        If ``transfer_asset`` returns False the asset was already transferred
+        (race condition — two nodes mined the same tx).  In that case a
+        ``BUY_FAILED`` is pushed to the late buyer and the call returns early.
+        """
         _ = comm
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         buyer_pk = str(data.get("sender") or data.get("public_key") or "").strip()
@@ -470,10 +674,17 @@ class ServerUpdated:
             if transfer_ok:
                 self.logger.info(f"[buy_success] asset {asset_id} transferred {seller_name} -> {buyer_name}")
             else:
-                self.logger.info(f"[buy_success] transfer skipped for {asset_id} — already transferred (duplicate BUY_SUCCESS)")
-                return self._success("BUY_ACKNOWLEDGED")  # idempotent — already handled
+                self.logger.info(f"[buy_success] transfer failed for {asset_id} — already transferred (race condition or duplicate)")
+                # Notify the late buyer their purchase didn't go through
+                if buyer_name:
+                    self._push_event(buyer_name, {
+                        "type": "BUY_FAILED",
+                        "asset_id": asset_id,
+                        "message": "This asset was just purchased by someone else",
+                    })
+                return self._success("BUY_ACKNOWLEDGED")
 
-        # Only push notifications on the FIRST successful transfer
+        # First successful transfer — push notifications and remove from all UIs
         if transfer_ok and buyer_name:
             self._push_event(buyer_name, {
                 "type": "BUY_SUCCESS",
@@ -492,6 +703,10 @@ class ServerUpdated:
                 "price": price,
                 "msg": f"Your asset '{asset_label}' was sold to {buyer_name} for {price} AUR",
             })
+
+        if transfer_ok and asset_id:
+            # Tell every browsing user to remove this asset from their marketplace view
+            self._push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
 
         return self._success("BUY_ACKNOWLEDGED")
 
@@ -562,6 +777,21 @@ class ServerUpdated:
         return self._success("BALANCE_REQUESTED")
 
     def handle_move_to_marketplace(self, comm, msg):
+        """
+        Initiate blockchain mining to list an owned asset on the marketplace.
+
+        Looks up the asset in the ORM, retrieves the owner's public key and
+        computes the SHA-256 file hash, then sends an ``UPLOAD_ASSET`` message
+        to the gateway.  The asset status is updated to ``FOR_SALE`` only
+        after a node successfully mines the block and the gateway confirms it
+        via ``FULLY_UPLOAD``.
+
+        Args (from msg):
+            username: Owner's username.
+            asset_id: Asset to list.
+            tx_id:    Client-generated UUID — used by the gateway to deduplicate.
+            signature: Owner's private-key signature of {asset_id, owner, tx_id}.
+        """
         """Client requests asset be listed on marketplace via blockchain mining."""
         _ = comm
         username = str(self._param(msg, "username", 0, "")).strip()
@@ -679,6 +909,8 @@ class ServerUpdated:
                     "asset_id": asset_id,
                     "msg": f"'{asset_name}' has been unlisted from the marketplace",
                 })
+            # Remove from every user's marketplace view
+            self._push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
         else:
             self.logger.warning(f"[asset_unlisted] update_asset_status failed for {asset_id}")
         return self._success("UNLIST_ACKNOWLEDGED")

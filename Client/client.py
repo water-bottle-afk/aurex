@@ -280,6 +280,7 @@ class ServerClient:
         self.asset_sold_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_removed_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_unlisted_queue: "queue.Queue[str]" = queue.Queue()
+        self.asset_listed_queue: "queue.Queue[str]" = queue.Queue()   # PENDING → FOR_SALE
         self.balance_queue: "queue.Queue[float]" = queue.Queue()
         self.bought_asset_queue: "queue.Queue[str]" = queue.Queue()
 
@@ -340,6 +341,9 @@ class ServerClient:
                     self.balance_queue.put(balance)
                 elif msg_type in ("FULLY_UPLOADED", "ASSET_LISTED"):
                     self.notification_queue.put(str(msg.get("msg", f"Asset {msg.get('asset_id', '')} is now live on the marketplace")))
+                    _aid = str(msg.get("asset_id", ""))
+                    if _aid:
+                        self.asset_listed_queue.put(_aid)
                 elif msg_type == "ASSET_SOLD":
                     asset_id = str(msg.get("asset_id", ""))
                     text = str(msg.get("msg") or f"Your asset {asset_id} was sold")
@@ -513,6 +517,7 @@ class ClientApp:
         self._sold_asset_ids: set[str] = set()
         self._removed_asset_ids: set[str] = set()
         self._unlisted_asset_ids: set[str] = set()
+        self._listed_asset_ids: set[str] = set()   # assets that moved from PENDING → FOR_SALE
         # Refs to live header controls — updated by background monitors
         self._balance_text: ft.Text | None = None
         self._notification_badge: ft.Container | None = None
@@ -521,13 +526,38 @@ class ClientApp:
         self.page.go("/login")
 
     def notify(self, message, error=False):
-        """Show a snackbar (and dialog for errors). Safe to call from any thread."""
+        """
+        Show a snackbar notification (and a blocking dialog for errors).
+        Safe to call from any thread — schedules on Flet's event loop.
+
+        Error messages are also persisted in the notifications list so the user
+        can review them later from the Notifications page, and the badge counter
+        is incremented so the user knows something happened.
+
+        Args:
+            message: Text to display.
+            error:   True → red dialog + snackbar + notification entry.
+                     False → green snackbar only.
+        """
         _msg = str(message)
         _error = error
 
         async def _show():
             try:
                 if _error:
+                    # Persist in the notifications list so it survives navigation
+                    self.state.notifications.append(f"⚠ {_msg}")
+                    self.state.unseen_notifications += 1
+                    _badge = self._notification_badge
+                    if _badge:
+                        _badge.visible = True
+                        if _badge.content is not None:
+                            _badge.content.value = str(min(self.state.unseen_notifications, 99))
+                        try:
+                            _badge.update()
+                        except Exception:
+                            pass
+                    # Also show a blocking dialog
                     dlg = ft.AlertDialog(
                         modal=True,
                         title=ft.Text("Error", color="#F6D2D2"),
@@ -553,7 +583,6 @@ class ClientApp:
         try:
             self.page.run_task(_show)
         except Exception:
-            # Fallback for very early calls before the event loop is ready
             try:
                 self.page.snack_bar = ft.SnackBar(content=ft.Text(_msg),
                     bgcolor="#7D2032" if _error else "#136F3A")
@@ -623,6 +652,12 @@ class ClientApp:
             except queue.Empty:
                 break
             self._unlisted_asset_ids.add(asset_id)
+        while True:
+            try:
+                asset_id = self.client.asset_listed_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._listed_asset_ids.add(asset_id)
 
     def _drain_balance_events(self):
         """Drain balance queue, update state, update UI text if visible."""
@@ -802,6 +837,7 @@ class ClientApp:
         self._sold_asset_ids = set()
         self._removed_asset_ids = set()
         self._unlisted_asset_ids = set()
+        self._listed_asset_ids = set()
         self._balance_text = None
         self._notification_badge = None
 
@@ -819,6 +855,7 @@ class ClientApp:
         self._sold_asset_ids = set()
         self._removed_asset_ids = set()
         self._unlisted_asset_ids = set()
+        self._listed_asset_ids = set()
         self._balance_text = None
         self._notification_badge = None
 

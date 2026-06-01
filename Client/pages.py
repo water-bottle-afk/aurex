@@ -133,8 +133,8 @@ def _main_shell(app, route, title, body):
                 ft.Container(
                     bgcolor="#0A0C12", border=ft.border.all(1, BORDER_DIM), border_radius=8,
                     padding=ft.padding.symmetric(horizontal=10, vertical=5),
-                    content=ft.Text(f"Hello, {_username}", color=GOLD_SOFT, size=11,
-                        weight=ft.FontWeight.W_500),
+                    content=ft.Text(f"Hello, {_username}", color=GOLD_SOFT, size=17,
+                        weight=ft.FontWeight.W_600),
                 ),
             ]),
             ft.Row(spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
@@ -271,26 +271,54 @@ def build_signup_view(app):
 
 
 def build_forgot_view(app):
-    email = _input("Email address", icon=ft.Icons.EMAIL_OUTLINED)
-    code = _input("Verification code", icon=ft.Icons.VERIFIED_OUTLINED)
+    # ── Fields ───────────────────────────────────────────────────────────────
+    email    = _input("Email address", icon=ft.Icons.EMAIL_OUTLINED)
+    code     = _input("Verification code", icon=ft.Icons.VERIFIED_OUTLINED)
     new_pass = _input("New password", True, icon=ft.Icons.LOCK_RESET_OUTLINED)
-    err_label = ft.Text("", color=ERROR, size=12, visible=False, text_align=ft.TextAlign.CENTER)
+
+    err_label = ft.Text("", color=ERROR,   size=12, visible=False, text_align=ft.TextAlign.CENTER)
     ok_label  = ft.Text("", color=SUCCESS, size=12, visible=False, text_align=ft.TextAlign.CENTER)
 
     def _show_err(msg):
-        ok_label.visible = False
-        err_label.value = msg; err_label.visible = True
+        ok_label.visible = False; err_label.value = msg; err_label.visible = True
         app.page.update()
 
     def _show_ok(msg):
-        err_label.visible = False
-        ok_label.value = msg; ok_label.visible = True
+        err_label.visible = False; ok_label.value = msg; ok_label.visible = True
         app.page.update()
 
     def _clear_msg():
         err_label.visible = False; ok_label.visible = False
 
-    def do_send(_):
+    # ── Stage 2: code section (locked until code is sent) ────────────────────
+    code_section = ft.Container(
+        visible=False,
+        content=ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+            ft.Container(height=1, bgcolor=BORDER_DIM),
+            ft.Text("Step 2 — Enter the code from your email", color=MUTED, size=11),
+            code,
+            ft.FilledButton("Verify Code", bgcolor="#0E1C0E", color=SUCCESS,
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9),
+                    side=ft.BorderSide(1, "#2A4A2A")),
+                on_click=lambda _: do_verify()),
+        ]),
+    )
+
+    # ── Stage 3: password section (locked until code verified) ───────────────
+    password_section = ft.Container(
+        visible=False,
+        content=ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH, controls=[
+            ft.Container(height=1, bgcolor=BORDER_DIM),
+            ft.Text("Step 3 — Set your new password", color=MUTED, size=11),
+            new_pass,
+            ft.FilledButton("Update Password", height=44, bgcolor=GOLD, color="#130E00",
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12)),
+                on_click=lambda _: do_reset()),
+        ]),
+    )
+
+    # ── Handlers ─────────────────────────────────────────────────────────────
+    def do_send(_=None):
         _clear_msg()
         e = (email.value or "").strip()
         if not e or "@" not in e:
@@ -299,47 +327,38 @@ def build_forgot_view(app):
         try:
             app.send_code(e)
             _show_ok("Code sent — check your email")
+            code_section.visible = True
+            code.error_text = None
+            app.page.update()
         except Exception as ex:
             _show_err(str(ex))
 
-    def do_verify(_):
+    def do_verify(_=None):
         _clear_msg()
         e = (email.value or "").strip()
         c = (code.value or "").strip()
-        if not e:
-            email.error_text = "Enter your email"; app.page.update(); return
         if not c:
             code.error_text = "Enter the verification code"; app.page.update(); return
-        email.error_text = None; code.error_text = None
+        code.error_text = None
         try:
             app.verify_code(e, c)
             _show_ok("Code verified — set your new password below")
+            password_section.visible = True
+            new_pass.error_text = None
+            app.page.update()
         except Exception as ex:
-            code.error_text = str(ex)
-            _show_err(str(ex))
+            code.error_text = str(ex); _show_err(str(ex))
 
-    def do_reset(_):
+    def do_reset(_=None):
         _clear_msg()
         e = (email.value or "").strip()
         c = (code.value or "").strip()
         p = new_pass.value or ""
-        valid = True
-        if not e:
-            email.error_text = "Required"; valid = False
-        else:
-            email.error_text = None
-        if not c:
-            code.error_text = "Required"; valid = False
-        else:
-            code.error_text = None
         if not p:
-            new_pass.error_text = "Required"; valid = False
-        elif len(p) < 6:
-            new_pass.error_text = "Minimum 6 characters"; valid = False
-        else:
-            new_pass.error_text = None
-        if not valid:
-            app.page.update(); return
+            new_pass.error_text = "Required"; app.page.update(); return
+        if len(p) < 6:
+            new_pass.error_text = "Minimum 6 characters"; app.page.update(); return
+        new_pass.error_text = None
         try:
             app.update_password(e, p, c)
             _show_ok("Password updated! Redirecting...")
@@ -347,24 +366,24 @@ def build_forgot_view(app):
         except Exception as ex:
             _show_err(str(ex))
 
+    # ── Card ─────────────────────────────────────────────────────────────────
     card = ft.Container(width=480, padding=ft.padding.symmetric(horizontal=36, vertical=28),
         border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=_GLOW,
         content=ft.Column(spacing=14, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Row(controls=[ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=MUTED, icon_size=15,
                 on_click=lambda _: app.page.go("/login"))]),
             _logo_block("RESET ACCESS"),
+            # Step 1 — always visible
+            ft.Text("Step 1 — Enter your email", color=MUTED, size=11),
             email,
-            ft.Row(spacing=8, controls=[
-                ft.FilledButton("Send Code", bgcolor="#1C1400", color=GOLD_SOFT, on_click=do_send,
-                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), side=ft.BorderSide(1, BORDER))),
-            ]),
-            code,
-            ft.FilledButton("Verify Code", bgcolor="#0E1C0E", color=SUCCESS, on_click=do_verify,
-                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), side=ft.BorderSide(1, "#2A4A2A"))),
-            new_pass,
+            ft.FilledButton("Send Code", bgcolor="#1C1400", color=GOLD_SOFT,
+                width=408, height=42,
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), side=ft.BorderSide(1, BORDER)),
+                on_click=do_send),
             err_label, ok_label,
-            ft.FilledButton("Update Password", width=408, height=44, bgcolor=GOLD, color="#130E00",
-                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12)), on_click=do_reset),
+            # Steps 2 & 3 — revealed progressively
+            code_section,
+            password_section,
         ]))
     return _auth_shell("/forgot", card)
 
@@ -390,11 +409,16 @@ def _open_zoomed_card(app, item, context="marketplace"):
     s_label   = _STATUS_LABEL.get(item.asset_status, item.asset_status)
 
     def _close(_=None):
-        try:
-            app.page.dialog.open = False
-            app.page.update()
-        except Exception:
-            pass
+        async def _do_close():
+            try:
+                if hasattr(app.page, "close") and app.page.dialog:
+                    app.page.close(app.page.dialog)
+                else:
+                    app.page.dialog.open = False
+                    app.page.update()
+            except Exception:
+                pass
+        app.page.run_task(_do_close)
 
     # ── Action buttons (same logic as the small card) ────────────────────────
     def do_buy(_):
@@ -535,7 +559,7 @@ def _open_zoomed_card(app, item, context="marketplace"):
         ]),
     )
 
-    # ── Compose dialog ───────────────────────────────────────────────────────
+    # ── Compose and open dialog ───────────────────────────────────────────────
     dlg = ft.AlertDialog(
         modal=False,
         bgcolor="#0D0F14",
@@ -546,9 +570,18 @@ def _open_zoomed_card(app, item, context="marketplace"):
             content=ft.Column(spacing=0, tight=True, controls=[img_section, details]),
         ),
     )
-    app.page.dialog = dlg
-    dlg.open = True
-    app.page.update()
+
+    # Schedule the dialog opening on Flet's event loop so it always renders,
+    # regardless of which thread triggered the click.
+    async def _do_open():
+        try:
+            app.page.open(dlg)
+        except AttributeError:
+            app.page.dialog = dlg
+            dlg.open = True
+            app.page.update()
+
+    app.page.run_task(_do_open)
 
 
 def _asset_card(app, item, context="marketplace"):
@@ -613,23 +646,43 @@ def _asset_card(app, item, context="marketplace"):
         bgcolor="#08090E",
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         alignment=ft.Alignment(0, 0),
-        content=ft.Icon(ft.Icons.IMAGE_OUTLINED, color="#1E2030", size=40),
+        on_click=lambda _: _open_zoomed_card(app, item, context),
+        tooltip="Click to enlarge",
+        content=ft.Stack(controls=[
+            ft.Container(
+                expand=True, height=160,
+                alignment=ft.Alignment(0, 0),
+                content=ft.Icon(ft.Icons.IMAGE_OUTLINED, color="#1E2030", size=40),
+            ),
+            # Subtle magnifier hint
+            ft.Container(
+                content=ft.Icon(ft.Icons.ZOOM_IN_ROUNDED, color="#44FFFFFF", size=16),
+                bottom=6, right=6,
+            ),
+        ]),
     )
 
     def _load_image():
         try:
             path = app.image_cache.get_path(item.asset_id)
             if path and path.exists():
-                img_container.content = ft.Image(
-                    src=str(path),
-                    fit=ft.BoxFit.COVER,
-                    expand=True,
-                    height=160,
-                )
-                try:
-                    img_container.update()
-                except Exception:
-                    pass
+                img_node = ft.Image(src=str(path), fit=ft.BoxFit.COVER, expand=True, height=160)
+                # Keep zoom hint in a Stack over the loaded image
+                img_container.content = ft.Stack(controls=[
+                    ft.Container(expand=True, height=160,
+                        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                        content=img_node),
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.ZOOM_IN_ROUNDED, color="#44FFFFFF", size=16),
+                        bottom=6, right=6,
+                    ),
+                ])
+                async def _upd():
+                    try:
+                        img_container.update()
+                    except Exception:
+                        pass
+                app.page.run_task(_upd)
         except Exception as exc:
             _logger.warning(f"Card image load error {item.asset_id}: {exc}")
 
@@ -689,13 +742,9 @@ def _asset_card(app, item, context="marketplace"):
             ft.Row(spacing=6, controls=action_controls),
         ])
 
-    def on_card_click(e):
-        # Ignore if a button inside the card was clicked (they handle their own events)
-        _open_zoomed_card(app, item, context)
-
     return ft.Container(
         bgcolor=CARD_SOFT, border_radius=14, border=ft.border.all(1, BORDER_DIM),
-        padding=0, on_hover=on_hover, on_click=on_card_click,
+        padding=0, on_hover=on_hover,
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         content=ft.Column(spacing=0, controls=[
             img_container,
@@ -914,6 +963,9 @@ def build_upload_view(app):
             if size == 0:
                 _set_file_hint_error("File is empty (0 bytes) — choose a valid image")
                 return
+            if size > 5 * 1024 * 1024:
+                _set_file_hint_error(f"File is too large ({size / 1024 / 1024:.1f} MB). Maximum is 5 MB.")
+                return
         except Exception:
             _set_file_hint_error("Cannot read the selected file")
             return
@@ -944,6 +996,9 @@ def build_upload_view(app):
             file_size = Path(picked["path"]).stat().st_size
             if file_size == 0:
                 _set_file_hint_error("File is empty (0 bytes) — choose a valid image")
+                return
+            if file_size > 5 * 1024 * 1024:
+                _set_file_hint_error(f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum is 5 MB.")
                 return
         except Exception:
             _set_file_hint_error("Cannot read the selected file")
@@ -1046,7 +1101,10 @@ def build_upload_view(app):
             upload_err,
             upload_btn,
         ]))
-    return _main_shell(app, "/upload", "Mint a new asset", body)
+    return _main_shell(app, "/upload", "Mint a new asset",
+        ft.Row(alignment=ft.MainAxisAlignment.CENTER,
+               vertical_alignment=ft.CrossAxisAlignment.START,
+               controls=[body]))
 
 
 def build_settings_view(app):
@@ -1250,7 +1308,10 @@ def build_settings_view(app):
             ft.Container(height=1, bgcolor=BORDER_DIM, margin=ft.margin.symmetric(vertical=4)),
             danger_section,
         ]))
-    return _main_shell(app, "/settings", "Identity & settings", body)
+    return _main_shell(app, "/settings", "Identity & settings",
+        ft.Row(alignment=ft.MainAxisAlignment.CENTER,
+               vertical_alignment=ft.CrossAxisAlignment.START,
+               controls=[body]))
 
 
 def build_notifications_view(app):
@@ -1276,8 +1337,13 @@ def build_notifications_view(app):
 
 
 def build_my_assets_view(app):
+    app._unlisted_asset_ids.clear()
+    app._removed_asset_ids.clear()
+    app._listed_asset_ids.clear()
+
     grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
     status_text = ft.Text("Loading...", color=MUTED, size=12)
+    card_map: dict[str, ft.Container] = {}
     _active = [True]
 
     def _load():
@@ -1311,11 +1377,12 @@ def build_my_assets_view(app):
             version = entry.get("version", 1) if isinstance(entry, dict) else 1
             if not asset_id:
                 continue
-            item = app.load_asset_by_id(asset_id, version)  # network I/O in background thread
+            item = app.load_asset_by_id(asset_id, version)
             if not item:
                 continue
             card = _asset_card(app, item, context="my_assets")
             wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=card)
+            card_map[asset_id] = wrapper
             loaded += 1
             _n, _total = loaded, len(id_entries)
             async def _add(w=wrapper, n=_n, total=_total):
@@ -1332,10 +1399,37 @@ def build_my_assets_view(app):
             app.page.update()
         app.page.run_task(_done)
 
+    def _monitor():
+        """Remove cards for assets that moved away (deleted, or PENDING→FOR_SALE)."""
+        while _active[0]:
+            time.sleep(2)
+            if not _active[0]:
+                return
+            app._drain_asset_events()
+            # Assets that went FOR_SALE leave my_assets; deleted/removed too
+            gone = list(
+                app._listed_asset_ids    # PENDING → FOR_SALE: no longer in my_assets
+                | app._removed_asset_ids
+                | app._sold_asset_ids
+            )
+            changed = False
+            for asset_id in gone:
+                wrapper = card_map.pop(asset_id, None)
+                if wrapper and wrapper in grid.controls:
+                    grid.controls.remove(wrapper)
+                    changed = True
+            if changed:
+                _n = len(card_map)
+                async def _upd(n=_n):
+                    status_text.value = f"{n} asset{'s' if n != 1 else ''} owned"
+                    app.page.update()
+                app.page.run_task(_upd)
+
     def do_refresh(_):
         _active[0] = False
         async def _clear():
             grid.controls.clear()
+            card_map.clear()
             app.page.update()
         app.page.run_task(_clear)
         try:
@@ -1345,6 +1439,7 @@ def build_my_assets_view(app):
         app.page.go("/my_assets")
 
     threading.Thread(target=_load, daemon=True).start()
+    threading.Thread(target=_monitor, daemon=True).start()
 
     body = ft.Column(spacing=14, controls=[
         ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
