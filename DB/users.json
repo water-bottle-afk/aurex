@@ -22,7 +22,7 @@
     "email": "nadavthecool1@gmail.com",
     "salt": "4589205",
     "password_hash": "64252a31f12994352fb46a3d8d637907ed54c4db4a243dd36e08128002e179d0",
-    "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c",
+    "public_key": "04ae42b96e3b2da7d333e4ac12f6fb8a7deb996ed35b3842b315410003c9b7d143a59bb397284ef3a46e641674f4307dbff8abc96b26f4fdf43761f9c1e5b1c47b",
     "verification_code": null,
     "reset_time": null
   },
@@ -32,7 +32,7 @@
     "salt": "9556483",
     "password_hash": "af2aee066127f1355226ea2a509674c7fbd87b1efd7aa3d3c7ff271d3a3b0a06",
     "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "verification_code": "353101",
-    "reset_time": "2026-06-01T14:12:04.500812"
+    "verification_code": "879890",
+    "reset_time": "2026-06-07T12:58:03.758271"
   }
 }

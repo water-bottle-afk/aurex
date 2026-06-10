@@ -1,6 +1,16 @@
-"""Client-side Aurex wallet management (ECDSA secp256k1, hex keys, local-only private key)."""
+"""
+wallet_manager.py — client-side wallet handling for Aurex.
 
+Keys are ECDSA secp256k1, stored as plain hex strings in a JSON file on disk.
+The private key never leaves the client machine — the server only ever sees the
+public key and a signature, never the private key itself.
+
+WalletData  holds the key pair and can sign / verify payloads.
+WalletManager  handles loading, saving, and generating wallets on disk.
+"""
 from __future__ import annotations
+
+__author__ = "Nadav"
 
 import json
 from dataclasses import dataclass
@@ -12,16 +22,16 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 
-def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+def canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def _private_key_from_hex(private_key_hex: str) -> ec.EllipticCurvePrivateKey:
+def private_key_from_hex(private_key_hex: str) -> ec.EllipticCurvePrivateKey:
     value = int(private_key_hex, 16)
     return ec.derive_private_key(value, ec.SECP256K1())
 
 
-def _public_key_hex_from_private(private_key: ec.EllipticCurvePrivateKey) -> str:
+def public_key_hex_from_private(private_key: ec.EllipticCurvePrivateKey) -> str:
     public_key = private_key.public_key()
     raw = public_key.public_bytes(
         encoding=serialization.Encoding.X962,
@@ -30,7 +40,7 @@ def _public_key_hex_from_private(private_key: ec.EllipticCurvePrivateKey) -> str
     return raw.hex()
 
 
-def _public_key_from_hex(public_key_hex: str) -> ec.EllipticCurvePublicKey:
+def public_key_from_hex(public_key_hex: str) -> ec.EllipticCurvePublicKey:
     return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), bytes.fromhex(public_key_hex))
 
 
@@ -61,8 +71,8 @@ class WalletData:
         if not self.public_key or not self.private_key:
             return False, "wallet keys are missing"
         try:
-            private_key = _private_key_from_hex(self.private_key)
-            expected_public = _public_key_hex_from_private(private_key)
+            private_key = private_key_from_hex(self.private_key)
+            expected_public = public_key_hex_from_private(private_key)
         except Exception:
             return False, "invalid private key format"
         if expected_public.lower() != self.public_key.lower():
@@ -70,14 +80,14 @@ class WalletData:
         return True, "ok"
 
     def sign_payload(self, payload: dict[str, Any]) -> str:
-        private_key = _private_key_from_hex(self.private_key)
-        signature = private_key.sign(_canonical_json_bytes(payload), ec.ECDSA(hashes.SHA256()))
+        private_key = private_key_from_hex(self.private_key)
+        signature = private_key.sign(canonical_json_bytes(payload), ec.ECDSA(hashes.SHA256()))
         return signature.hex()
 
     def verify_signature(self, payload: dict[str, Any], signature_hex: str) -> bool:
         try:
-            public_key = _public_key_from_hex(self.public_key)
-            public_key.verify(bytes.fromhex(signature_hex), _canonical_json_bytes(payload), ec.ECDSA(hashes.SHA256()))
+            public_key = public_key_from_hex(self.public_key)
+            public_key.verify(bytes.fromhex(signature_hex), canonical_json_bytes(payload), ec.ECDSA(hashes.SHA256()))
             return True
         except (InvalidSignature, ValueError):
             return False
@@ -93,14 +103,15 @@ class WalletManager:
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir / "wallet.json"
 
-    def _legacy_wallet_path(self, username: str) -> Path:
+    def legacy_wallet_path(self, username: str) -> Path:
         return self.base_dir / "wallets" / username / "wallet.json"
 
     def generate_wallet(self, username: str) -> WalletData:
+        """Generate a fresh secp256k1 key pair, save it to disk, and return it."""
         private_key = ec.generate_private_key(ec.SECP256K1())
-        private_numbers = private_key.private_numbers().private_value
-        private_hex = private_numbers.to_bytes(32, "big").hex()
-        public_hex = _public_key_hex_from_private(private_key)
+        # extract the raw 32-byte private scalar as hex
+        private_hex = private_key.private_numbers().private_value.to_bytes(32, "big").hex()
+        public_hex  = public_key_hex_from_private(private_key)
         wallet = WalletData(username=username, public_key=public_hex, private_key=private_hex)
         self.save_wallet(wallet, self.wallet_path_for_user(username))
         return wallet
@@ -126,7 +137,7 @@ class WalletManager:
     def load_wallet_for_user(self, username: str) -> WalletData | None:
         path = self.wallet_path_for_user(username)
         if not path.exists():
-            legacy = self._legacy_wallet_path(username)
+            legacy = self.legacy_wallet_path(username)
             if legacy.exists():
                 wallet = self.load_wallet_from_path(legacy)
                 self.save_wallet(wallet, path)

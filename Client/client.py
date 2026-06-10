@@ -1,6 +1,20 @@
-"""Aurex desktop client heart: protocol + routing + app state."""
-
 from __future__ import annotations
+
+"""
+client.py — the Aurex desktop client.
+
+ClientApp  is the main Flet controller: it owns all app state, talks to the
+server through Client class, and drives page navigation.
+
+Client class  wraps the raw RSA+AES connection and routes push events (balance
+updates, notifications, asset sold/unlisted) into separate queues so the UI can
+poll them at its own pace without blocking on the socket.
+
+ImageCache  stores downloaded asset images on disk per user so we don't fetch
+the same file twice.  It also persists the wallet balance between sessions.
+"""
+__author__ = "Nadav"
+
 
 import base64
 import json
@@ -21,7 +35,7 @@ import flet as ft
 # Adds the root folder to enable imports from SharedResources
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from SharedResources.classes import RSA_Client
+from SharedResources.classes import RSA_Client, MarketplaceItem
 from SharedResources.config import SERVER_IP, SERVER_PORT
 from SharedResources.logging import Logger
 logger = Logger(__file__)
@@ -69,21 +83,6 @@ _PUSH_EVENTS = frozenset({
     "ASSET_UNLISTED",
 })
 
-
-@dataclass
-class MarketItem:
-    """UI-friendly marketplace item."""
-
-    asset_id: str
-    owner: str
-    title: str
-    description: str
-    file_type: str
-    price: float
-    created_at: str
-    public_key_hex: str
-    asset_status: str = "PENDING"
-    version: int = 1
 
 
 class ImageCache:
@@ -167,7 +166,6 @@ class ImageCache:
         self._ram = {}
         self._save_metadata()
 
-    # ── Balance ────────────────────────────────────────────────────────────────
 
     def get_balance(self) -> float:
         return float(self._metadata.get("balance", 0.0))
@@ -177,9 +175,9 @@ class ImageCache:
             self._metadata["balance"] = float(amount)
             self._save_metadata()
 
-    # ── Assets ─────────────────────────────────────────────────────────────────
 
     def get_raw(self, asset_id: str) -> bytes | None:
+        """Return raw bytes for an asset if cached"""
         with self._lock:
             if asset_id in self._ram:
                 return self._ram[asset_id]
@@ -254,7 +252,7 @@ class ClientState:
     email: str | None = None
     is_authenticated: bool = False
     verified_reset_user: str | None = None
-    market_items: list[MarketItem] = field(default_factory=list)
+    market_items: list[MarketplaceItem] = field(default_factory=list)
     notifications: list[str] = field(default_factory=list)
     unseen_notifications: int = 0
     wallet_loaded: bool = False
@@ -264,8 +262,8 @@ class ClientState:
     balance: float = 0.0
 
 
-class ServerClient:
-    """Sync dict-protocol wrapper over RSA_Client/Communication."""
+class Client:
+    """client class wrapper over RSA_Client/Communication."""
 
     def __init__(self, host=SERVER_IP, port=SERVER_PORT):
         self.host = host
@@ -289,7 +287,14 @@ class ServerClient:
             if self._comm is not None:
                 return
             self._transport = RSA_Client(self.host, self.port, name="ClientUI", peer_label="Server")
-            self._transport.sock.connect((self.host, self.port))
+            try:
+                self._transport.sock.connect((self.host, self.port))
+            except ConnectionRefusedError:
+                self._transport = None
+                raise RuntimeError("Cannot connect to server. Is the server running?")
+            except OSError as _e:
+                self._transport = None
+                raise RuntimeError(f"Cannot connect to server: {_e}")
             self._transport.contact_with_RSA()
             self._comm = self._transport.communication
             self._comm.start_async(default_encryption=True)
@@ -502,7 +507,7 @@ class ClientApp:
 
     def __init__(self, page):
         self.page = page
-        self.client = ServerClient()
+        self.client = Client()
         self.wallet_manager = WalletManager()
         self.state = ClientState()
         self.wallet_session: WalletData | None = None
@@ -514,10 +519,11 @@ class ClientApp:
         self.page.on_route_change = self._on_route_change
         self.page.on_view_pop = self._on_view_pop
         self._image_cache: ImageCache | None = None
-        self._sold_asset_ids: set[str] = set()
-        self._removed_asset_ids: set[str] = set()
-        self._unlisted_asset_ids: set[str] = set()
-        self._listed_asset_ids: set[str] = set()   # assets that moved from PENDING → FOR_SALE
+        self.sold_asset_ids: set[str] = set()
+        self.removed_asset_ids: set[str] = set()
+        self.unlisted_asset_ids: set[str] = set()
+        self.listed_asset_ids: set[str] = set()   # assets that moved from PENDING → FOR_SALE
+        self.gateway_online: bool | None = None   # None=unknown, True=online, False=offline
         # Refs to live header controls — updated by background monitors
         self._balance_text: ft.Text | None = None
         self._notification_badge: ft.Container | None = None
@@ -534,10 +540,6 @@ class ClientApp:
         can review them later from the Notifications page, and the badge counter
         is incremented so the user knows something happened.
 
-        Args:
-            message: Text to display.
-            error:   True → red dialog + snackbar + notification entry.
-                     False → green snackbar only.
         """
         _msg = str(message)
         _error = error
@@ -632,32 +634,32 @@ class ClientApp:
                 self._consume_notification_queue()
         threading.Thread(target=_monitor, daemon=True).start()
 
-    def _drain_asset_events(self):
+    def drain_asset_events(self):
         while True:
             try:
                 asset_id = self.client.asset_sold_queue.get_nowait()
             except queue.Empty:
                 break
-            self._sold_asset_ids.add(asset_id)
+            self.sold_asset_ids.add(asset_id)
             self.image_cache.invalidate(asset_id)
         while True:
             try:
                 asset_id = self.client.asset_removed_queue.get_nowait()
             except queue.Empty:
                 break
-            self._removed_asset_ids.add(asset_id)
+            self.removed_asset_ids.add(asset_id)
         while True:
             try:
                 asset_id = self.client.asset_unlisted_queue.get_nowait()
             except queue.Empty:
                 break
-            self._unlisted_asset_ids.add(asset_id)
+            self.unlisted_asset_ids.add(asset_id)
         while True:
             try:
                 asset_id = self.client.asset_listed_queue.get_nowait()
             except queue.Empty:
                 break
-            self._listed_asset_ids.add(asset_id)
+            self.listed_asset_ids.add(asset_id)
 
     def _drain_balance_events(self):
         """Drain balance queue, update state, update UI text if visible."""
@@ -721,6 +723,22 @@ class ClientApp:
             except Exception:
                 pass
 
+    def _set_gateway_offline(self):
+        if self.gateway_online is False:
+            return
+        self.gateway_online = False
+        msg = "Gateway server is unreachable. You can't upload assets to the marketplace or buy them. Only upload them to 'My Assets'."
+        self.state.notifications.append(f"⚠ {msg}")
+        self.state.unseen_notifications += 1
+        self._update_notification_badge()
+        self.notify(msg, error=False)
+
+    def _set_gateway_online(self):
+        was_offline = self.gateway_online is False
+        self.gateway_online = True
+        if was_offline:
+            self.notify("Gateway server is back online.")
+
     def _close_error_dialog(self):
         def _do():
             if self.page.dialog:
@@ -730,7 +748,7 @@ class ClientApp:
 
     def _on_route_change(self, _):
         self._drain_server_notifications()
-        self._drain_asset_events()
+        self.drain_asset_events()
         self._drain_balance_events()
         route = self.page.route or "/login"
         if route == "/notifications":
@@ -834,10 +852,11 @@ class ClientApp:
         self.state = ClientState()
         self.wallet_session = None
         self._image_cache = None
-        self._sold_asset_ids = set()
-        self._removed_asset_ids = set()
-        self._unlisted_asset_ids = set()
-        self._listed_asset_ids = set()
+        self.sold_asset_ids = set()
+        self.removed_asset_ids = set()
+        self.unlisted_asset_ids = set()
+        self.listed_asset_ids = set()
+        self.gateway_online = None
         self._balance_text = None
         self._notification_badge = None
 
@@ -852,10 +871,11 @@ class ClientApp:
         self.state = ClientState()
         self.wallet_session = None
         self._image_cache = None
-        self._sold_asset_ids = set()
-        self._removed_asset_ids = set()
-        self._unlisted_asset_ids = set()
-        self._listed_asset_ids = set()
+        self.sold_asset_ids = set()
+        self.removed_asset_ids = set()
+        self.unlisted_asset_ids = set()
+        self.listed_asset_ids = set()
+        self.gateway_online = None
         self._balance_text = None
         self._notification_badge = None
 
@@ -876,20 +896,20 @@ class ClientApp:
                     cache.invalidate(aid)
         return entries
 
-    def load_asset_by_id(self, asset_id: str, version: int = 1) -> "MarketItem | None":
+    def load_asset_by_id(self, asset_id: str, version: int = 1) -> "MarketplaceItem | None":
         try:
             cached = self.image_cache.get_if_current(asset_id, version)
             if cached is not None:
                 entry, _ = cached
-                return MarketItem(
+                return MarketplaceItem(
                     asset_id=asset_id,
                     owner=str(entry.get("owner", "")),
-                    title=str(entry.get("asset_name", "")),
+                    asset_name=str(entry.get("asset_name", "")),
                     description=str(entry.get("description", "")),
                     file_type=str(entry.get("file_type", "png")),
-                    price=float(entry.get("cost", 0.0)),
+                    cost=float(entry.get("cost", 0.0)),
                     created_at=str(entry.get("created_at", "")),
-                    public_key_hex=str(entry.get("public_key", "")),
+                    public_key=str(entry.get("public_key", "")),
                     asset_status=str(entry.get("asset_status", "PENDING")),
                     version=int(entry.get("version", 1)),
                 )
@@ -909,15 +929,15 @@ class ClientApp:
                 "asset_status": str(init_meta.get("asset_status", "PENDING")),
             }
             self.image_cache.store(asset_id, file_type, server_version, meta_to_store, raw)
-            return MarketItem(
+            return MarketplaceItem(
                 asset_id=asset_id,
                 owner=meta_to_store["owner"],
-                title=meta_to_store["asset_name"],
+                asset_name=meta_to_store["asset_name"],
                 description=meta_to_store["description"],
                 file_type=file_type,
-                price=meta_to_store["cost"],
+                cost=meta_to_store["cost"],
                 created_at=meta_to_store["created_at"],
-                public_key_hex=meta_to_store["public_key"],
+                public_key=meta_to_store["public_key"],
                 asset_status=meta_to_store["asset_status"],
                 version=server_version,
             )
@@ -945,11 +965,18 @@ class ClientApp:
             signature = self.sign_payload(signed_payload)
         except Exception:
             signature = ""
-        return self.client.move_to_marketplace(
-            self.state.username, asset_id, tx_id,
-            signature=signature,
-            public_key=self.wallet_session.public_key,
-        )
+        try:
+            resp = self.client.move_to_marketplace(
+                self.state.username, asset_id, tx_id,
+                signature=signature,
+                public_key=self.wallet_session.public_key,
+            )
+            self._set_gateway_online()
+            return resp
+        except RuntimeError as exc:
+            if "gateway" in str(exc).lower():
+                self._set_gateway_offline()
+            raise
 
     def delete_asset(self, asset_id: str):
         if not self.state.username:
@@ -970,7 +997,14 @@ class ClientApp:
                 signature = self.sign_payload(payload)
             except Exception:
                 pass
-        return self.client.unlist_asset(self.state.username, asset_id, public_key, signature, uuid.uuid4().hex)
+        try:
+            resp = self.client.unlist_asset(self.state.username, asset_id, public_key, signature, uuid.uuid4().hex)
+            self._set_gateway_online()
+            return resp
+        except RuntimeError as exc:
+            if "gateway" in str(exc).lower():
+                self._set_gateway_offline()
+            raise
 
     def request_balance(self):
         if not self.state.wallet_public_key:
@@ -978,7 +1012,16 @@ class ClientApp:
         try:
             self.client.request_balance(self.state.wallet_public_key)
         except Exception as exc:
+            msg = str(exc)
             logger.warning(f"GET_BALANCE request failed: {exc}")
+            if "gateway" in msg.lower():
+                self._set_gateway_offline()
+            else:
+                self.notify(msg, error=True)
+            if self._image_cache:
+                cached = self._image_cache.get_balance()
+                if cached:
+                    self.state.balance = cached
 
     def upload_asset(self, file_path, asset_name, description, file_type, cost, for_sale=True):
         if not self.state.username:
@@ -1026,17 +1069,17 @@ class ClientApp:
                 self.image_cache.store(asset_id, file_type, 1, meta_to_store, file_bytes)
             except Exception:
                 pass
-        self.state.notifications.append(f"Uploaded asset: {asset_name}")
+        self.notify(f"Asset '{asset_name}' uploaded successfully")
         if for_sale and asset_id:
             try:
                 self.move_to_marketplace(asset_id)
-                self.state.notifications.append(f"'{asset_name}' sent to mining — will appear on marketplace once confirmed")
+                self.notify(f"'{asset_name}' sent to mining — will appear on marketplace once confirmed")
             except Exception as exc:
                 logger.warning(f"[upload] move_to_marketplace failed: {exc}")
-                self.state.notifications.append(f"'{asset_name}' uploaded — go to My Assets to list it on the marketplace")
+                self.notify(f"'{asset_name}' uploaded — open My Assets to list it on the marketplace")
         return resp
 
-    def buy_asset(self, item: MarketItem):
+    def buy_asset(self, item: MarketplaceItem):
         if not self.state.username:
             raise RuntimeError("Not authenticated")
         if not self.wallet_session:
@@ -1044,21 +1087,28 @@ class ClientApp:
         payload = {
             "asset_id": item.asset_id,
             "buyer": self.state.username,
-            "price": float(item.price),
+            "price": float(item.cost),
             "timestamp": time.time(),
         }
         signature = self.sign_payload(payload)
         req = {
             "asset_id": item.asset_id,
             "buyer": self.state.username,
-            "price": float(item.price),
+            "price": float(item.cost),
             "timestamp": payload["timestamp"],
             "signature": signature,
             "public_key": self.wallet_session.public_key,
             "signed_payload": payload,
             "tx_id": uuid.uuid4().hex,
         }
-        return self.client.buy_asset(req)
+        try:
+            resp = self.client.buy_asset(req)
+            self._set_gateway_online()
+            return resp
+        except RuntimeError as exc:
+            if "gateway" in str(exc).lower():
+                self._set_gateway_offline()
+            raise
 
     def update_public_key(self, public_key):
         if not self.state.username:
@@ -1067,8 +1117,6 @@ class ClientApp:
         # After registering key, request fresh balance
         threading.Thread(target=self.request_balance, daemon=True).start()
         return resp
-
-    # ----- wallet session + actions -----
 
     def sign_payload(self, payload: dict) -> str:
         if not self.wallet_session:

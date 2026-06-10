@@ -1,3 +1,16 @@
+"""
+aurex_launcher.py — one-shot launcher for the whole Aurex stack.
+
+Starts each component in its own cmd window in the right order:
+  1. Blockchain node(s)
+  2. Gateway  (needs nodes to already be listening)
+  3. Marketplace server  (needs gateway)
+  4. Client  (needs server)
+
+Pass --debug-level INFO/WARNING/ERROR to quiet things down for demos.
+"""
+__author__ = "Nadav"
+
 import argparse
 import subprocess
 import sys
@@ -15,6 +28,7 @@ logger = Logger(__file__)
 
 
 def launch_task(name, command, cwd=""):
+    """Open a new cmd window with the given title and run *command* inside it."""
     logger.info(f"[+] Starting {name}...")
     return subprocess.Popen(
         ["start", "cmd", "/k", f"title {name} && {command}"],

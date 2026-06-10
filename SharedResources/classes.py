@@ -1,8 +1,14 @@
-__author__ = "Nadav"
+"""
+classes.py — shared data models and networking primitives used across the whole project.
 
+Anything that more than one module needs to import lives here:
+  Communication  — encrypted TCP framing (AES-CBC, async queues)
+  RSA_Client/Server — RSA key-exchange wrappers
+  UDPServer/Client  — broadcast discovery helpers
+  Transaction, Block — blockchain data structures
+  MarketplaceItem    — the asset record shared by server, gateway, and client
 """
-The classes.py stores classes being used through the project.
-"""
+__author__ = "Nadav"
 
 import time
 from dataclasses import dataclass, asdict
@@ -26,9 +32,8 @@ from cryptography.hazmat.primitives.serialization import load_pem_parameters, lo
 
 from SharedResources.logging import Logger
 
-PEPPER = "Aurex"
-
 class Communication:
+    """For recv/sending messages over a socket with optional AES-CBC encryption."""
     def log(self, dirct, data):
         try:
             ip, port = self.sock.getpeername()
@@ -45,7 +50,9 @@ class Communication:
         self.sock = sock
         self.shared_key = None
         self.parameters = None
-        self.lock = threading.Lock()
+        self.send_lock = threading.Lock()   # guards concurrent sendall calls
+        self.recv_lock = threading.Lock()   # guards concurrent recv_one_message calls
+        self.lock = self.send_lock          # backward-compat alias
         self.logger = Logger(name or __file__)
         self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
         self.name = name
@@ -55,12 +62,12 @@ class Communication:
         self.user = None
         self.msg_queue: "queue.Queue[object]" = queue.Queue()
         self.send_queue: "queue.Queue[tuple[dict, bool | None] | None]" = queue.Queue()
-        self._async_running = False
-        self._async_recv_thread = None
-        self._async_send_thread = None
-        self._async_stop_event = threading.Event()
-        self._default_encryption = True
-        self._close_marker = object()
+        self.async_running = False
+        self.async_recv_thread = None
+        self.async_send_thread = None
+        self.async_stop_event = threading.Event()
+        self.default_encryption = True
+        self.close_marker = object()
 
     #used for server's communication
     def set_user(self, user):
@@ -95,7 +102,7 @@ class Communication:
         return plaintext
 
 
-    def _sanitize_for_log(self, d: dict) -> dict:
+    def sanitize_for_log(self, d: dict) -> dict:
         out = {}
         for k, v in d.items():
             if k in ("chunk_b64", "content_b64") and isinstance(v, str) and len(v) > 80:
@@ -105,104 +112,115 @@ class Communication:
         return out
 
     def send_one_message(self, data: dict, encryption=True):
+        """Serialise *data* to JSON, optionally encrypt, and send with a 2-byte length header."""
         data_json = json.dumps(data, sort_keys=True).encode()
 
         if encryption:
             new_iv = self.generate_iv()
+            # prepend IV so the receiver can decrypt without out-of-band state
             message = new_iv + self.AES_encrypt(data_json, self.AES_key, new_iv)
         else:
             message = data_json
 
+        # pack length as big-endian unsigned short then flush the whole thing atomically
         with self.lock:
             self.sock.sendall(struct.pack('!H', len(message)) + message)
-        self.log('send', json.dumps(self._sanitize_for_log(data), sort_keys=True))
+        self.log('send', json.dumps(self.sanitize_for_log(data), sort_keys=True))
 
 
     def recv_one_message(self, encryption=True):
-        len_section = self.__recv_amount(2)
-        if not len_section:
-            return None
-            
-        length, = struct.unpack('!H', len_section)
-        data = self.__recv_amount(length)
+        """Read the next framed message and return it as a dict (or None on disconnect).
+
+        The recv_lock ensures that if two threads ever call this on the same
+        Communication object the length-header + payload bytes won't interleave.
+        """
+        with self.recv_lock:
+            len_section = self.recv_amount(2)
+            if not len_section:
+                return None
+
+            length, = struct.unpack('!H', len_section)
+            data = self.recv_amount(length)
 
         if not data or len(data) != length:
             return None
 
         if encryption:
-            iv = data[:16]
+            iv   = data[:16]
             data = self.AES_decrypt(data[16:], self.AES_key, iv)
 
         try:
             decoded = json.loads(data.decode())
-            self.log('recv', json.dumps(self._sanitize_for_log(decoded), sort_keys=True))
+            self.log('recv', json.dumps(self.sanitize_for_log(decoded), sort_keys=True))
             return decoded
         except Exception as e:
             self.logger.error(f"Error decoding JSON: {e}")
             return None
 
     def start_async(self, default_encryption=True):
-        """Start duplex queue mode: recv thread -> msg_queue, send_queue -> send thread."""
-        if self._async_running:
+        """Switch to duplex queue mode: a background recv thread feeds msg_queue,
+        and a background send thread drains send_queue.  Call recv_async / send_async
+        after this instead of the blocking one-shot variants."""
+        if self.async_running:
             return
-        self._default_encryption = bool(default_encryption)
-        self._async_stop_event.clear()
-        self._async_running = True
-        self._async_recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self._async_send_thread = threading.Thread(target=self._send_loop, daemon=True)
-        self._async_recv_thread.start()
-        self._async_send_thread.start()
+        self.default_encryption = bool(default_encryption)
+        self.async_stop_event.clear()
+        self.async_running = True
+        self.async_recv_thread = threading.Thread(target=self.recv_loop, daemon=True)
+        self.async_send_thread = threading.Thread(target=self.send_loop, daemon=True)
+        self.async_recv_thread.start()
+        self.async_send_thread.start()
 
-    def _recv_loop(self):
-        while not self._async_stop_event.is_set():
-            msg = self.recv_one_message(encryption=self._default_encryption)
+    def recv_loop(self):
+        while not self.async_stop_event.is_set():
+            msg = self.recv_one_message(encryption=self.default_encryption)
             if msg is None:
                 break
             self.msg_queue.put(msg)
-        self.msg_queue.put(self._close_marker)
-        self._async_running = False
+        self.msg_queue.put(self.close_marker)
+        self.async_running = False
 
-    def _send_loop(self):
-        while not self._async_stop_event.is_set():
+    def send_loop(self):
+        while not self.async_stop_event.is_set():
             item = self.send_queue.get()
             if item is None:
                 break
             data, encryption = item
-            enc = self._default_encryption if encryption is None else bool(encryption)
+            enc = self.default_encryption if encryption is None else bool(encryption)
             try:
                 self.send_one_message(data, encryption=enc)
             except Exception:
                 break
-        self._async_running = False
+        self.async_running = False
 
     def send_async(self, data: dict, encryption=None):
-        if not self._async_running:
-            enc = self._default_encryption if encryption is None else bool(encryption)
+        if not self.async_running:
+            enc = self.default_encryption if encryption is None else bool(encryption)
             self.send_one_message(data, encryption=enc)
             return
         self.send_queue.put((data, encryption))
 
     def recv_async(self, timeout=None):
-        if not self._async_running:
-            return self.recv_one_message(encryption=self._default_encryption)
+        if not self.async_running:
+            return self.recv_one_message(encryption=self.default_encryption)
         try:
             return self.msg_queue.get(timeout=timeout)
         except queue.Empty:
             return None
 
     def is_close_marker(self, value):
-        return value is self._close_marker
+        return value is self.close_marker
 
     def stop_async(self):
-        if not self._async_running:
+        if not self.async_running:
             return
-        self._async_stop_event.set()
+        self.async_stop_event.set()
         try:
             self.send_queue.put_nowait(None)
         except Exception:
             pass
 
-    def __recv_amount(self, size):
+    def recv_amount(self, size):
         buffer = b''
         while size:
             try:
@@ -232,6 +250,7 @@ class Communication:
         self.sock.close()
 
 class RSA_Client:
+    """TCP client that performs an RSA key exchange handshake with the server."""
     def __init__(self, ip, port, name="RSA_Client", peer_label=""):
         self.ip = ip
         self.port = port
@@ -257,7 +276,12 @@ class RSA_Client:
 
 
     def contact_with_RSA(self):
-        """RSA encryption method"""
+        """Perform the RSA key-exchange handshake with the server.
+
+        Asks for the server's public key, encrypts a freshly-generated AES key
+        with it, sends the encrypted key, and waits for the OK.  After this the
+        communication object is ready for AES-encrypted traffic.
+        """
         msg = {"type": "SEND_PUBLIC_KEY"}
         self.communication.send_one_message(msg, False)
         answer = self.communication.recv_one_message(encryption=False)
@@ -297,6 +321,8 @@ class RSA_Client:
         self.sock.close()
 
 class RSA_Server:
+    
+    """TCP server that performs an RSA key exchange handshake with each client"""
     def __init__(self, ip, port, dir_for_keys=None, Gateway=False, name="RSA_Server", peer_label="Peer"):
         self.ip = ip
         self.port = port
@@ -407,6 +433,7 @@ class RSA_Server:
 # CLASS UDP SERVER
 
 class UDPServer:
+    """For discovery of the gateway by blockchain nodes: listens for "WHRSV" broadcasts and replies with the server's IP/port."""
 
     def __init__(self, self_ip, self_port, srv_ip, srv_port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -435,9 +462,9 @@ class UDPServer:
 
 
 
-# CLASS UDP CLIENT
 
 class UDPClient:
+    """For discovery of the gateway by blockchain nodes: broadcasts "WHRSV" and waits for the server's reply with its IP/port."""
     def __init__(self, udp_srv_port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -472,8 +499,80 @@ class UDPClient:
     
 
     
+ASSET_STATUS_PENDING  = "PENDING"
+ASSET_STATUS_FOR_SALE = "FOR_SALE"
+ASSET_STATUS_UNLISTED = "UNLISTED"
+ASSET_STATUS_SOLD     = "SOLD"
+
+
+def migrate_asset_status(raw: dict) -> str:
+    """Derive asset_status from old blockchain_status/for_sale fields when upgrading."""
+    if "asset_status" in raw:
+        return str(raw["asset_status"])
+    bc = str(raw.get("blockchain_status", "")).strip().lower()
+    fs = bool(raw.get("for_sale", True))
+    if bc in ("verified",):
+        return ASSET_STATUS_FOR_SALE if fs else ASSET_STATUS_UNLISTED
+    return ASSET_STATUS_PENDING
+
+
+@dataclass
+class MarketplaceItem:
+    """Marketplace asset — shared between server, gateway, and client."""
+
+    asset_id: str
+    owner: str
+    asset_name: str
+    description: str
+    file_type: str
+    cost: float
+    created_at: str
+    storage_path: str = ""
+    version: int = 1
+    asset_status: str = ASSET_STATUS_PENDING
+    public_key: str = ""
+
+    def to_dict(self):
+        return {
+            "asset_id": self.asset_id,
+            "owner": self.owner,
+            "asset_name": self.asset_name,
+            "description": self.description,
+            "file_type": self.file_type,
+            "cost": self.cost,
+            "storage_path": self.storage_path,
+            "created_at": self.created_at,
+            "version": self.version,
+            "asset_status": self.asset_status,
+            "public_key": self.public_key,
+        }
+
+    @classmethod
+    def from_dict(cls, raw):
+        return cls(
+            asset_id=str(raw.get("asset_id", "")),
+            owner=str(raw.get("owner", "")),
+            asset_name=str(raw.get("asset_name", "")),
+            description=str(raw.get("description", "")),
+            file_type=str(raw.get("file_type", "")),
+            cost=float(raw.get("cost", 0.0)),
+            storage_path=str(raw.get("storage_path", "")),
+            created_at=str(raw.get("created_at", "")),
+            version=int(raw.get("version", 1)),
+            asset_status=migrate_asset_status(raw),
+            public_key=str(raw.get("public_key", "")),
+        )
+
+    def __repr__(self):
+        return (
+            f"MarketplaceItem(asset_id='{self.asset_id}', owner='{self.owner}', "
+            f"asset_name='{self.asset_name}', cost={self.cost}, status={self.asset_status})"
+        )
+
+
 @dataclass
 class Transaction:
+    "Transaction class"
     sender: str
     receiver: str
     amount: float
@@ -482,6 +581,7 @@ class Transaction:
 
 @dataclass
 class Block:
+    "Block class"
     index: int
     prev_hash: str
     transaction: Transaction

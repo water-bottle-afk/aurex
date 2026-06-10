@@ -1,27 +1,35 @@
-"""Shared colored logger wrapper for Aurex."""
+"""Shared colored logger wrapper for Aurex.
+
+Keeps all project output readable:
+  - sent/recv lines get a yellow address prefix
+  - WARNING is orange, ERROR/CRITICAL is red
+  - Flet's internal chatter is silenced completely
+"""
 from __future__ import annotations
+
+__author__ = "Nadav"
 
 import logging
 from pathlib import Path
 
-_YELLOW  = "\033[33m"
-_ORANGE  = "\033[38;5;208m"
-_RED     = "\033[31m"
-_RESET   = "\033[0m"
+YELLOW  = "\033[33m"
+ORANGE  = "\033[38;5;208m"
+RED     = "\033[31m"
+RESET   = "\033[0m"
 
-_LEVEL_COLORS = {
-    logging.WARNING:  _ORANGE,
-    logging.ERROR:    _RED,
-    logging.CRITICAL: _RED,
+LEVEL_COLORS = {
+    logging.WARNING:  ORANGE,
+    logging.ERROR:    RED,
+    logging.CRITICAL: RED,
 }
 
-_FLET_NOISE_PREFIXES = (
+FLET_NOISE_PREFIXES = (
     "flet_core", "flet", "asyncio", "websockets", "websocket",
     "urllib3", "urllib", "httpx", "_client", "hpack",
 )
 
 # Content patterns that identify Flet internal chatter regardless of logger name
-_FLET_NOISE_FRAGMENTS = (
+FLET_NOISE_FRAGMENTS = (
     "trigger event",
     "page(",
     "applifecyclestate",
@@ -37,20 +45,20 @@ _FLET_NOISE_FRAGMENTS = (
 )
 
 
-class _NoiseFilter(logging.Filter):
+class NoiseFilter(logging.Filter):
     """Block Flet internal messages via both logger name and message content."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         name_lower = record.name.lower()
-        if any(name_lower.startswith(p) for p in _FLET_NOISE_PREFIXES):
+        if any(name_lower.startswith(p) for p in FLET_NOISE_PREFIXES):
             return False
         msg_lower = record.getMessage().lower()
-        if any(fragment in msg_lower for fragment in _FLET_NOISE_FRAGMENTS):
+        if any(fragment in msg_lower for fragment in FLET_NOISE_FRAGMENTS):
             return False
         return True
 
 
-class _ColoredFormatter(logging.Formatter):
+class ColoredFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         msg = record.getMessage()
         msg_lower = msg.lower()
@@ -64,61 +72,61 @@ class _ColoredFormatter(logging.Formatter):
             if sep in msg:
                 addr_part, _, rest = msg.partition(sep)
                 # Only addr_part is yellow; separator and payload stay default
-                return f"{asctime} {_YELLOW}{addr_part.rstrip()}{_RESET} {sep}{rest}"
+                return f"{asctime} {YELLOW}{addr_part.rstrip()}{RESET} {sep}{rest}"
             # No separator — colour just the address line
-            return f"{asctime} {_YELLOW}{msg}{_RESET}"
+            return f"{asctime} {YELLOW}{msg}{RESET}"
 
         formatted = super().format(record)
-        color = _LEVEL_COLORS.get(record.levelno)
+        color = LEVEL_COLORS.get(record.levelno)
         if color:
-            return f"{color}{formatted}{_RESET}"
+            return f"{color}{formatted}{RESET}"
         return formatted
 
 
 class Logger:
     """Project logger: partial yellow for sent/recv, orange WARNING, red ERROR, Flet suppressed."""
 
-    _configured = False
-    _level = logging.DEBUG
+    configured = False
+    level = logging.DEBUG
 
     def __init__(self, file_name: str):
         self.file_name = Path(file_name).name
-        if not Logger._configured:
-            Logger._configure()
-        self._logger = logging.getLogger(self.file_name)
+        if not Logger.configured:
+            Logger.configure()
+        self.logger = logging.getLogger(self.file_name)
 
     @classmethod
-    def _configure(cls):
+    def configure(cls):
         handler = logging.StreamHandler()
-        handler.setFormatter(_ColoredFormatter(
+        handler.setFormatter(ColoredFormatter(
             fmt="%(asctime)s %(message)s",
             datefmt="%H:%M:%S",
         ))
-        handler.addFilter(_NoiseFilter())
+        handler.addFilter(NoiseFilter())
         root = logging.getLogger()
         root.handlers.clear()
         root.addHandler(handler)
-        root.setLevel(cls._level)
+        root.setLevel(cls.level)
         # Belt-and-suspenders: also suppress known Flet loggers directly
-        for name in _FLET_NOISE_PREFIXES:
+        for name in FLET_NOISE_PREFIXES:
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
-        cls._configured = True
+        cls.configured = True
 
     @classmethod
     def set_level(cls, level_str: str):
         level = getattr(logging, level_str.upper(), logging.DEBUG)
-        cls._level = level
-        if cls._configured:
+        cls.level = level
+        if cls.configured:
             logging.getLogger().setLevel(level)
 
     def debug(self, message: str, **kwargs):
-        self._logger.debug(message, **kwargs)
+        self.logger.debug(message, **kwargs)
 
     def info(self, message: str, **kwargs):
-        self._logger.info(message, **kwargs)
+        self.logger.info(message, **kwargs)
 
     def warning(self, message: str, **kwargs):
-        self._logger.warning(message, **kwargs)
+        self.logger.warning(message, **kwargs)
 
     def error(self, message: str, **kwargs):
-        self._logger.error(message, **kwargs)
+        self.logger.error(message, **kwargs)

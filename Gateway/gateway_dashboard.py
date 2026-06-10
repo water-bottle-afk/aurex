@@ -1,4 +1,11 @@
-"""Flet monitoring dashboard for the Aurex gateway."""
+"""
+gateway_dashboard.py — live Flet dashboard for the Aurex gateway.
+
+GatewayGUIBridge  is a thread-safe queue that gateway worker threads write
+events into.  GatewayDashboard reads from that queue and refreshes the UI.
+Run via gateway.py when the user answers "y" to "Use gateway GUI dashboard?".
+"""
+__author__ = "Nadav"
 
 from __future__ import annotations
 
@@ -69,7 +76,7 @@ class GatewayDashboard:
         self.log_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"))
         logging.getLogger("gateway").addHandler(self.log_handler)
 
-    def _render_event_line(self, event: dict) -> str:
+    def render_event_line(self, event: dict) -> str:
         ts = event.get("timestamp", "")
         node = event.get("node_id", "gateway")
         msg = event.get("message", "")
@@ -78,14 +85,14 @@ class GatewayDashboard:
             msg = f"{msg} | tx={tx_id}"
         return f"[{ts}] {node}: {msg}"
 
-    def _build_node_controls(self):
+    def build_node_controls(self):
         controls = [
             ft.Container(
                 content=ft.Text("all", color=ft.Colors.WHITE),
                 bgcolor=ft.Colors.BLUE_700 if self.current_filter == "all" else ft.Colors.BLUE_GREY_900,
                 padding=8,
                 border_radius=8,
-                on_click=lambda e: self._set_filter("all", e.page),
+                on_click=lambda e: self.set_filter("all", e.page),
             )
         ]
         for node_id, addr in sorted(self.nodes.items()):
@@ -102,28 +109,28 @@ class GatewayDashboard:
                     bgcolor=ft.Colors.BLUE_700 if self.current_filter == node_id else ft.Colors.BLUE_GREY_900,
                     padding=8,
                     border_radius=8,
-                    on_click=lambda e, n=node_id: self._set_filter(n, e.page),
+                    on_click=lambda e, n=node_id: self.set_filter(n, e.page),
                 )
             )
         return controls
 
-    def _set_filter(self, node_id: str, page: ft.Page):
+    def set_filter(self, node_id: str, page: ft.Page):
         self.current_filter = node_id
-        self._refresh_ui(page)
+        self.refresh_ui(page)
 
-    def _refresh_ui(self, page: ft.Page):
+    def refresh_ui(self, page: ft.Page):
         if self.current_filter == "all":
             selected = self.log_history
         else:
             selected = [e for e in self.log_history if e.get("node_id") == self.current_filter]
 
         if self.log_box is not None:
-            self.log_box.value = "\n".join(self._render_event_line(event) for event in selected)
+            self.log_box.value = "\n".join(self.render_event_line(event) for event in selected)
         if self.node_list is not None:
-            self.node_list.controls = self._build_node_controls()
+            self.node_list.controls = self.build_node_controls()
         page.update()
 
-    def _pump_events(self, page: ft.Page):
+    def pump_events(self, page: ft.Page):
         while not self.stop_event.is_set():
             dirty = False
             while True:
@@ -139,10 +146,10 @@ class GatewayDashboard:
                     self.nodes[node_id] = event.get("address") or self.nodes.get(node_id) or "unknown"
 
             if dirty:
-                self._refresh_ui(page)
+                self.refresh_ui(page)
             time.sleep(0.15)
 
-    def _main(self, page: ft.Page):
+    def main(self, page: ft.Page):
         page.title = "Aurex Gateway Dashboard"
         page.theme_mode = ft.ThemeMode.DARK
         page.padding = 16
@@ -197,9 +204,9 @@ class GatewayDashboard:
             )
         )
 
-        self._refresh_ui(page)
+        self.refresh_ui(page)
 
-        threading.Thread(target=self._pump_events, args=(page,), daemon=True).start()
+        threading.Thread(target=self.pump_events, args=(page,), daemon=True).start()
 
         def on_disconnect(_):
             self.stop_event.set()
@@ -211,7 +218,7 @@ class GatewayDashboard:
         logging.getLogger("flet_desktop").setLevel(logging.WARNING)
         assets_dir = Path(__file__).resolve().parent / "_flet_no_assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
-        ft.app(target=self._main, view=ft.AppView.FLET_APP, assets_dir=str(assets_dir))
+        ft.app(target=self.main, view=ft.AppView.FLET_APP, assets_dir=str(assets_dir))
 
 
 def run_dashboard(gateway_server):

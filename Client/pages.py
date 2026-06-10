@@ -1,12 +1,20 @@
-"""Elegant Aurex UI pages (UI-only)."""
 from __future__ import annotations
+
+"""
+pages.py — all Flet UI pages for the Aurex client.
+
+Each build_*_view(app) function returns a ft.View ready to be pushed onto
+app.page.views.  They are pure UI — no business logic, no direct server calls.
+All actions go through the ClientApp methods in client.py.
+"""
+__author__ = "Nadav"
 import flet as ft
 import logging
 import threading
 import time
 from pathlib import Path
 
-_logger = logging.getLogger("aurex.pages")
+logger = logging.getLogger("aurex.pages")
 
 BG = "#090B0F"
 SCRIM = "#C814161B"
@@ -23,17 +31,17 @@ SUCCESS = "#3FB170"
 ERROR = "#D05757"
 GLASS = "#BF080B11"
 
-_GLOW = [ft.BoxShadow(blur_radius=40, spread_radius=-4, color="#55E9BD4B", offset=ft.Offset(0, 8))]
-_SHADOW = [ft.BoxShadow(blur_radius=16, color="#50000000", offset=ft.Offset(0, 4))]
+GLOW = [ft.BoxShadow(blur_radius=40, spread_radius=-4, color="#55E9BD4B", offset=ft.Offset(0, 8))]
+SHADOW = [ft.BoxShadow(blur_radius=16, color="#50000000", offset=ft.Offset(0, 4))]
 
 
-def _bg(content):
+def bg(content):
     return ft.Container(expand=True,
         image=ft.DecorationImage(src="images/gold_bg.png", fit=ft.BoxFit.COVER),
         content=ft.Container(expand=True, bgcolor=SCRIM, content=content))
 
 
-def _logo_block(title="AUREX"):
+def logo_block(title="AUREX"):
     return ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
         ft.Container(padding=12, border_radius=20, bgcolor="#120F00",
             border=ft.border.all(1.5, GOLD_DIM),
@@ -44,7 +52,7 @@ def _logo_block(title="AUREX"):
     ])
 
 
-def _divider():
+def divider():
     return ft.Row(spacing=8, controls=[
         ft.Container(expand=True, height=1, bgcolor="#1E1810"),
         ft.Text("◆", color="#3A2C10", size=8),
@@ -52,12 +60,12 @@ def _divider():
     ])
 
 
-def _auth_shell(route, body):
+def auth_shell(route, body):
     return ft.View(route=route, bgcolor=BG, padding=0,
-        controls=[_bg(ft.Container(expand=True, alignment=ft.Alignment(0, 0), content=body))])
+        controls=[bg(ft.Container(expand=True, alignment=ft.Alignment(0, 0), content=body))])
 
 
-def _nav_btn(app, text, route):
+def nav_btn(app, text, route):
     active = app.page.route == route
     return ft.OutlinedButton(text, on_click=lambda _: app.page.go(route),
         style=ft.ButtonStyle(
@@ -69,7 +77,7 @@ def _nav_btn(app, text, route):
         ))
 
 
-def _logout(app):
+def logout(app):
     try:
         app.logout()
         app.notify("Logged out")
@@ -78,35 +86,35 @@ def _logout(app):
     app.page.go("/login")
 
 
-def _main_shell(app, route, title, body):
+def main_shell(app, route, title, body):
     # Notification button with red badge overlay
-    _notif_count = app.state.unseen_notifications
-    _badge = ft.Container(
-        content=ft.Text(str(min(_notif_count, 99)), color="white", size=8, weight=ft.FontWeight.BOLD,
+    notif_count = app.state.unseen_notifications
+    badge = ft.Container(
+        content=ft.Text(str(min(notif_count, 99)), color="white", size=8, weight=ft.FontWeight.BOLD,
             text_align=ft.TextAlign.CENTER),
         bgcolor=ERROR,
         width=16, height=16,
         border_radius=8,
         alignment=ft.Alignment(0, 0),
         top=1, right=1,
-        visible=_notif_count > 0,
+        visible=notif_count > 0,
     )
-    app._notification_badge = _badge
-    _notif_btn = _nav_btn(app, "Notifications", "/notifications")
-    _notif_with_badge = ft.Stack(
-        controls=[_notif_btn, _badge],
+    app.notification_badge = badge
+    notif_btn = nav_btn(app, "Notifications", "/notifications")
+    notif_with_badge = ft.Stack(
+        controls=[notif_btn, badge],
         clip_behavior=ft.ClipBehavior.NONE,
     )
 
     nav = ft.Row(wrap=True, run_spacing=6, spacing=6, controls=[
-        _nav_btn(app, "Market", "/marketplace"),
-        _nav_btn(app, "My Assets", "/my_assets"),
-        _nav_btn(app, "Upload", "/upload"),
-        _nav_btn(app, "Settings", "/settings"),
-        _notif_with_badge,
+        nav_btn(app, "Market", "/marketplace"),
+        nav_btn(app, "My Assets", "/my_assets"),
+        nav_btn(app, "Upload", "/upload"),
+        nav_btn(app, "Settings", "/settings"),
+        notif_with_badge,
         ft.FilledButton("Logout", bgcolor="#3A0C14", color="#FF8A8A",
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), padding=ft.padding.symmetric(horizontal=14, vertical=7)),
-            on_click=lambda _: _logout(app)),
+            on_click=lambda _: logout(app)),
     ])
     back_btn = ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=GOLD_SOFT, icon_size=15,
         tooltip="Back", visible=route != "/marketplace", on_click=lambda _: app.page.go("/marketplace"))
@@ -114,12 +122,12 @@ def _main_shell(app, route, title, body):
     # Balance display — reference stored on app so the balance monitor can update it
     balance_text = ft.Text(f"{app.state.balance:.2f} AUR", color=GOLD_SOFT, size=11,
         weight=ft.FontWeight.W_600)
-    app._balance_text = balance_text
+    app.balance_text = balance_text
 
-    _username = app.state.username or ""
+    username = app.state.username or ""
     head = ft.Container(
         border_radius=16, bgcolor=GLASS, border=ft.border.all(1, "#5C4220"),
-        padding=ft.padding.symmetric(horizontal=20, vertical=13), shadow=_SHADOW,
+        padding=ft.padding.symmetric(horizontal=20, vertical=13), shadow=SHADOW,
         content=ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Row(spacing=10, controls=[
                 back_btn,
@@ -133,7 +141,7 @@ def _main_shell(app, route, title, body):
                 ft.Container(
                     bgcolor="#0A0C12", border=ft.border.all(1, BORDER_DIM), border_radius=8,
                     padding=ft.padding.symmetric(horizontal=10, vertical=5),
-                    content=ft.Text(f"Hello, {_username}", color=GOLD_SOFT, size=17,
+                    content=ft.Text(f"Hello, {username}", color=GOLD_SOFT, size=17,
                         weight=ft.FontWeight.W_600),
                 ),
             ]),
@@ -150,12 +158,12 @@ def _main_shell(app, route, title, body):
             ]),
         ]))
     return ft.View(route=route, bgcolor=BG, padding=0, controls=[
-        _bg(ft.Container(expand=True, padding=ft.padding.symmetric(horizontal=20, vertical=16),
+        bg(ft.Container(expand=True, padding=ft.padding.symmetric(horizontal=20, vertical=16),
             content=ft.Column(scroll=ft.ScrollMode.AUTO, spacing=12, controls=[head, body])))
     ])
 
 
-def _input(label, password=False, icon=None):
+def input(label, password=False, icon=None):
     return ft.TextField(label=label, password=password, can_reveal_password=password,
         border_radius=11, bgcolor="#060709", border_color="#2E2218",
         focused_border_color=GOLD, color=TEXT, cursor_color=GOLD, text_size=15,
@@ -164,16 +172,16 @@ def _input(label, password=False, icon=None):
 
 
 def build_login_view(app):
-    username = _input("Username", icon=ft.Icons.PERSON_OUTLINE_ROUNDED)
-    password = _input("Password", True, icon=ft.Icons.LOCK_OUTLINE_ROUNDED)
+    username = input("Username", icon=ft.Icons.PERSON_OUTLINE_ROUNDED)
+    password = input("Password", True, icon=ft.Icons.LOCK_OUTLINE_ROUNDED)
     err_label = ft.Text("", color=ERROR, size=12, visible=False, text_align=ft.TextAlign.CENTER)
 
-    def _clear():
+    def clear():
         err_label.value = ""; err_label.visible = False
         username.error_text = None; password.error_text = None
 
     def on_login(_):
-        _clear()
+        clear()
         u = (username.value or "").strip()
         p = password.value or ""
         valid = True
@@ -199,11 +207,11 @@ def build_login_view(app):
             app.page.update()
 
     card = ft.Container(width=440, padding=ft.padding.symmetric(horizontal=36, vertical=32),
-        border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=_GLOW,
+        border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=GLOW,
         content=ft.Column(spacing=18, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
-            _logo_block(),
+            logo_block(),
             ft.Text("Secure marketplace access", color=MUTED, size=12, style=ft.TextStyle(letter_spacing=1.5)),
-            _divider(),
+            divider(),
             username, password,
             err_label,
             ft.FilledButton("Sign In", width=368, height=46, bgcolor=GOLD, color="#130E00",
@@ -213,21 +221,21 @@ def build_login_view(app):
                 ft.TextButton("Forgot password?", style=ft.ButtonStyle(color=GOLD_DIM), on_click=lambda _: app.page.go("/forgot")),
             ]),
         ]))
-    return _auth_shell("/login", card)
+    return auth_shell("/login", card)
 
 
 def build_signup_view(app):
-    username = _input("Username", icon=ft.Icons.PERSON_OUTLINE_ROUNDED)
-    password = _input("Password", True, icon=ft.Icons.LOCK_OUTLINE_ROUNDED)
-    email = _input("Email address", icon=ft.Icons.EMAIL_OUTLINED)
+    username = input("Username", icon=ft.Icons.PERSON_OUTLINE_ROUNDED)
+    password = input("Password", True, icon=ft.Icons.LOCK_OUTLINE_ROUNDED)
+    email = input("Email address", icon=ft.Icons.EMAIL_OUTLINED)
     err_label = ft.Text("", color=ERROR, size=12, visible=False, text_align=ft.TextAlign.CENTER)
 
-    def _clear():
+    def clear():
         err_label.value = ""; err_label.visible = False
         username.error_text = None; password.error_text = None; email.error_text = None
 
     def on_signup(_):
-        _clear()
+        clear()
         u = (username.value or "").strip()
         p = password.value or ""
         e_val = (email.value or "").strip()
@@ -238,8 +246,9 @@ def build_signup_view(app):
             password.error_text = "Password is required"; valid = False
         elif len(p) < 6:
             password.error_text = "Minimum 6 characters"; valid = False
-        if not e_val or "@" not in e_val:
-            email.error_text = "Enter a valid email"; valid = False
+        _parts = e_val.split("@")
+        if not e_val or len(_parts) != 2 or not _parts[0] or "." not in _parts[1]:
+            email.error_text = "Enter a valid email address (e.g. user@example.com)"; valid = False
         if not valid:
             app.page.update(); return
         try:
@@ -257,37 +266,37 @@ def build_signup_view(app):
             app.page.update()
 
     card = ft.Container(width=460, padding=ft.padding.symmetric(horizontal=36, vertical=28),
-        border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=_GLOW,
+        border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=GLOW,
         content=ft.Column(spacing=15, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Row(controls=[ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=MUTED, icon_size=15,
                 on_click=lambda _: app.page.go("/login"))]),
-            _logo_block("JOIN AUREX"),
+            logo_block("JOIN AUREX"),
             username, password, email,
             err_label,
             ft.FilledButton("Create Account", width=388, height=46, bgcolor=GOLD, color="#130E00",
                 style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12)), on_click=on_signup),
         ]))
-    return _auth_shell("/signup", card)
+    return auth_shell("/signup", card)
 
 
 def build_forgot_view(app):
     # ── Fields ───────────────────────────────────────────────────────────────
-    email    = _input("Email address", icon=ft.Icons.EMAIL_OUTLINED)
-    code     = _input("Verification code", icon=ft.Icons.VERIFIED_OUTLINED)
-    new_pass = _input("New password", True, icon=ft.Icons.LOCK_RESET_OUTLINED)
+    email    = input("Email address", icon=ft.Icons.EMAIL_OUTLINED)
+    code     = input("Verification code", icon=ft.Icons.VERIFIED_OUTLINED)
+    new_pass = input("New password", True, icon=ft.Icons.LOCK_RESET_OUTLINED)
 
     err_label = ft.Text("", color=ERROR,   size=12, visible=False, text_align=ft.TextAlign.CENTER)
     ok_label  = ft.Text("", color=SUCCESS, size=12, visible=False, text_align=ft.TextAlign.CENTER)
 
-    def _show_err(msg):
+    def show_err(msg):
         ok_label.visible = False; err_label.value = msg; err_label.visible = True
         app.page.update()
 
-    def _show_ok(msg):
+    def show_ok(msg):
         err_label.visible = False; ok_label.value = msg; ok_label.visible = True
         app.page.update()
 
-    def _clear_msg():
+    def clear_msg():
         err_label.visible = False; ok_label.visible = False
 
     # ── Stage 2: code section (locked until code is sent) ────────────────────
@@ -319,22 +328,23 @@ def build_forgot_view(app):
 
     # ── Handlers ─────────────────────────────────────────────────────────────
     def do_send(_=None):
-        _clear_msg()
+        clear_msg()
         e = (email.value or "").strip()
-        if not e or "@" not in e:
-            email.error_text = "Enter a valid email"; app.page.update(); return
+        _ep = e.split("@")
+        if not e or len(_ep) != 2 or not _ep[0] or "." not in _ep[1]:
+            email.error_text = "Enter a valid email address (e.g. user@example.com)"; app.page.update(); return
         email.error_text = None
         try:
             app.send_code(e)
-            _show_ok("Code sent — check your email")
+            show_ok("Code sent — check your email")
             code_section.visible = True
             code.error_text = None
             app.page.update()
         except Exception as ex:
-            _show_err(str(ex))
+            show_err(str(ex))
 
     def do_verify(_=None):
-        _clear_msg()
+        clear_msg()
         e = (email.value or "").strip()
         c = (code.value or "").strip()
         if not c:
@@ -342,15 +352,15 @@ def build_forgot_view(app):
         code.error_text = None
         try:
             app.verify_code(e, c)
-            _show_ok("Code verified — set your new password below")
+            show_ok("Code verified — set your new password below")
             password_section.visible = True
             new_pass.error_text = None
             app.page.update()
         except Exception as ex:
-            code.error_text = str(ex); _show_err(str(ex))
+            code.error_text = str(ex); show_err(str(ex))
 
     def do_reset(_=None):
-        _clear_msg()
+        clear_msg()
         e = (email.value or "").strip()
         c = (code.value or "").strip()
         p = new_pass.value or ""
@@ -361,18 +371,18 @@ def build_forgot_view(app):
         new_pass.error_text = None
         try:
             app.update_password(e, p, c)
-            _show_ok("Password updated! Redirecting...")
+            show_ok("Password updated! Redirecting...")
             app.page.go("/login")
         except Exception as ex:
-            _show_err(str(ex))
+            show_err(str(ex))
 
     # ── Card ─────────────────────────────────────────────────────────────────
     card = ft.Container(width=480, padding=ft.padding.symmetric(horizontal=36, vertical=28),
-        border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=_GLOW,
+        border_radius=24, bgcolor=CARD, border=ft.border.all(1, BORDER), shadow=GLOW,
         content=ft.Column(spacing=14, horizontal_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Row(controls=[ft.IconButton(icon=ft.Icons.ARROW_BACK_IOS_NEW_ROUNDED, icon_color=MUTED, icon_size=15,
                 on_click=lambda _: app.page.go("/login"))]),
-            _logo_block("RESET ACCESS"),
+            logo_block("RESET ACCESS"),
             # Step 1 — always visible
             ft.Text("Step 1 — Enter your email", color=MUTED, size=11),
             email,
@@ -385,16 +395,16 @@ def build_forgot_view(app):
             code_section,
             password_section,
         ]))
-    return _auth_shell("/forgot", card)
+    return auth_shell("/forgot", card)
 
 
-_STATUS_COLOR = {
+STATUS_COLOR = {
     "FOR_SALE": SUCCESS,
     "PENDING":  GOLD_DIM,
     "UNLISTED": MUTED,
     "SOLD":     ERROR,
 }
-_STATUS_LABEL = {
+STATUS_LABEL = {
     "FOR_SALE": "For Sale",
     "PENDING":  "Pending",
     "UNLISTED": "Unlisted",
@@ -402,14 +412,14 @@ _STATUS_LABEL = {
 }
 
 
-def _open_zoomed_card(app, item, context="marketplace"):
+def open_zoomed_card(app, item, context="marketplace"):
     """Open an elegant full-detail asset dialog — the 'zoomed card'."""
     is_own    = item.owner == (app.state.username or "")
-    s_color   = _STATUS_COLOR.get(item.asset_status, MUTED)
-    s_label   = _STATUS_LABEL.get(item.asset_status, item.asset_status)
+    s_color   = STATUS_COLOR.get(item.asset_status, MUTED)
+    s_label   = STATUS_LABEL.get(item.asset_status, item.asset_status)
 
-    def _close(_=None):
-        async def _do_close():
+    def close(_=None):
+        async def do_close():
             try:
                 if hasattr(app.page, "close") and app.page.dialog:
                     app.page.close(app.page.dialog)
@@ -418,11 +428,14 @@ def _open_zoomed_card(app, item, context="marketplace"):
                     app.page.update()
             except Exception:
                 pass
-        app.page.run_task(_do_close)
+        app.page.run_task(do_close)
 
     # ── Action buttons (same logic as the small card) ────────────────────────
     def do_buy(_):
-        _close()
+        close()
+        if app.gateway_online is False:
+            app.notify("Gateway server is unreachable. Buying assets is currently unavailable.", error=True)
+            return
         try:
             app.buy_asset(item)
             app.notify("Purchase request signed and sent")
@@ -430,17 +443,20 @@ def _open_zoomed_card(app, item, context="marketplace"):
             app.notify(str(e), error=True)
 
     def do_upload_to_market(_):
-        _close()
+        close()
+        if app.gateway_online is False:
+            app.notify("Gateway server is unreachable. Upload to marketplace is currently unavailable.", error=True)
+            return
         try:
             resp = app.move_to_marketplace(item.asset_id)
             if str(resp.get("type", "")).upper() in ("MOVE_PENDING", "MOVE_SUCCESS"):
-                app.notify(f"'{item.title}' sent to mining — will appear on marketplace once confirmed")
+                app.notify(f"'{item.asset_name}' sent to mining — will appear on marketplace once confirmed")
             app.page.go("/my_assets")
         except Exception as e:
             app.notify(str(e), error=True)
 
     def do_delete(_):
-        _close()
+        close()
         try:
             app.delete_asset(item.asset_id)
             app.notify("Asset deleted")
@@ -449,7 +465,10 @@ def _open_zoomed_card(app, item, context="marketplace"):
             app.notify(str(e), error=True)
 
     def do_unlist(_):
-        _close()
+        close()
+        if app.gateway_online is False:
+            app.notify("Gateway server is unreachable. Unlisting is currently unavailable.", error=True)
+            return
         try:
             app.unlist_asset(item.asset_id)
             app.notify("Unlist request submitted — will update once confirmed")
@@ -501,7 +520,7 @@ def _open_zoomed_card(app, item, context="marketplace"):
                 width=32, height=32, border_radius=16,
                 bgcolor="#00000099",
                 alignment=ft.Alignment(0, 0),
-                on_click=_close,
+                on_click=close,
                 content=ft.Icon(ft.Icons.CLOSE_ROUNDED, color="#CCCCCC", size=16),
             ),
             right=12, top=12,
@@ -509,15 +528,15 @@ def _open_zoomed_card(app, item, context="marketplace"):
     ])
 
     # ── Badges ───────────────────────────────────────────────────────────────
-    def _badge(label, text_color, border_color, bg="#08090D"):
+    def badge(label, text_color, border_color, bg="#08090D"):
         return ft.Container(border_radius=6, bgcolor=bg, border=ft.border.all(1, border_color),
             padding=ft.padding.symmetric(horizontal=9, vertical=4),
             content=ft.Text(label, color=text_color, size=10, weight=ft.FontWeight.BOLD))
 
     # ── Date ─────────────────────────────────────────────────────────────────
     try:
-        from datetime import datetime as _dt
-        date_str = _dt.fromisoformat(item.created_at).strftime("%d %b %Y") if item.created_at else ""
+        from datetime import datetime as dt
+        date_str = dt.fromisoformat(item.created_at).strftime("%d %b %Y") if item.created_at else ""
     except Exception:
         date_str = str(item.created_at or "")
 
@@ -526,14 +545,14 @@ def _open_zoomed_card(app, item, context="marketplace"):
         padding=ft.padding.only(left=26, right=26, top=22, bottom=22),
         content=ft.Column(spacing=12, controls=[
             # Title
-            ft.Text(item.title, color=TEXT, size=21, weight=ft.FontWeight.BOLD, selectable=True),
+            ft.Text(item.asset_name, color=TEXT, size=21, weight=ft.FontWeight.BOLD, selectable=True),
             # Meta row
             ft.Row(spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True, controls=[
                 ft.Text(f"by {item.owner}", color=MUTED, size=12),
                 *([ ft.Text("·", color=BORDER, size=12),
                     ft.Text(date_str, color=MUTED, size=11) ] if date_str else []),
-                _badge(s_label, s_color, s_color),
-                _badge((item.file_type or "?").upper(), GOLD_DIM, BORDER, bg="#120F00"),
+                badge(s_label, s_color, s_color),
+                badge((item.file_type or "?").upper(), GOLD_DIM, BORDER, bg="#120F00"),
             ]),
             # Description box
             ft.Container(
@@ -550,7 +569,7 @@ def _open_zoomed_card(app, item, context="marketplace"):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
                     ft.Row(spacing=4, vertical_alignment=ft.CrossAxisAlignment.BASELINE, controls=[
-                        ft.Text(f"{item.price:.2f}", color=GOLD, size=30,
+                        ft.Text(f"{item.cost:.2f}", color=GOLD, size=30,
                             weight=ft.FontWeight.BOLD),
                         ft.Text("AUR", color=GOLD_DIM, size=13),
                     ]),
@@ -573,7 +592,7 @@ def _open_zoomed_card(app, item, context="marketplace"):
 
     # Schedule the dialog opening on Flet's event loop so it always renders,
     # regardless of which thread triggered the click.
-    async def _do_open():
+    async def do_open():
         try:
             app.page.open(dlg)
         except AttributeError:
@@ -581,17 +600,20 @@ def _open_zoomed_card(app, item, context="marketplace"):
             dlg.open = True
             app.page.update()
 
-    app.page.run_task(_do_open)
+    app.page.run_task(do_open)
 
 
-def _asset_card(app, item, context="marketplace"):
+def asset_card(app, item, context="marketplace"):
     is_own = item.owner == (app.state.username or "")
-    status_color = _STATUS_COLOR.get(item.asset_status, MUTED)
-    status_label = _STATUS_LABEL.get(item.asset_status, item.asset_status)
+    status_color = STATUS_COLOR.get(item.asset_status, MUTED)
+    status_label = STATUS_LABEL.get(item.asset_status, item.asset_status)
 
     # ── Action callbacks ────────────────────────────────────────────────────────
 
     def do_buy(_):
+        if app.gateway_online is False:
+            app.notify("Gateway server is unreachable. Buying assets is currently unavailable.", error=True)
+            return
         try:
             app.buy_asset(item)
             app.notify("Purchase request signed and sent")
@@ -599,6 +621,9 @@ def _asset_card(app, item, context="marketplace"):
             app.notify(str(e), error=True)
 
     def do_upload_to_market(_):
+        if app.gateway_online is False:
+            app.notify("Gateway server is unreachable. Upload to marketplace is currently unavailable.", error=True)
+            return
         try:
             resp = app.move_to_marketplace(item.asset_id)
             resp_type = str(resp.get("type", "")).upper()
@@ -617,6 +642,9 @@ def _asset_card(app, item, context="marketplace"):
             app.notify(str(e), error=True)
 
     def do_unlist(_):
+        if app.gateway_online is False:
+            app.notify("Gateway server is unreachable. Unlisting is currently unavailable.", error=True)
+            return
         try:
             app.unlist_asset(item.asset_id)
             app.notify("Unlist request submitted — will update once confirmed")
@@ -626,7 +654,7 @@ def _asset_card(app, item, context="marketplace"):
 
     def on_hover(e):
         e.control.border = ft.border.all(1, GOLD_DIM if e.data == "true" else BORDER_DIM)
-        e.control.shadow = _SHADOW if e.data == "true" else []
+        e.control.shadow = SHADOW if e.data == "true" else []
         e.control.update()
 
     type_badge = ft.Container(border_radius=6, bgcolor="#120F00", border=ft.border.all(1, BORDER),
@@ -646,7 +674,7 @@ def _asset_card(app, item, context="marketplace"):
         bgcolor="#08090E",
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         alignment=ft.Alignment(0, 0),
-        on_click=lambda _: _open_zoomed_card(app, item, context),
+        on_click=lambda _: open_zoomed_card(app, item, context),
         tooltip="Click to enlarge",
         content=ft.Stack(controls=[
             ft.Container(
@@ -662,7 +690,7 @@ def _asset_card(app, item, context="marketplace"):
         ]),
     )
 
-    def _load_image():
+    def load_image():
         try:
             path = app.image_cache.get_path(item.asset_id)
             if path and path.exists():
@@ -677,16 +705,16 @@ def _asset_card(app, item, context="marketplace"):
                         bottom=6, right=6,
                     ),
                 ])
-                async def _upd():
+                async def upd():
                     try:
                         img_container.update()
                     except Exception:
                         pass
-                app.page.run_task(_upd)
+                app.page.run_task(upd)
         except Exception as exc:
-            _logger.warning(f"Card image load error {item.asset_id}: {exc}")
+            logger.warning(f"Card image load error {item.asset_id}: {exc}")
 
-    threading.Thread(target=_load_image, daemon=True).start()
+    threading.Thread(target=load_image, daemon=True).start()
 
     # ── Action buttons ──────────────────────────────────────────────────────────
     action_controls = []
@@ -736,7 +764,7 @@ def _asset_card(app, item, context="marketplace"):
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
         controls=[
             ft.Column(spacing=0, tight=True, controls=[
-                ft.Text(f"{item.price:.2f}", color=GOLD, size=18, weight=ft.FontWeight.BOLD),
+                ft.Text(f"{item.cost:.2f}", color=GOLD, size=18, weight=ft.FontWeight.BOLD),
                 ft.Text("AUR", color=GOLD_DIM, size=10),
             ]),
             ft.Row(spacing=6, controls=action_controls),
@@ -751,7 +779,7 @@ def _asset_card(app, item, context="marketplace"):
             ft.Container(padding=14, content=ft.Column(spacing=8, controls=[
                 ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.START, controls=[
-                    ft.Text(item.title, color=TEXT, size=14, weight=ft.FontWeight.BOLD,
+                    ft.Text(item.asset_name, color=TEXT, size=14, weight=ft.FontWeight.BOLD,
                         max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True),
                     ft.Row(spacing=4, controls=[status_badge, type_badge]),
                 ]),
@@ -766,41 +794,55 @@ def _asset_card(app, item, context="marketplace"):
 
 def build_marketplace_view(app):
     # Clear stale event sets so assets just loaded aren't immediately removed
-    app._sold_asset_ids.clear()
-    app._removed_asset_ids.clear()
-    app._unlisted_asset_ids.clear()
+    app.sold_asset_ids.clear()
+    app.removed_asset_ids.clear()
+    app.unlisted_asset_ids.clear()
+
+    gateway_banner = ft.Container(
+        visible=app.gateway_online is False,
+        bgcolor="#1A0C00", border_radius=10,
+        border=ft.border.all(1, "#6B3A00"),
+        padding=ft.padding.symmetric(horizontal=14, vertical=10),
+        content=ft.Row(spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
+            ft.Icon(ft.Icons.WIFI_OFF_ROUNDED, color="#E9883A", size=18),
+            ft.Text(
+                "Gateway server is unreachable. Buying assets is currently unavailable.",
+                color="#E9883A", size=12,
+            ),
+        ]),
+    )
 
     grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
     status_text = ft.Text("Loading...", color=MUTED, size=12)
     card_map: dict[str, ft.Container] = {}
-    _active = [True]
+    active = [True]
 
-    def _load():
+    def load():
         try:
             id_entries = app.get_market_asset_ids()
         except Exception as exc:
-            async def _err():
+            async def err():
                 status_text.value = f"Error: {exc}"
                 app.page.update()
-            app.page.run_task(_err)
+            app.page.run_task(err)
             app.notify(str(exc), error=True)
             return
 
         if not id_entries:
-            async def _empty():
+            async def empty():
                 status_text.value = "No assets listed yet"
                 app.page.update()
-            app.page.run_task(_empty)
+            app.page.run_task(empty)
             return
 
-        async def _init():
+        async def init():
             status_text.value = f"Loading {len(id_entries)} asset(s)…"
             app.page.update()
-        app.page.run_task(_init)
+        app.page.run_task(init)
 
         loaded = 0
         for entry in id_entries:
-            if not _active[0]:
+            if not active[0]:
                 return
             asset_id = entry.get("id", "") if isinstance(entry, dict) else str(entry)
             version = entry.get("version", 1) if isinstance(entry, dict) else 1
@@ -809,32 +851,33 @@ def build_marketplace_view(app):
             item = app.load_asset_by_id(asset_id, version)  # network I/O in background thread
             if not item:
                 continue
-            card = _asset_card(app, item)
+            card = asset_card(app, item)
             wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4, "lg": 3}, content=card)
             card_map[asset_id] = wrapper
             loaded += 1
-            _n, _total = loaded, len(id_entries)
-            async def _add(w=wrapper, n=_n, total=_total):
-                if not _active[0]:
+            n, total = loaded, len(id_entries)
+            async def add(w=wrapper, n=n, total=total):
+                if not active[0]:
                     return
                 grid.controls.append(w)
                 status_text.value = f"{n} / {total} loaded"
                 app.page.update()
-            app.page.run_task(_add)
+            app.page.run_task(add)
 
-        _final = loaded
-        async def _done():
-            status_text.value = f"{_final} asset{'s' if _final != 1 else ''} listed"
+        final = loaded
+        async def done():
+            status_text.value = f"{final} asset{'s' if final != 1 else ''} listed"
             app.page.update()
-        app.page.run_task(_done)
+        app.page.run_task(done)
 
-    def _monitor():
-        while _active[0]:
+    def monitor():
+        prev_gateway_online = app.gateway_online
+        while active[0]:
             time.sleep(2)
-            if not _active[0]:
+            if not active[0]:
                 return
-            app._drain_asset_events()
-            removed_ids = list(app._sold_asset_ids | app._removed_asset_ids | app._unlisted_asset_ids)
+            app.drain_asset_events()
+            removed_ids = list(app.sold_asset_ids | app.removed_asset_ids | app.unlisted_asset_ids)
             changed = False
             for asset_id in removed_ids:
                 wrapper = card_map.pop(asset_id, None)
@@ -842,29 +885,40 @@ def build_marketplace_view(app):
                     grid.controls.remove(wrapper)
                     changed = True
             if changed:
-                _n = len(card_map)
-                async def _remove_update(n=_n):
+                n = len(card_map)
+                async def remove_update(n=n):
                     status_text.value = f"{n} asset{'s' if n != 1 else ''} listed"
                     app.page.update()
-                app.page.run_task(_remove_update)
+                app.page.run_task(remove_update)
+            # Update gateway banner if state changed
+            if app.gateway_online != prev_gateway_online:
+                prev_gateway_online = app.gateway_online
+                async def update_banner(gw=app.gateway_online):
+                    gateway_banner.visible = gw is False
+                    try:
+                        gateway_banner.update()
+                    except Exception:
+                        pass
+                app.page.run_task(update_banner)
 
     def do_refresh(_):
-        _active[0] = False
-        async def _clear():
+        active[0] = False
+        async def clear():
             grid.controls.clear()
             card_map.clear()
             app.page.update()
-        app.page.run_task(_clear)
+        app.page.run_task(clear)
         try:
             app.request_balance()
         except Exception as e:
             app.notify(str(e), error=True)
         app.page.go("/marketplace")
 
-    threading.Thread(target=_load, daemon=True).start()
-    threading.Thread(target=_monitor, daemon=True).start()
+    threading.Thread(target=load, daemon=True).start()
+    threading.Thread(target=monitor, daemon=True).start()
 
     body = ft.Column(spacing=14, controls=[
+        gateway_banner,
         ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
             ft.Column(spacing=2, tight=True, controls=[
                 ft.Text("Marketplace", color=TEXT, size=22, weight=ft.FontWeight.BOLD),
@@ -876,34 +930,34 @@ def build_marketplace_view(app):
         ]),
         grid,
     ])
-    return _main_shell(app, "/marketplace", "Trade digital ownership", body)
+    return main_shell(app, "/marketplace", "Trade digital ownership", body)
 
 
 def build_upload_view(app):
     picked = {"path": "", "for_sale": True}
     selected = ft.Text("No file selected", color=MUTED, size=12)
-    asset_name = _input("Asset Name", icon=ft.Icons.TITLE_ROUNDED)
+    asset_name = input("Asset Name", icon=ft.Icons.TITLE_ROUNDED)
     description = ft.TextField(label="Description", multiline=True, min_lines=2, max_lines=4,
         border_radius=11, bgcolor="#060709", border_color="#2E2218", focused_border_color=GOLD,
         color=TEXT, label_style=ft.TextStyle(color=MUTED, size=12))
-    cost = _input("Price (AUR)", icon=ft.Icons.CURRENCY_EXCHANGE_ROUNDED)
+    cost = input("Price (AUR)", icon=ft.Icons.CURRENCY_EXCHANGE_ROUNDED)
     file_hint   = ft.Text("Select a file above to enable upload", color=MUTED, size=11, italic=True)
     upload_err  = ft.Text("", color=ERROR, size=12, visible=False)   # inline error below status
     upload_btn  = ft.FilledButton("Upload Asset", height=46, bgcolor=GOLD, color="#130E00",
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12)),
         disabled=True)
 
-    def _set_file_hint_error(msg):
+    def set_file_hint_error(msg):
         file_hint.value = msg
         file_hint.color = ERROR
         file_hint.italic = False
         file_hint.visible = True
         app.page.update()
 
-    def _clear_upload_err():
+    def clear_upload_err():
         upload_err.value = ""; upload_err.visible = False
 
-    def _btn_style(active):
+    def btn_style(active):
         return ft.ButtonStyle(
             color=GOLD if active else MUTED,
             side=ft.BorderSide(1.5 if active else 1, GOLD if active else "#252535"),
@@ -912,25 +966,25 @@ def build_upload_view(app):
             padding=ft.padding.symmetric(horizontal=18, vertical=9),
         )
 
-    btn_marketplace = ft.OutlinedButton("Marketplace", style=_btn_style(True))
-    btn_my_assets = ft.OutlinedButton("My Assets", style=_btn_style(False))
+    btn_marketplace = ft.OutlinedButton("Marketplace", style=btn_style(True))
+    btn_my_assets = ft.OutlinedButton("My Assets", style=btn_style(False))
 
-    def _select_marketplace(_):
+    def select_marketplace(_):
         picked["for_sale"] = True
-        btn_marketplace.style = _btn_style(True)
-        btn_my_assets.style = _btn_style(False)
+        btn_marketplace.style = btn_style(True)
+        btn_my_assets.style = btn_style(False)
         btn_marketplace.update()
         btn_my_assets.update()
 
-    def _select_my_assets(_):
+    def select_my_assets(_):
         picked["for_sale"] = False
-        btn_marketplace.style = _btn_style(False)
-        btn_my_assets.style = _btn_style(True)
+        btn_marketplace.style = btn_style(False)
+        btn_my_assets.style = btn_style(True)
         btn_marketplace.update()
         btn_my_assets.update()
 
-    btn_marketplace.on_click = _select_marketplace
-    btn_my_assets.on_click = _select_my_assets
+    btn_marketplace.on_click = select_marketplace
+    btn_my_assets.on_click = select_my_assets
 
     upload_to_row = ft.Row(spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
         ft.Text("Upload To:", color=MUTED, size=12),
@@ -946,7 +1000,7 @@ def build_upload_view(app):
         app.page.services.append(picker)
         setattr(app.page, "_upload_picker", picker)
 
-    async def _choose_file_async():
+    async def choose_file_async():
         files = await picker.pick_files(
             allow_multiple=False,
             file_type=ft.FilePickerFileType.CUSTOM,
@@ -956,18 +1010,18 @@ def build_upload_view(app):
             return
         f = files[0]
         if not f.path:
-            _set_file_hint_error("Could not read file path — try again")
+            set_file_hint_error("Could not read file path — try again")
             return
         try:
             size = Path(f.path).stat().st_size
             if size == 0:
-                _set_file_hint_error("File is empty (0 bytes) — choose a valid image")
+                set_file_hint_error("File is empty (0 bytes) — choose a valid image")
                 return
             if size > 5 * 1024 * 1024:
-                _set_file_hint_error(f"File is too large ({size / 1024 / 1024:.1f} MB). Maximum is 5 MB.")
+                set_file_hint_error(f"File is too large ({size / 1024 / 1024:.1f} MB). Maximum is 5 MB.")
                 return
         except Exception:
-            _set_file_hint_error("Cannot read the selected file")
+            set_file_hint_error("Cannot read the selected file")
             return
         picked["path"] = f.path
         selected.value = f.name
@@ -980,28 +1034,34 @@ def build_upload_view(app):
         app.page.update()
 
     def choose_file(_):
-        app.page.run_task(_choose_file_async)
+        app.page.run_task(choose_file_async)
 
     status_text = ft.Text("", size=11, color=MUTED)
 
     def do_upload(_):
-        _clear_upload_err()
+        clear_upload_err()
         asset_name.error_text = None
         cost.error_text = None
+        # ── Gateway check for marketplace upload ───────────────────────────
+        if picked["for_sale"] and app.gateway_online is False:
+            upload_err.value = "Gateway server is unreachable. Switch to 'My Assets' to upload without the marketplace."
+            upload_err.visible = True
+            app.page.update()
+            return
         # ── File validation ────────────────────────────────────────────────
         if not picked["path"]:
-            _set_file_hint_error("No file selected — click Choose File first")
+            set_file_hint_error("No file selected — click Choose File first")
             return
         try:
             file_size = Path(picked["path"]).stat().st_size
             if file_size == 0:
-                _set_file_hint_error("File is empty (0 bytes) — choose a valid image")
+                set_file_hint_error("File is empty (0 bytes) — choose a valid image")
                 return
             if file_size > 5 * 1024 * 1024:
-                _set_file_hint_error(f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum is 5 MB.")
+                set_file_hint_error(f"File too large ({file_size / 1024 / 1024:.1f} MB). Maximum is 5 MB.")
                 return
         except Exception:
-            _set_file_hint_error("Cannot read the selected file")
+            set_file_hint_error("Cannot read the selected file")
             return
         # ── Field validation ───────────────────────────────────────────────
         name_val = (asset_name.value or "").strip()
@@ -1029,55 +1089,55 @@ def build_upload_view(app):
         upload_btn.disabled = True
         status_text.value = "Uploading..."
         status_text.color = GOLD_SOFT
-        async def _initial_update():
+        async def initial_update():
             app.page.update()
-        app.page.run_task(_initial_update)
+        app.page.run_task(initial_update)
 
         for_sale_snap = picked["for_sale"]
 
-        def _upload_thread():
-            def _set_status(msg, color=MUTED):
-                async def _do():
+        def upload_thread():
+            def set_status(msg, color=MUTED):
+                async def do():
                     status_text.value = msg
                     status_text.color = color
                     app.page.update()
-                app.page.run_task(_do)
+                app.page.run_task(do)
 
-            def _show_error(msg):
-                _logger.error(f"[upload] {msg}")
-                async def _do():
+            def show_error(msg):
+                logger.error(f"[upload] {msg}")
+                async def do():
                     status_text.value = ""
                     upload_err.value = str(msg)
                     upload_err.visible = True
                     upload_btn.disabled = False
                     app.page.update()
-                app.page.run_task(_do)
+                app.page.run_task(do)
 
             try:
-                _logger.info(f"[upload] start path={path_snap!r} name={name_val!r} type={file_type} cost={cost_val} for_sale={for_sale_snap}")
-                _set_status("Uploading asset...")
+                logger.info(f"[upload] start path={path_snap!r} name={name_val!r} type={file_type} cost={cost_val} for_sale={for_sale_snap}")
+                set_status("Uploading asset...")
                 app.upload_asset(path_snap, name_val, desc_snap, file_type, cost_val, for_sale=for_sale_snap)
-                _logger.info("[upload] UPLOAD_SUCCESS — asset saved")
-                async def _success():
+                logger.info("[upload] UPLOAD_SUCCESS — asset saved")
+                async def success():
                     status_text.value = ""
                     app.page.snack_bar = ft.SnackBar(content=ft.Text("Upload complete!"), bgcolor="#136F3A")
                     app.page.snack_bar.open = True
                     app.page.update()
-                app.page.run_task(_success)
+                app.page.run_task(success)
                 dest = "/marketplace" if for_sale_snap else "/my_assets"
                 # Navigate on the Flet event loop to avoid coroutine/threading issues
-                async def _navigate():
+                async def navigate():
                     app.page.go(dest)
-                app.page.run_task(_navigate)
+                app.page.run_task(navigate)
             except Exception as exc:
-                _show_error(str(exc))
+                show_error(str(exc))
 
-        threading.Thread(target=_upload_thread, daemon=True).start()
+        threading.Thread(target=upload_thread, daemon=True).start()
 
     upload_btn.on_click = do_upload
 
     body = ft.Container(width=640, bgcolor=CARD, border_radius=20, border=ft.border.all(1, BORDER),
-        shadow=_GLOW, padding=26,
+        shadow=GLOW, padding=26,
         content=ft.Column(spacing=14, controls=[
             ft.Row(spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                 ft.Icon(ft.Icons.ADD_PHOTO_ALTERNATE_OUTLINED, color=GOLD, size=22),
@@ -1086,7 +1146,7 @@ def build_upload_view(app):
                     ft.Text("Upload an image asset to Aurex.", color=MUTED, size=11),
                 ]),
             ]),
-            _divider(),
+            divider(),
             ft.Row(spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                 ft.FilledButton("Choose File", bgcolor="#1C1400", color=GOLD_SOFT,
                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9), side=ft.BorderSide(1, BORDER)),
@@ -1101,7 +1161,7 @@ def build_upload_view(app):
             upload_err,
             upload_btn,
         ]))
-    return _main_shell(app, "/upload", "Mint a new asset",
+    return main_shell(app, "/upload", "Mint a new asset",
         ft.Row(alignment=ft.MainAxisAlignment.CENTER,
                vertical_alignment=ft.CrossAxisAlignment.START,
                controls=[body]))
@@ -1113,17 +1173,17 @@ def build_settings_view(app):
     preview    = ft.Text("", color="#5A6A7A", selectable=True, size=11, font_family="monospace")
     local_wallet_path = "Client/{}/wallet.json".format(app.state.username or "")
 
-    def _show_wallet_err(msg):
+    def show_wallet_err(msg):
         wallet_err.value = str(msg)
         wallet_err.visible = True
         app.page.update()
 
-    def _clear_wallet_err():
+    def clear_wallet_err():
         wallet_err.value = ""
         wallet_err.visible = False
 
     def refresh_wallet_ui():
-        _clear_wallet_err()
+        clear_wallet_err()
         if app.state.wallet_loaded and app.wallet_session:
             status.value = app.state.wallet_status_message or "Wallet ready"
             status.color = SUCCESS
@@ -1147,20 +1207,50 @@ def build_settings_view(app):
         setattr(app.page, "_wallet_export_picker", export_picker)
 
     def generate_wallet(_):
-        try:
-            app.generate_new_wallet()
-            refresh_wallet_ui()
-        except Exception as exc:
-            _show_wallet_err(str(exc))
+        def _on_confirm(e):
+            app.page.dialog.open = False
+            app.page.update()
+            try:
+                app.generate_new_wallet()
+                refresh_wallet_ui()
+            except Exception as exc:
+                show_wallet_err(str(exc))
+
+        def _on_cancel(e):
+            app.page.dialog.open = False
+            app.page.update()
+
+        app.page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Generate New Wallet?", color=GOLD),
+            content=ft.Text(
+                "A new wallet means a new identity.\n\n"
+                "All assets you currently own will no longer be yours — "
+                "your ownership and access to them will be permanently lost. "
+                "This action cannot be undone.",
+                color=TEXT,
+            ),
+            bgcolor="#12100A",
+            actions=[
+                ft.TextButton("Cancel", on_click=_on_cancel,
+                    style=ft.ButtonStyle(color=MUTED)),
+                ft.FilledButton("OK — Generate New Wallet", bgcolor=GOLD, color="#130E00",
+                    on_click=_on_confirm,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=9))),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        app.page.dialog.open = True
+        app.page.update()
 
     def load_default(_):
         try:
             app.load_default_wallet()
             refresh_wallet_ui()
         except Exception as exc:
-            _show_wallet_err(str(exc))
+            show_wallet_err(str(exc))
 
-    async def _import_wallet_async():
+    async def import_wallet_async():
         files = await import_picker.pick_files(
             allow_multiple=False,
             file_type=ft.FilePickerFileType.CUSTOM,
@@ -1172,14 +1262,14 @@ def build_settings_view(app):
             app.load_wallet_from_file(files[0].path)
             refresh_wallet_ui()
         except Exception as exc:
-            _show_wallet_err(str(exc))
+            show_wallet_err(str(exc))
 
     def import_wallet(_):
-        app.page.run_task(_import_wallet_async)
+        app.page.run_task(import_wallet_async)
 
-    async def _export_wallet_async():
+    async def export_wallet_async():
         if not app.state.wallet_loaded:
-            _show_wallet_err("Load or generate a wallet before exporting")
+            show_wallet_err("Load or generate a wallet before exporting")
             return
         save_path = await export_picker.save_file(
             dialog_title="Save wallet.json",
@@ -1190,17 +1280,17 @@ def build_settings_view(app):
         if save_path:
             try:
                 app.export_wallet(save_path)
-                _clear_wallet_err()
+                clear_wallet_err()
                 app.notify("Wallet exported")
             except Exception as exc:
-                _show_wallet_err(str(exc))
+                show_wallet_err(str(exc))
 
     def export_wallet(_):
-        app.page.run_task(_export_wallet_async)
+        app.page.run_task(export_wallet_async)
 
     def continue_market(_):
         if not app.state.wallet_loaded:
-            _show_wallet_err("You must load or generate a wallet before accessing the marketplace")
+            show_wallet_err("You must load or generate a wallet before accessing the marketplace")
             return
         app.page.go("/marketplace")
 
@@ -1267,7 +1357,7 @@ def build_settings_view(app):
     )
 
     body = ft.Container(width=800, bgcolor=CARD, border_radius=22, border=ft.border.all(1, BORDER),
-        shadow=_GLOW, padding=28,
+        shadow=GLOW, padding=28,
         content=ft.Column(spacing=18, controls=[
             ft.Row(spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER, controls=[
                 ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, color=GOLD, size=24),
@@ -1308,7 +1398,7 @@ def build_settings_view(app):
             ft.Container(height=1, bgcolor=BORDER_DIM, margin=ft.margin.symmetric(vertical=4)),
             danger_section,
         ]))
-    return _main_shell(app, "/settings", "Identity & settings",
+    return main_shell(app, "/settings", "Identity & settings",
         ft.Row(alignment=ft.MainAxisAlignment.CENTER,
                vertical_alignment=ft.CrossAxisAlignment.START,
                controls=[body]))
@@ -1329,7 +1419,7 @@ def build_notifications_view(app):
                 ft.Text("No notifications yet", color=MUTED, size=14),
             ]))]
 
-    return _main_shell(app, "/notifications", "System updates",
+    return main_shell(app, "/notifications", "System updates",
         ft.Column(spacing=12, controls=[
             ft.Text("Notifications", color=TEXT, size=22, weight=ft.FontWeight.BOLD),
             *rows,
@@ -1337,41 +1427,41 @@ def build_notifications_view(app):
 
 
 def build_my_assets_view(app):
-    app._unlisted_asset_ids.clear()
-    app._removed_asset_ids.clear()
-    app._listed_asset_ids.clear()
+    app.unlisted_asset_ids.clear()
+    app.removed_asset_ids.clear()
+    app.listed_asset_ids.clear()
 
     grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
     status_text = ft.Text("Loading...", color=MUTED, size=12)
     card_map: dict[str, ft.Container] = {}
-    _active = [True]
+    active = [True]
 
-    def _load():
+    def load():
         try:
             id_entries = app.get_my_asset_ids()
         except Exception as exc:
-            async def _err():
+            async def err():
                 status_text.value = f"Error: {exc}"
                 app.page.update()
-            app.page.run_task(_err)
+            app.page.run_task(err)
             app.notify(str(exc), error=True)
             return
 
         if not id_entries:
-            async def _empty():
+            async def empty():
                 status_text.value = "No assets yet"
                 app.page.update()
-            app.page.run_task(_empty)
+            app.page.run_task(empty)
             return
 
-        async def _init():
+        async def init():
             status_text.value = f"Loading {len(id_entries)} asset(s)..."
             app.page.update()
-        app.page.run_task(_init)
+        app.page.run_task(init)
 
         loaded = 0
         for entry in id_entries:
-            if not _active[0]:
+            if not active[0]:
                 return
             asset_id = entry.get("id", "") if isinstance(entry, dict) else str(entry)
             version = entry.get("version", 1) if isinstance(entry, dict) else 1
@@ -1380,37 +1470,37 @@ def build_my_assets_view(app):
             item = app.load_asset_by_id(asset_id, version)
             if not item:
                 continue
-            card = _asset_card(app, item, context="my_assets")
+            card = asset_card(app, item, context="my_assets")
             wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=card)
             card_map[asset_id] = wrapper
             loaded += 1
-            _n, _total = loaded, len(id_entries)
-            async def _add(w=wrapper, n=_n, total=_total):
-                if not _active[0]:
+            n, total = loaded, len(id_entries)
+            async def add(w=wrapper, n=n, total=total):
+                if not active[0]:
                     return
                 grid.controls.append(w)
                 status_text.value = f"{n} / {total} loaded"
                 app.page.update()
-            app.page.run_task(_add)
+            app.page.run_task(add)
 
-        _final = loaded
-        async def _done():
-            status_text.value = f"{_final} asset{'s' if _final != 1 else ''} owned"
+        final = loaded
+        async def done():
+            status_text.value = f"{final} asset{'s' if final != 1 else ''} owned"
             app.page.update()
-        app.page.run_task(_done)
+        app.page.run_task(done)
 
-    def _monitor():
+    def monitor():
         """Remove cards for assets that moved away (deleted, or PENDING→FOR_SALE)."""
-        while _active[0]:
+        while active[0]:
             time.sleep(2)
-            if not _active[0]:
+            if not active[0]:
                 return
-            app._drain_asset_events()
+            app.drain_asset_events()
             # Assets that went FOR_SALE leave my_assets; deleted/removed too
             gone = list(
-                app._listed_asset_ids    # PENDING → FOR_SALE: no longer in my_assets
-                | app._removed_asset_ids
-                | app._sold_asset_ids
+                app.listed_asset_ids    # PENDING → FOR_SALE: no longer in my_assets
+                | app.removed_asset_ids
+                | app.sold_asset_ids
             )
             changed = False
             for asset_id in gone:
@@ -1419,27 +1509,27 @@ def build_my_assets_view(app):
                     grid.controls.remove(wrapper)
                     changed = True
             if changed:
-                _n = len(card_map)
-                async def _upd(n=_n):
+                n = len(card_map)
+                async def upd(n=n):
                     status_text.value = f"{n} asset{'s' if n != 1 else ''} owned"
                     app.page.update()
-                app.page.run_task(_upd)
+                app.page.run_task(upd)
 
     def do_refresh(_):
-        _active[0] = False
-        async def _clear():
+        active[0] = False
+        async def clear():
             grid.controls.clear()
             card_map.clear()
             app.page.update()
-        app.page.run_task(_clear)
+        app.page.run_task(clear)
         try:
             app.request_balance()
         except Exception as e:
             app.notify(str(e), error=True)
         app.page.go("/my_assets")
 
-    threading.Thread(target=_load, daemon=True).start()
-    threading.Thread(target=_monitor, daemon=True).start()
+    threading.Thread(target=load, daemon=True).start()
+    threading.Thread(target=monitor, daemon=True).start()
 
     body = ft.Column(spacing=14, controls=[
         ft.Row(alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1454,4 +1544,4 @@ def build_my_assets_view(app):
         ]),
         grid,
     ])
-    return _main_shell(app, "/my_assets", "Personal portfolio", body)
+    return main_shell(app, "/my_assets", "Personal portfolio", body)
