@@ -122,7 +122,7 @@ def main_shell(app, route, title, body):
     # Balance display — reference stored on app so the balance monitor can update it
     balance_text = ft.Text(f"{app.state.balance:.2f} AUR", color=GOLD_SOFT, size=11,
         weight=ft.FontWeight.W_600)
-    app.balance_text = balance_text
+    app._balance_text = balance_text
 
     username = app.state.username or ""
     head = ft.Container(
@@ -1207,20 +1207,32 @@ def build_settings_view(app):
         setattr(app.page, "_wallet_export_picker", export_picker)
 
     def generate_wallet(_):
+        dlg_gen: list = []  # mutable cell so closures can reference the dialog
+
         def _on_confirm(e):
-            app.page.dialog.open = False
-            app.page.update()
             try:
-                app.generate_new_wallet()
-                refresh_wallet_ui()
-            except Exception as exc:
-                show_wallet_err(str(exc))
+                if dlg_gen:
+                    app.page.close(dlg_gen[0])
+            except Exception:
+                pass
+
+            def _worker():
+                try:
+                    app.generate_new_wallet()
+                    refresh_wallet_ui()
+                except Exception as exc:
+                    show_wallet_err(str(exc))
+
+            threading.Thread(target=_worker, daemon=True).start()
 
         def _on_cancel(e):
-            app.page.dialog.open = False
-            app.page.update()
+            try:
+                if dlg_gen:
+                    app.page.close(dlg_gen[0])
+            except Exception:
+                pass
 
-        app.page.dialog = ft.AlertDialog(
+        dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Generate New Wallet?", color=GOLD),
             content=ft.Text(
@@ -1240,8 +1252,8 @@ def build_settings_view(app):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        app.page.dialog.open = True
-        app.page.update()
+        dlg_gen.append(dlg)
+        app.page.open(dlg)
 
     def load_default(_):
         try:
@@ -1295,26 +1307,38 @@ def build_settings_view(app):
         app.page.go("/marketplace")
 
     def do_delete_account(_):
+        dlg_del: list = []
+
         def on_confirm(e):
-            app.page.dialog.open = False
-            app.page.update()
+            # Close dialog immediately, then run blocking network call in background
             try:
-                app.delete_account()
-            except Exception as exc:
-                app.notify(str(exc), error=True)
-                return
-            app.page.go("/login")
+                if dlg_del:
+                    app.page.close(dlg_del[0])
+            except Exception:
+                pass
+
+            def _worker():
+                try:
+                    app.delete_account()
+                except Exception as exc:
+                    app.notify(str(exc), error=True)
+                    return
+                app.page.go("/login")
+
+            threading.Thread(target=_worker, daemon=True).start()
 
         def on_cancel(e):
-            app.page.dialog.open = False
-            app.page.update()
+            try:
+                if dlg_del:
+                    app.page.close(dlg_del[0])
+            except Exception:
+                pass
 
-        app.page.dialog = ft.AlertDialog(
+        dlg = ft.AlertDialog(
             modal=True,
             title=ft.Text("Delete Account", color=ERROR),
             content=ft.Text(
-                "By clicking OK you agree to delete your account and all your assets. "
-                "This action cannot be undone.",
+                "Are you sure you want to delete your account? This action cannot be undone.",
                 color=TEXT,
             ),
             bgcolor="#1A0808",
@@ -1327,8 +1351,8 @@ def build_settings_view(app):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        app.page.dialog.open = True
-        app.page.update()
+        dlg_del.append(dlg)
+        app.page.open(dlg)
 
     refresh_wallet_ui()
 

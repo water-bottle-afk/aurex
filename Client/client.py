@@ -81,6 +81,7 @@ _PUSH_EVENTS = frozenset({
     "ASSET_SOLD",
     "ASSET_REMOVED",
     "ASSET_UNLISTED",
+    "HIDE_ASSETS_OF_USER",
 })
 
 
@@ -279,6 +280,7 @@ class Client:
         self.asset_removed_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_unlisted_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_listed_queue: "queue.Queue[str]" = queue.Queue()   # PENDING → FOR_SALE
+        self.hide_assets_queue: "queue.Queue[str]" = queue.Queue()    # HIDE_ASSETS_OF_USER silent removal
         self.balance_queue: "queue.Queue[float]" = queue.Queue()
         self.bought_asset_queue: "queue.Queue[str]" = queue.Queue()
 
@@ -355,12 +357,25 @@ class Client:
                     self.notification_queue.put(text)
                     if asset_id:
                         self.asset_sold_queue.put(asset_id)
-                elif msg_type in ("ASSET_REMOVED", "ASSET_UNLISTED"):
+                elif msg_type == "ASSET_REMOVED":
+                    asset_id = str(msg.get("asset_id", ""))
+                    asset_name = str(msg.get("asset_name", asset_id))
+                    self.notification_queue.put(f"Asset '{asset_name}' was removed from marketplace")
+                    if asset_id:
+                        self.asset_removed_queue.put(asset_id)
+                elif msg_type == "ASSET_UNLISTED":
                     asset_id = str(msg.get("asset_id", ""))
                     msg_text = str(msg.get("msg", f"Asset {asset_id} was unlisted"))
                     self.notification_queue.put(msg_text)
                     if asset_id:
                         self.asset_unlisted_queue.put(asset_id)
+                elif msg_type == "HIDE_ASSETS_OF_USER":
+                    # Silently remove all assets of a deleted user from grids
+                    asset_ids = msg.get("asset_ids", [])
+                    if isinstance(asset_ids, list):
+                        for aid in asset_ids:
+                            if aid:
+                                self.hide_assets_queue.put(str(aid))
                 continue
             self._response_queue.put(msg)
 
@@ -527,6 +542,7 @@ class ClientApp:
         # Refs to live header controls — updated by background monitors
         self._balance_text: ft.Text | None = None
         self._notification_badge: ft.Container | None = None
+        self._error_dialog: ft.AlertDialog | None = None
 
     def start(self):
         self.page.go("/login")
@@ -568,17 +584,15 @@ class ClientApp:
                         actions=[ft.TextButton("Close", on_click=lambda e: self._close_error_dialog())],
                         actions_alignment=ft.MainAxisAlignment.END,
                     )
-                    self.page.dialog = dlg
-                    self.page.dialog.open = True
+                    self._error_dialog = dlg
+                    self.page.open(dlg)
                 snack = ft.SnackBar(
                     content=ft.Text(_msg),
                     bgcolor="#7D2032" if _error else "#136F3A",
                     show_close_icon=True,
                     duration=5000,
                 )
-                self.page.snack_bar = snack
-                snack.open = True
-                self.page.update()
+                self.page.open(snack)
             except Exception as _e:
                 logger.warning(f"notify display error: {_e}")
 
@@ -586,10 +600,8 @@ class ClientApp:
             self.page.run_task(_show)
         except Exception:
             try:
-                self.page.snack_bar = ft.SnackBar(content=ft.Text(_msg),
-                    bgcolor="#7D2032" if _error else "#136F3A")
-                self.page.snack_bar.open = True
-                self.page.update()
+                self.page.open(ft.SnackBar(content=ft.Text(_msg),
+                    bgcolor="#7D2032" if _error else "#136F3A"))
             except Exception:
                 pass
 
@@ -660,6 +672,14 @@ class ClientApp:
             except queue.Empty:
                 break
             self.listed_asset_ids.add(asset_id)
+        # Hidden assets (deleted user's items) are treated as removed from marketplace grids
+        while True:
+            try:
+                asset_id = self.client.hide_assets_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.removed_asset_ids.add(asset_id)
+            self.image_cache.invalidate(asset_id)
 
     def _drain_balance_events(self):
         """Drain balance queue, update state, update UI text if visible."""
@@ -741,9 +761,13 @@ class ClientApp:
 
     def _close_error_dialog(self):
         def _do():
-            if self.page.dialog:
-                self.page.dialog.open = False
-                self.page.update()
+            dlg = self._error_dialog
+            if dlg:
+                try:
+                    self.page.close(dlg)
+                except Exception:
+                    pass
+                self._error_dialog = None
         self._schedule_ui(_do)
 
     def _on_route_change(self, _):
@@ -803,9 +827,8 @@ class ClientApp:
         self._load_wallet_session_from_default()
         self._drain_server_notifications()
         self.state.notifications.append("Logged in successfully")
-        # Load cached balance before requesting fresh one
-        if self._image_cache:
-            self.state.balance = self._image_cache.get_balance()
+        # Load cached balance — image_cache property creates the cache and sets state.balance
+        self.state.balance = self.image_cache.get_balance()
         return resp
 
     def signup(self, username, password, email):
@@ -859,6 +882,7 @@ class ClientApp:
         self.gateway_online = None
         self._balance_text = None
         self._notification_badge = None
+        self._error_dialog = None
 
     def delete_account(self):
         if not self.state.username:
@@ -878,6 +902,7 @@ class ClientApp:
         self.gateway_online = None
         self._balance_text = None
         self._notification_badge = None
+        self._error_dialog = None
 
     def get_market_asset_ids(self) -> list[dict]:
         resp = self.client.get_assets_ids()

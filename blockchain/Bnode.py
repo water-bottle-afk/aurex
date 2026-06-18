@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import json
+import multiprocessing as mp
 import os
 import socket
 import sys
@@ -19,6 +20,27 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from SharedResources.classes import RSA_Client, RSA_Server
 from SharedResources.config import GATEWAY_UDP_PORT, BROADCAST_DISCOVERY_FREQUENCY, POW_DIFFICULTY, INITIAL_BALANCE, BLOCKCHAIN_NODE_IP
 from SharedResources.logging import Logger
+
+
+def _mine_block(block_template: dict, difficulty: int,
+                stop_event: "mp.Event", result_queue: "mp.Queue"):
+    """Standalone PoW worker run inside a separate Process.
+
+    Must live at module level so Python's 'spawn' start method (Windows) can
+    pickle it.  Puts ("found", block) or ("aborted", None) into result_queue.
+    """
+    target = "0" * difficulty
+    block = dict(block_template)
+    block["nonce"] = 0
+    while not stop_event.is_set():
+        content = json.dumps(block, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(content).hexdigest()
+        if digest.startswith(target):
+            block["hash"] = digest
+            result_queue.put(("found", block))
+            return
+        block["nonce"] += 1
+    result_queue.put(("aborted", None))
 
 
 class BlockchainNode:
@@ -71,7 +93,9 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self.server_for_peers.dir_for_keys = str(self.node_keys_dir)
 
         self.lock = threading.RLock()
-        self.stop_event = threading.Event()
+        self._node_stop_event = threading.Event()   # shuts down the whole node
+        self._mining_stop_event = mp.Event()        # aborts the current mining task
+        self._current_miner: "mp.Process | None" = None
 
         self.chain: list[dict[str, Any]] = []
         self.balances: dict[str, float] = {}
@@ -92,12 +116,15 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self.connect_to_gateway()
         threading.Thread(target=self.server_for_peers.start, daemon=True).start()
         self.Print(f"[{self.node_id}] listening for peers at {self.ip}:{self.port}")
-        while not self.stop_event.is_set():
+        while not self._node_stop_event.is_set():
             time.sleep(0.2)
 
     def stop(self):
         """Signal the node's main loop and all blocking operations to exit."""
-        self.stop_event.set()
+        self._node_stop_event.set()
+        self._mining_stop_event.set()
+        if self._current_miner and self._current_miner.is_alive():
+            self._current_miner.terminate()
 
     def discover_gateway_once(self):
         """
@@ -136,7 +163,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         thread and calls ``register_blockchain_node`` to announce this node.
         Blocks until a connection is established (or ``stop()`` is called).
         """
-        while not self.stop_event.is_set():
+        while not self._node_stop_event.is_set():
             discovered = self.discover_gateway_once()
             if not discovered:
                 self.Print(f"[{self.node_id}] gateway not discovered, retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
@@ -159,12 +186,12 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 time.sleep(float(BROADCAST_DISCOVERY_FREQUENCY))
 
     def listen_gateway_loop(self):
-        while not self.stop_event.is_set() and self.gateway_comm is not None:
+        while not self._node_stop_event.is_set() and self.gateway_comm is not None:
             msg = self.gateway_comm.recv_one_message()
             if not msg:
                 break
             self.handle_gateway_message(msg)
-        if not self.stop_event.is_set():
+        if not self._node_stop_event.is_set():
             self.gateway_comm = None
             self.gateway_client = None
             self.Print(f"[{self.node_id}] gateway disconnected, reconnecting")
@@ -256,55 +283,71 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         return True
 
     def mine(self, transaction: dict[str, Any]):
-        """
-        Perform Proof-of-Work mining for a transaction (blocking).
+        """Perform PoW mining in a separate Process (non-blocking for the gateway listener).
 
-        Builds a block template, then increments the nonce until the SHA-256
-        hash of the block starts with ``self.difficulty`` zero digits.  The
-        loop checks ``self.stop_event`` on every iteration so the node can be
-        shut down cleanly mid-mine.
+        Spawns a multiprocessing.Process running _mine_block so the GIL never
+        blocks the gateway listener thread.  The listener can abort mining at any
+        time by setting self._mining_stop_event; the miner process exits cleanly
+        and mine() returns None so the caller can restart with fresh chain state.
 
-        Args:
-            transaction: Validated transaction dict to embed in the block.
-
-        Returns:
-            The mined block dict (with 'hash' key set), or None if the
-            transaction failed validation or the stop event fired.
+        Returns the mined block dict on success, or None if aborted / invalid.
         """
         if not self.validate_tx(transaction):
-            self.Print(f"[{self.node_id}] mine: tx validation failed for tx_type={transaction.get('tx_type', transaction.get('type', 'TX'))}")
+            self.Print(f"[{self.node_id}] mine: tx validation failed for "
+                       f"tx_type={transaction.get('tx_type', transaction.get('type', 'TX'))}")
             return None
 
         tx_label = transaction.get("tx_type") or transaction.get("type") or "TX"
         self.Print(f"[{self.node_id}] mine: starting PoW for {tx_label} difficulty={self.difficulty}...")
 
-        new_block = {
+        block_template = {
             "index":      len(self.chain),
             "prev_hash":  self.last_hash(),
             "timestamp":  datetime.now().isoformat(),
             "tx":         transaction,
             "public_key": str(transaction.get("public_key", "")),
-            "signature":  str(transaction.get("signature",  "")),
+            "signature":  str(transaction.get("signature", "")),
             "nonce":      0,
             "difficulty": self.difficulty,
         }
-        target = "0" * self.difficulty
 
-        # keep hashing with incrementing nonce until we hit the target prefix
-        while not self.stop_event.is_set():
-            digest = self.block_hash(new_block)
-            if digest.startswith(target):
-                new_block["hash"] = digest
+        result_queue: mp.Queue = mp.Queue()
+        self._mining_stop_event.clear()
+        miner = mp.Process(
+            target=_mine_block,
+            args=(block_template, self.difficulty, self._mining_stop_event, result_queue),
+            daemon=True,
+        )
+        self._current_miner = miner
+        miner.start()
+
+        # Block this thread until the miner finishes or the node shuts down
+        status, block = None, None
+        while not self._node_stop_event.is_set():
+            try:
+                status, block = result_queue.get(timeout=0.1)
                 break
-            new_block["nonce"] += 1
+            except Exception:
+                continue
 
-        if "hash" not in new_block:
-            # stop_event fired mid-mine — return None so the caller knows
+        if self._node_stop_event.is_set():
+            self._mining_stop_event.set()
+            if miner.is_alive():
+                miner.terminate()
+                miner.join(timeout=2)
+            self._current_miner = None
             return None
 
-        self.Print(f"[{self.node_id}] mine: block found nonce={new_block['nonce']} hash={new_block['hash'][:16]}...")
-        self.add_block(new_block)
-        return new_block
+        miner.join(timeout=5)
+        self._current_miner = None
+
+        if status == "aborted":
+            self.Print(f"[{self.node_id}] mine: aborted — new block received from network")
+            return None
+
+        self.Print(f"[{self.node_id}] mine: block found nonce={block['nonce']} hash={block['hash'][:16]}...")
+        self.add_block(block)
+        return block
 
     def add_block(self, block: dict[str, Any]):
         """Append a validated block to the chain and update the balance table.
@@ -495,7 +538,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "tx_id": f"mint-{asset_id}-{int(time.time() * 1000)}",
             "asset_id": asset_id,
             "owner_public_key": public_key,
-            "owner_username": owner,
             "sender": public_key,
             "receiver": "",
             "amount": 0.0,
@@ -537,7 +579,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "tx_type": "UNLIST_ASSET_FROM_BLOCKCHAIN",
             "tx_id": f"unlist-{asset_id}-{int(time.time() * 1000)}",
             "asset_id": asset_id,
-            "owner_username": owner,
             "sender": public_key,
             "receiver": "",
             "amount": 0.0,
@@ -579,7 +620,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "tx_type": "LIST_ASSET",
             "tx_id": f"list-{asset_id}-{int(time.time() * 1000)}",
             "asset_id": asset_id,
-            "owner_username": owner,
             "sender": public_key,
             "receiver": "",
             "amount": 0.0,
@@ -639,6 +679,16 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.balances[public_key] = target_balance
                 self.persist_local_state()
 
+    def _is_double_buy(self, asset_id: str) -> bool:
+        """Return True if a confirmed BUY tx for this asset_id already exists in our chain."""
+        with self.lock:
+            for b in self.chain:
+                tx = b.get("tx", {}) if isinstance(b.get("tx"), dict) else {}
+                tx_type = str(tx.get("tx_type") or tx.get("type") or "").upper()
+                if tx_type == "BUY" and str(tx.get("asset_id") or "") == asset_id:
+                    return True
+        return False
+
     def handle_broadcast_tx_to_verify(self, msg: dict[str, Any]):
         sender_ip = str(msg.get("sender_ip") or "")
         sender_port = int(msg.get("sender_port") or 0)
@@ -649,6 +699,16 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             return
         block = data.get("block") if isinstance(data.get("block"), dict) else {}
         if block and int(block.get("index", -1)) == len(self.chain) and str(block.get("prev_hash", "")) == self.last_hash():
+            # Double-buy protection: reject BUY blocks for already-purchased assets
+            tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
+            tx_type = str(tx.get("tx_type") or tx.get("type") or "").upper()
+            if tx_type == "BUY":
+                asset_id = str(tx.get("asset_id") or "")
+                if asset_id and self._is_double_buy(asset_id):
+                    self.Print(f"[{self.node_id}] BROADCAST: double-buy detected for asset {asset_id} — block rejected")
+                    return
+            # Valid block received: abort current mining task and accept new chain state
+            self._mining_stop_event.set()
             self.add_block(block)
             self.register_blockchain_node()
 
@@ -799,6 +859,10 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
 
 if __name__ == "__main__":
+    # Required on Windows: multiprocessing uses 'spawn', so the entry point must
+    # be guarded so spawned worker processes don't re-run startup code.
+    mp.freeze_support()
+
     parser = argparse.ArgumentParser(
         description="Aurex blockchain node. If --port is omitted, the OS will choose a free port."
     )
@@ -817,7 +881,7 @@ if __name__ == "__main__":
 
     if args.port == 0:
         print("[*] No --port provided. OS will assign a free port.")
-    node = BlockchainNode(ip = args.ip ,port=args.port, difficulty=args.difficulty)
+    node = BlockchainNode(ip=args.ip, port=args.port, difficulty=args.difficulty)
     print(f"[*] Node initialized at {node.ip}:{node.port}")
     print(f"[*] Node keys directory: {node.node_keys_dir}")
     node.start()

@@ -28,7 +28,12 @@ except Exception:
     from DB_ORM import ORM, send_reset_email
 
 from SharedResources.config import SERVER_IP, SERVER_PORT, INITIAL_BALANCE
-from SharedResources.classes import RSA_Server, MarketplaceItem, ASSET_STATUS_FOR_SALE
+from SharedResources.classes import (
+    RSA_Server, MarketplaceItem,
+    ASSET_STATUS_FOR_SALE,
+    ASSET_STATUS_PENDING_DELETION,
+    ASSET_STATUS_DELETED,
+)
 from SharedResources.logging import Logger
 
 logger = Logger(__file__)
@@ -393,6 +398,8 @@ class Server:
         user = self.db.get_user(username)
         if not user:
             return self.fail("LOGIN_FAILED", f"Username '{username}' not found")
+        if getattr(user, "user_status", "ACTIVE") == "DELETED":
+            return self.fail("LOGIN_FAILED", "This account has been permanently deleted")
         if not user.verify_password(password):
             return self.fail("LOGIN_FAILED", f"Incorrect password for '{username}'")
         if hasattr(comm, "set_user"):
@@ -711,8 +718,13 @@ class Server:
             })
 
         if transfer_ok and asset_id:
-            # Tell every browsing user to remove this asset from their marketplace view
-            self.push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
+            bought_asset = self.db.find_asset_by_id(asset_id)
+            bought_name = bought_asset.asset_name if bought_asset else asset_id
+            self.push_to_all_online({
+                "type": "ASSET_REMOVED",
+                "asset_id": asset_id,
+                "asset_name": bought_name,
+            })
 
         return self.success("BUY_ACKNOWLEDGED")
 
@@ -930,8 +942,12 @@ class Server:
                     "asset_id": asset_id,
                     "msg": f"'{asset_name}' has been unlisted from the marketplace",
                 })
-            # Remove from every user's marketplace view
-            self.push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
+            unlisted_name = asset.asset_name if asset else asset_id
+            self.push_to_all_online({
+                "type": "ASSET_REMOVED",
+                "asset_id": asset_id,
+                "asset_name": unlisted_name,
+            })
         else:
             self.logger.warning(f"[asset_unlisted] update_asset_status failed for {asset_id}")
         return self.success("UNLIST_ACKNOWLEDGED")
@@ -996,21 +1012,59 @@ class Server:
         if not username:
             return self.fail("DELETE_FAILED", "Missing username")
 
-        self.db.delete_user(username)
-        self.db.delete_user_assets(username)
+        # 1. Collect asset_ids before freezing (for the broadcast list)
+        all_user_assets = self.db.get_all_assets_for_user_any_status(username)
+        asset_ids_to_hide = [a.asset_id for a in all_user_assets if a.asset_id]
 
-        # Clear queued notifications
+        # 2. Freeze marketplace: set all user assets to PENDING_DELETION
+        pending_ids = self.db.set_assets_pending_deletion(username)
+
+        # 3. Soft-delete user (erases credentials, keeps public_key for ledger linkage)
+        self.db.soft_delete_user(username)
+
+        # 4. Broadcast HIDE_ASSETS_OF_USER to all online users (silent grid removal)
+        if asset_ids_to_hide:
+            self.push_to_all_online({
+                "type": "HIDE_ASSETS_OF_USER",
+                "username": username,
+                "asset_ids": asset_ids_to_hide,
+            })
+
+        # 5. Clear queued notifications
         self.db.flush_notifications(username)
 
+        # 6. Delete uploaded image files
         uploads_dir = Path(__file__).resolve().parent.parent / "DB" / "uploads" / username
         if uploads_dir.exists():
             shutil.rmtree(uploads_dir, ignore_errors=True)
 
+        # 7. Remove from online session
         with self.online_users_lock:
             self.online_users.pop(username, None)
 
-        self.logger.info(f"Account deleted: {username}")
+        # 8. Async finalization: after the blockchain window, mark remaining
+        #    PENDING_DELETION assets as DELETED (purchases beat this if any)
+        if pending_ids:
+            self._schedule_asset_deletion_finalize(pending_ids)
+
+        self.logger.info(f"Account soft-deleted: {username} | {len(pending_ids)} assets frozen")
         return self.success("ACCOUNT_IS_DELETED")
+
+    def _schedule_asset_deletion_finalize(self, asset_ids: list, delay: float = 30.0):
+        """After *delay* seconds, mark any still-PENDING_DELETION assets as DELETED.
+
+        If a blockchain BUY transaction came in during the window, transfer_asset
+        already moved the asset to UNLISTED under the buyer — those are skipped.
+        """
+        def _worker():
+            import time as _time
+            _time.sleep(delay)
+            for aid in asset_ids:
+                asset = self.db.find_asset_by_id(aid)
+                if asset and asset.asset_status == ASSET_STATUS_PENDING_DELETION:
+                    self.db.update_asset_status(aid, ASSET_STATUS_DELETED)
+                    self.logger.info(f"[delete_finalize] asset {aid} → DELETED (no purchase in window)")
+        threading.Thread(target=_worker, daemon=True).start()
 
     def handle_delete_asset(self, comm, msg):
         _ = comm
@@ -1032,7 +1086,12 @@ class Server:
                 storage_path.unlink()
         except Exception:
             pass
-        self.push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
+        deleted_name = asset.asset_name if asset else asset_id
+        self.push_to_all_online({
+            "type": "ASSET_REMOVED",
+            "asset_id": asset_id,
+            "asset_name": deleted_name,
+        })
         self.logger.info(f"[delete_asset] asset {asset_id} deleted by {owner}")
         return self.success("DELETE_SUCCESS")
 

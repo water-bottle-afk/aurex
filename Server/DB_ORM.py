@@ -4,6 +4,9 @@ DB_ORM.py — all database access for the Aurex marketplace.
 Uses plain JSON files (no SQL, no pickle) with an RLock for thread safety.
 Three tables: users.json, marketplace_items.json, notifications.json.
 Everything the server needs to persist goes through the ORM class.
+
+marketplace_items.json schema: { asset_id -> asset_dict }
+users.json schema:             { username -> user_dict }
 """
 from __future__ import annotations
 
@@ -15,9 +18,7 @@ import random
 import smtplib
 import ssl
 import threading
-from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from email.message import EmailMessage
 from pathlib import Path
 
 from SharedResources.logging import Logger
@@ -28,6 +29,8 @@ from SharedResources.classes import (
     ASSET_STATUS_FOR_SALE,
     ASSET_STATUS_UNLISTED,
     ASSET_STATUS_SOLD,
+    ASSET_STATUS_PENDING_DELETION,
+    ASSET_STATUS_DELETED,
 )
 
 logger = Logger(__file__)
@@ -47,13 +50,12 @@ EMAIL_SENDER = "aurex.main.service@gmail.com"
 EMAIL_APP_PASSWORD = "sshb anri wzom zybg"
 
 
-
 def send_reset_email(recipient: str, otp: str) -> bool:
     """Send a password-reset OTP to *recipient* via Gmail SMTP SSL."""
     import datetime as dt
 
     expiry = dt.datetime.now() + dt.timedelta(minutes=5)
-    em = EmailMessage()
+    em = __import__("email.message", fromlist=["EmailMessage"]).EmailMessage()
     em["From"] = EMAIL_SENDER
     em["To"] = recipient
     em["Subject"] = "Your Aurex password reset code"
@@ -76,10 +78,17 @@ def send_reset_email(recipient: str, otp: str) -> bool:
 # ── Domain models ─────────────────────────────────────────────────────────────
 
 class User:
-    """User model with salted+peppered password hash."""
+    """User model with salted+peppered password hash.
+
+    Soft-delete sets user_status='DELETED' and clears sensitive fields
+    (email, password_hash, salt, verification_code, reset_time) while
+    preserving username and public_key so historical blockchain records
+    remain linkable.
+    """
 
     def __init__(self, username, password, email, salt=None, public_key="",
-                 verification_code=None, reset_time=None, password_hash=None):
+                 verification_code=None, reset_time=None, password_hash=None,
+                 user_status="ACTIVE"):
         self.username = str(username or "").strip()
         self.email = str(email or "").strip().lower()
         self.salt = str(salt) if salt else self.create_salt()
@@ -87,6 +96,7 @@ class User:
         self.verification_code = verification_code
         self.reset_time = reset_time
         self.public_key = str(public_key or "")
+        self.user_status = str(user_status or "ACTIVE")
 
     def create_salt(self):
         return str(random.randint(1000000, 9999999))
@@ -95,7 +105,12 @@ class User:
         return hashlib.sha256((PEPPER + str(password) + self.salt).encode()).hexdigest()
 
     def verify_password(self, password):
+        if self.is_deleted():
+            return False
         return self.password_hash == self.hash_password(password)
+
+    def is_deleted(self) -> bool:
+        return self.user_status == "DELETED"
 
     def set_verification_code(self, code):
         self.verification_code = code
@@ -123,6 +138,7 @@ class User:
             "public_key": self.public_key,
             "verification_code": self.verification_code,
             "reset_time": self.reset_time,
+            "user_status": self.user_status,
         }
 
     @classmethod
@@ -136,11 +152,12 @@ class User:
             verification_code=raw.get("verification_code"),
             reset_time=raw.get("reset_time"),
             password_hash=raw.get("password_hash", ""),
+            user_status=raw.get("user_status", "ACTIVE"),
         )
 
     def __repr__(self):
         return (
-            f"User(username='{self.username}', email='{self.email}', "
+            f"User(username='{self.username}', status='{self.user_status}', "
             f"public_key_tail='{self.public_key[-10:] if self.public_key else 'none'}')"
         )
 
@@ -151,6 +168,8 @@ class ORM:
     """
     Unified JSON ORM for users, marketplace assets, and notifications.
     All DB I/O goes through this class — no direct file access from the server.
+
+    marketplace_items.json top-level key is asset_id (O(1) lookup, no nested lists).
     """
 
     def __init__(self, users_json_path=None, marketplace_json_path=None, notifications_json_path=None):
@@ -189,16 +208,17 @@ class ORM:
         self.users_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def add_user(self, username: str, password: str, email: str):
-        """Register a new user.  Checks for duplicate username and email before writing."""
+        """Register a new user. Checks for duplicate username and email before writing."""
         username = (username or "").strip()
         email = (email or "").strip().lower()
         if not username or not email or not password:
             return False, "Missing required fields"
         with self.lock:
             users = self.load_users()
+            # Check active users only; soft-deleted username slots stay reserved
             if username in users:
                 return False, "Username already exists"
-            if any(u.email == email for u in users.values()):
+            if any(u.email == email and not u.is_deleted() for u in users.values()):
                 return False, "Email already exists"
             users[username] = User(username, password, email)
             self.save_users(users)
@@ -216,7 +236,7 @@ class ORM:
     def get_user_by_email(self, email: str):
         email = (email or "").strip().lower()
         for user in self.load_users().values():
-            if user.email == email:
+            if user.email == email and not user.is_deleted():
                 return user
         return None
 
@@ -229,20 +249,29 @@ class ORM:
                 return user
         return None
 
+    def resolve_username(self, public_key: str) -> str:
+        """Return username for a public key. Handles soft-deleted accounts gracefully."""
+        user = self.get_user_by_public_key(public_key)
+        if user is None:
+            return ""
+        if user.is_deleted():
+            return "Deleted User (Historical)"
+        return user.username
+
     def is_public_key_taken(self, public_key: str, exclude_username: str = "") -> bool:
-        """Return True if this public key is already registered to a DIFFERENT user."""
+        """Return True if this public key is already registered to a DIFFERENT active user."""
         public_key = (public_key or "").strip()
         if not public_key:
             return False
         exclude = (exclude_username or "").strip()
         for user in self.load_users().values():
-            if user.public_key == public_key and user.username != exclude:
+            if user.public_key == public_key and user.username != exclude and not user.is_deleted():
                 return True
         return False
 
     def set_user_public_key(self, username: str, public_key: str) -> bool:
         user = self.get_user(username)
-        if not user:
+        if not user or user.is_deleted():
             return False
         user.set_public_key(public_key)
         self.save_user(user)
@@ -276,75 +305,69 @@ class ORM:
         self.save_user(user)
         return True, "Password updated"
 
-    def delete_user(self, username: str) -> bool:
+    def soft_delete_user(self, username: str) -> bool:
+        """Soft-delete: erase credentials, set user_status=DELETED, keep public_key."""
         username = (username or "").strip()
         if not username:
             return False
         with self.lock:
             users = self.load_users()
-            if username not in users:
+            user = users.get(username)
+            if not user:
                 return False
-            del users[username]
+            # Erase all sensitive fields
+            user.email = ""
+            user.password_hash = ""
+            user.salt = ""
+            user.verification_code = None
+            user.reset_time = None
+            user.user_status = "DELETED"
+            # public_key and username are preserved for historical ledger linkage
             self.save_users(users)
+        logger.info(f"[ORM] soft_delete_user: {username} marked DELETED")
         return True
 
-    def delete_user_assets(self, username: str):
-        username = (username or "").strip()
-        if not username:
-            return
-        with self.lock:
-            market = self.load_marketplace()
-            market.pop(username, None)
-            self.save_marketplace(market)
+    # Keep the old name as an alias so existing callers don't break during transition
+    def delete_user(self, username: str) -> bool:
+        return self.soft_delete_user(username)
 
     # ── Marketplace ───────────────────────────────────────────────────────────
 
-    def load_marketplace(self) -> dict:
-        """Load and normalise the marketplace JSON.
-
-        Migrates old-style fields on the fly and deduplicates entries with the
-        same asset_id by keeping the one with the highest version number.
-        """
+    def load_marketplace(self) -> dict[str, dict]:
+        """Load marketplace JSON. Top-level key is asset_id → asset_dict."""
         try:
             raw = json.loads(self.marketplace_json_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 return {}
-            result = {}
-            for owner, items in raw.items():
-                if not isinstance(items, list):
+            result: dict[str, dict] = {}
+            for key, value in raw.items():
+                if not isinstance(value, dict):
                     continue
-                by_id: dict[str, dict] = {}
-                for i in items:
-                    if not isinstance(i, dict):
-                        continue
-                    item_dict = MarketplaceItem.from_dict(i).to_dict()
-                    aid = item_dict.get("asset_id", "")
-                    if not aid:
-                        continue
-                    existing = by_id.get(aid)
-                    if existing is None or int(item_dict.get("version", 0)) > int(existing.get("version", 0)):
-                        by_id[aid] = item_dict
-                result[str(owner)] = list(by_id.values())
+                # Migrate status fields on load
+                item_dict = MarketplaceItem.from_dict(value).to_dict()
+                aid = item_dict.get("asset_id") or key
+                if aid:
+                    result[str(aid)] = item_dict
             return result
         except Exception:
             return {}
 
-    def save_marketplace(self, market: dict):
+    def save_marketplace(self, market: dict[str, dict]):
         self.marketplace_json_path.write_text(
             json.dumps(market, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     def add_asset(self, username: str, asset: MarketplaceItem) -> bool:
+        _ = username  # owner is stored inside asset.owner
         with self.lock:
             market = self.load_marketplace()
-            market.setdefault(username, [])
-            market[username].append(asset.to_dict())
+            market[asset.asset_id] = asset.to_dict()
             self.save_marketplace(market)
         return True
 
     def get_all_assets(self) -> list[MarketplaceItem]:
         market = self.load_marketplace()
-        assets = [MarketplaceItem.from_dict(a) for items in market.values() for a in items]
+        assets = [MarketplaceItem.from_dict(d) for d in market.values()]
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
 
@@ -352,11 +375,10 @@ class ORM:
         """Return all FOR_SALE assets regardless of owner."""
         market = self.load_marketplace()
         assets = [
-            MarketplaceItem.from_dict(a)
-            for items in market.values()
-            for a in items if isinstance(a, dict)
+            MarketplaceItem.from_dict(d)
+            for d in market.values()
+            if isinstance(d, dict) and d.get("asset_status") == ASSET_STATUS_FOR_SALE
         ]
-        assets = [a for a in assets if a.asset_status == ASSET_STATUS_FOR_SALE]
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
 
@@ -370,23 +392,22 @@ class ORM:
             return False
         with self.lock:
             market = self.load_marketplace()
-            for owner_items in market.values():
-                for item_dict in owner_items:
-                    if isinstance(item_dict, dict) and item_dict.get("asset_id") == asset_id:
-                        item_dict["asset_status"] = status
-                        if increment_version:
-                            item_dict["version"] = int(item_dict.get("version", 1)) + 1
-                        self.save_marketplace(market)
-                        return True
-        return False
+            asset_dict = market.get(asset_id)
+            if asset_dict is None:
+                return False
+            asset_dict["asset_status"] = status
+            if increment_version:
+                asset_dict["version"] = int(asset_dict.get("version", 1)) + 1
+            market[asset_id] = asset_dict
+            self.save_marketplace(market)
+        return True
 
     def transfer_asset(self, asset_id: str, from_owner: str, to_owner: str) -> bool:
-        """Move an asset from seller to buyer after a confirmed blockchain purchase.
+        """Transfer an asset to a new owner after a confirmed blockchain purchase.
 
-        Removes the entry from from_owner's list, resets status to UNLISTED, bumps
-        the version (so caches know to refresh), and appends to to_owner's list.
-        Returns False if the asset wasn't found under from_owner — this happens on
-        a race condition where two nodes mined the same tx simultaneously.
+        Accepts the transfer if the asset is FOR_SALE (normal case) or
+        PENDING_DELETION (purchase beat the account-deletion window — blockchain wins).
+        Returns False for any other status (already sold / deleted) to prevent double-buys.
         """
         asset_id = (asset_id or "").strip()
         from_owner = (from_owner or "").strip()
@@ -395,64 +416,110 @@ class ORM:
             return False
         with self.lock:
             market = self.load_marketplace()
-            from_list = market.get(from_owner, [])
-            asset_dict = None
-            new_from_list = []
-            for item in from_list:
-                if isinstance(item, dict) and item.get("asset_id") == asset_id:
-                    asset_dict = dict(item)
-                else:
-                    new_from_list.append(item)
+            asset_dict = market.get(asset_id)
             if asset_dict is None:
                 return False
-            market[from_owner] = new_from_list
+            current_status = str(asset_dict.get("asset_status", ""))
+            current_owner = str(asset_dict.get("owner", ""))
+
+            if current_status == ASSET_STATUS_PENDING_DELETION:
+                # Blockchain purchase beat the account-deletion — transfer allowed
+                pass
+            elif current_status == ASSET_STATUS_FOR_SALE and current_owner == from_owner:
+                # Normal validated purchase
+                pass
+            else:
+                # Double-buy or wrong state — reject
+                return False
+
             asset_dict["owner"] = to_owner
             asset_dict["asset_status"] = ASSET_STATUS_UNLISTED
             asset_dict["version"] = int(asset_dict.get("version", 1)) + 1
-            market.setdefault(to_owner, [])
-            market[to_owner].append(asset_dict)
+            market[asset_id] = asset_dict
             self.save_marketplace(market)
         return True
 
     def delete_asset(self, asset_id: str, owner: str) -> bool:
-        """Remove asset from DB entirely (no blockchain change)."""
+        """Remove an asset entry entirely from the DB."""
         asset_id = (asset_id or "").strip()
-        owner = (owner or "").strip()
-        if not asset_id or not owner:
+        if not asset_id:
             return False
         with self.lock:
             market = self.load_marketplace()
-            items = market.get(owner, [])
-            new_items = [
-                d for d in items
-                if not (isinstance(d, dict) and d.get("asset_id") == asset_id)
-            ]
-            if len(new_items) == len(items):
+            if asset_id not in market:
                 return False
-            market[owner] = new_items
+            # Optionally verify owner still matches (soft-deleted owners allowed)
+            asset_dict = market[asset_id]
+            if owner and str(asset_dict.get("owner", "")) != owner:
+                return False
+            del market[asset_id]
             self.save_marketplace(market)
         return True
 
     def get_assets_for_user(self, username: str) -> list[MarketplaceItem]:
-        """Return assets owned by user that are NOT currently on the marketplace (not FOR_SALE)."""
+        """Return assets owned by user that are NOT FOR_SALE (My Assets view)."""
         username = (username or "").strip()
         if not username:
             return []
         market = self.load_marketplace()
-        assets = [MarketplaceItem.from_dict(a) for a in market.get(username, []) if isinstance(a, dict)]
-        assets = [a for a in assets if a.asset_status != ASSET_STATUS_FOR_SALE]
+        assets = [
+            MarketplaceItem.from_dict(d)
+            for d in market.values()
+            if isinstance(d, dict)
+            and d.get("owner") == username
+            and d.get("asset_status") != ASSET_STATUS_FOR_SALE
+        ]
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
+
+    def get_all_assets_for_user_any_status(self, username: str) -> list[MarketplaceItem]:
+        """Return all assets owned by user regardless of status."""
+        username = (username or "").strip()
+        if not username:
+            return []
+        market = self.load_marketplace()
+        assets = [
+            MarketplaceItem.from_dict(d)
+            for d in market.values()
+            if isinstance(d, dict) and d.get("owner") == username
+        ]
+        return assets
+
+    def set_assets_pending_deletion(self, username: str) -> list[str]:
+        """Freeze all user assets in PENDING_DELETION. Returns affected asset_ids.
+
+        Called immediately when a user deletes their account so the marketplace
+        grid stops showing those items before the blockchain window closes.
+        """
+        username = (username or "").strip()
+        if not username:
+            return []
+        affected: list[str] = []
+        with self.lock:
+            market = self.load_marketplace()
+            for aid, d in market.items():
+                if not isinstance(d, dict):
+                    continue
+                if d.get("owner") != username:
+                    continue
+                if d.get("asset_status") in (ASSET_STATUS_DELETED, ASSET_STATUS_PENDING_DELETION):
+                    continue
+                d["asset_status"] = ASSET_STATUS_PENDING_DELETION
+                affected.append(aid)
+            if affected:
+                self.save_marketplace(market)
+        return affected
+
+    # Keep old name so callers that pre-existed the soft-delete refactor still work
+    def delete_user_assets(self, username: str):
+        self.set_assets_pending_deletion(username)
 
     def find_asset_by_id(self, asset_id: str):
         asset_id = (asset_id or "").strip()
         if not asset_id:
             return None
-        for items in self.load_marketplace().values():
-            for d in items:
-                if isinstance(d, dict) and d.get("asset_id") == asset_id:
-                    return MarketplaceItem.from_dict(d)
-        return None
+        d = self.load_marketplace().get(asset_id)
+        return MarketplaceItem.from_dict(d) if isinstance(d, dict) else None
 
     # ── Notifications ─────────────────────────────────────────────────────────
 
