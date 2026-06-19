@@ -39,22 +39,24 @@ from SharedResources.config import (
     SERVER_PORT,
     GATEWAY_BLOCKCHAIN_PORT,
 )
+from SharedResources.exceptions import (
+    AurexError,
+    ValidationError,
+    DuplicateError,
+    BlockchainError,
+)
 
 
 class GatewayServer:
     """Single gateway runtime: server<->nodes transparent relay with lightweight routing."""
 
-    def __init__(self, gui_bridge=None):
+    def __init__(self):
         self.logger = logging.getLogger("gateway")
         self.logger.setLevel(logging.INFO)
 
         self.base_dir = Path(__file__).resolve().parent
         self.keys_dir = self.base_dir / "GatewayKeys"
         self.keys_dir.mkdir(parents=True, exist_ok=True)
-
-        self.ledger_path = self.base_dir / "gateway_ledger.json"
-
-        self.gui_bridge = gui_bridge
         self.stop_event = threading.Event()
 
         self.node_listener = RSA_Server(
@@ -73,12 +75,10 @@ class GatewayServer:
         self.nodes_lock = threading.Lock()
         self.nodes: dict[tuple[str, int], dict[str, Any]] = {}
 
-        self.gateway_ledger: list[dict[str, Any]] = self.load_gateway_ledger()
-
         # TX_ID dedup cache — prevents the same transaction from being processed twice.
         self.seen_tx_ids: set[str] = set()
-        # Asset-level mint dedup — prevents the same asset_id from being minted twice.
-        self.seen_minted_asset_ids: set[str] = self._init_minted_ids()
+        # Asset-level mint dedup — populated in-memory from node on startup (no local file).
+        self.seen_minted_asset_ids: set[str] = set()
 
         self.gateway_operations = {
             "buy_asset": self.tx_request_buy,
@@ -104,64 +104,58 @@ class GatewayServer:
             "asset_signed_in_blockchain": self.handle_asset_signed_in_blockchain,
             "asset_unlist_signed_in_blockchain": self.handle_asset_unlist_signed_in_blockchain,
             "asset_list_signed_in_blockchain": self.handle_asset_list_signed_in_blockchain,
+            "minted_ids": self.handle_minted_ids_response,
         }
 
     def start(self):
         """Start all gateway services: UDP discovery, server relay, node listener."""
         threading.Thread(target=self.udp_service.run, daemon=True).start()
-        threading.Thread(target=self.server_client.start, daemon=True).start()
+        threading.Thread(target=self._server_connect_loop, daemon=True).start()
         threading.Thread(target=self.node_listener.start, daemon=True).start()
 
         self.log_event("Gateway operational. Routing between nodes and server.")
         while not self.stop_event.is_set():
             time.sleep(0.2)
 
+    def _server_connect_loop(self):
+        """Connect to the server and retry indefinitely on failure or disconnect.
+
+        Creates a fresh RSA_Client for each attempt because the socket is bound
+        on construction and cannot be reused after a failed connect().
+        """
+        while not self.stop_event.is_set():
+            try:
+                client = RSA_Client(SERVER_IP, SERVER_PORT, name="GatewayToServer")
+                client.communicate_with_server = self.communicate_with_main_server
+                self.server_client = client
+                self.log_event("Connecting to server...")
+                client.start()  # blocks until server disconnects; raises on connection failure
+                self.log_event("Server connection closed — reconnecting in 5s")
+            except Exception as exc:
+                self.log_event(f"Server connection failed ({exc}) — retrying in 5s")
+            if not self.stop_event.is_set():
+                time.sleep(5)
+
     def stop(self):
         self.stop_event.set()
 
-    def log_event(self, message: str, event_type: str = "log", direction: str = "system", status: str = "info", **extra):
+    def log_event(self, message: str, **_extra):
         self.logger.info(message)
-        if self.gui_bridge is None:
-            return
-        try:
-            self.gui_bridge.log_event(
-                node_id=extra.pop("node_id", "gateway"),
-                message=message,
-                event_type=event_type,
-                direction=direction,
-                status=status,
-                timestamp=extra.pop("timestamp", datetime.now().strftime("%H:%M:%S")),
-                **extra,
-            )
-        except Exception:
-            pass
 
     def normalize_type(self, value: Any) -> str:
         return str(value or "").strip().lower()
 
-    def _init_minted_ids(self) -> set[str]:
-        """Populate seen_minted_asset_ids from the persisted ledger on startup."""
-        minted: set[str] = set()
-        for block in self.gateway_ledger:
-            tx = block.get("tx") if isinstance(block.get("tx"), dict) else {}
-            if str(tx.get("tx_type", "")).upper() == "ASSET_MINT":
-                aid = str(tx.get("asset_id", ""))
-                if aid:
-                    minted.add(aid)
-        return minted
-
-    def load_gateway_ledger(self):
-        if not self.ledger_path.exists():
-            self.ledger_path.write_text("[]", encoding="utf-8")
-            return []
-        try:
-            raw = json.loads(self.ledger_path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, list) else []
-        except Exception:
-            return []
-
-    def save_gateway_ledger(self):
-        self.ledger_path.write_text(json.dumps(self.gateway_ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    def handle_minted_ids_response(self, request: dict, comm=None):
+        """Merge asset_ids from a node's MINTED_IDS response into seen_minted_asset_ids."""
+        _ = comm
+        data = request.get("data") if isinstance(request.get("data"), dict) else {}
+        ids = data.get("asset_ids")
+        if isinstance(ids, list):
+            new_ids = {str(a) for a in ids if a}
+            added = new_ids - self.seen_minted_asset_ids
+            if added:
+                self.seen_minted_asset_ids.update(added)
+                self.log_event(f"Synced {len(added)} minted asset_id(s) from node", status="info")
 
     def extract_sender_addr(self, comm):
         try:
@@ -236,11 +230,18 @@ class GatewayServer:
         with self.nodes_lock:
             targets = [(addr, info.get("comm")) for addr, info in self.nodes.items()]
 
+        seen_comm_ids: set[int] = set()
         for addr, node_comm in targets:
             if skip_addr and addr == skip_addr:
                 continue
             if node_comm is None:
                 continue
+            # Dedup: the same physical connection can appear under both its
+            # ephemeral TCP port and its registered P2P port.  Only send once.
+            comm_id = id(node_comm)
+            if comm_id in seen_comm_ids:
+                continue
+            seen_comm_ids.add(comm_id)
             try:
                 node_comm.send_one_message(msg)
             except Exception as exc:
@@ -257,55 +258,51 @@ class GatewayServer:
         except (InvalidSignature, ValueError, TypeError):
             return False
 
-    def validate_block(self, block: dict[str, Any]) -> tuple[bool, str]:
-        """Full block validation: index, prev_hash, ECDSA signature, and PoW target.
+    def verify_block(self, block: dict[str, Any], label: str = "") -> tuple[bool, str]:
+        """Validate a mined block: hash integrity, PoW target, and ECDSA signature if present.
 
-        Also writes the recomputed hash back into the block dict so callers
-        don't have to recalculate it.
+        Chain continuity (index / prev_hash) is intentionally not checked here —
+        that is the exclusive responsibility of the nodes during PoW consensus.
+        Returns (True, block_hash) on success, (False, reason) on failure.
         """
         if not isinstance(block, dict):
-            return False, "block is not dict"
+            return False, f"[{label}] block is not a dict"
 
-        # block index must be exactly the next slot in our ledger
-        index = int(block.get("index", -1))
-        expected_index = len(self.gateway_ledger)
-        if index != expected_index:
-            return False, f"block index mismatch expected={expected_index} got={index}"
-
-        # chain continuity — must reference the current tip
-        prev_hash = str(block.get("prev_hash", ""))
-        expected_prev_hash = "0" * 64 if not self.gateway_ledger else str(self.gateway_ledger[-1].get("hash", ""))
-        if prev_hash != expected_prev_hash:
-            return False, "prev_hash mismatch"
-
-        # pull the transaction out (support both 'tx' and legacy 'transaction' key)
         tx = block.get("tx")
         if not isinstance(tx, dict):
             tx = block.get("transaction") if isinstance(block.get("transaction"), dict) else {}
 
-        signature_hex  = str(block.get("signature") or tx.get("signature") or "")
-        public_key_hex = str(block.get("public_key") or tx.get("public_key") or "")
-        payload = tx.get("data") if isinstance(tx.get("data"), dict) else tx
+        # Only BUY transactions need gateway-level user-signature verification.
+        # MINT / LIST / UNLIST are server-initiated: the server already validated
+        # the user's signature before forwarding to the node, so there is no
+        # canonical payload for the gateway to reconstruct here.
+        # PoW hash integrity (checked below) is sufficient for those tx types.
+        tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
+        if tx_type == "BUY":
+            signature_hex  = str(tx.get("user_signature") or tx.get("signature") or "")
+            public_key_hex = str(tx.get("user_public_key") or tx.get("public_key") or "")
+            if signature_hex and public_key_hex:
+                signed_payload: dict = {
+                    "asset_id":  tx.get("asset_id"),
+                    "buyer":     tx.get("buyer"),
+                    "price":     tx.get("price"),
+                    "timestamp": tx.get("timestamp"),
+                }
+                if not self.verify_user_signature(public_key_hex, signed_payload, signature_hex):
+                    return False, f"[{label}] invalid user signature"
 
-        if not signature_hex or not public_key_hex:
-            return False, "missing signature/public_key"
-        if not self.verify_user_signature(public_key_hex, payload, signature_hex):
-            return False, "invalid user signature"
-
-        # verify the block hash and PoW difficulty
-        block_for_hash = dict(block)
-        block_hash = str(block_for_hash.pop("hash", ""))
-        recomputed = hashlib.sha256(self.canonical_json_bytes(block_for_hash)).hexdigest()
+        block_copy = {k: v for k, v in block.items() if k != "hash"}
+        block_hash = str(block.get("hash", ""))
+        recomputed = hashlib.sha256(self.canonical_json_bytes(block_copy)).hexdigest()
         if block_hash and block_hash != recomputed:
-            return False, "block hash mismatch"
+            return False, f"[{label}] hash mismatch"
 
         difficulty = int(block.get("difficulty", 0) or 0)
         if difficulty > 0 and not recomputed.startswith("0" * difficulty):
-            return False, "invalid PoW target"
+            return False, f"[{label}] PoW invalid nonce={block.get('nonce')} hash={recomputed[:16]}..."
 
-        # write the verified hash back so callers can use it directly
         block["hash"] = recomputed
-        return True, "ok"
+        return True, recomputed
 
     def maybe_sync_lagging_nodes(self, publisher_addr: tuple[str, int], publisher_chain_length: int, userpk: str):
         if publisher_chain_length <= 0:
@@ -473,6 +470,16 @@ class GatewayServer:
         chain_length = int(data.get("chain_length") or request.get("chain_length") or 0)
 
         if comm:
+            # Remove stale ephemeral-port entries for this comm before inserting
+            # the canonical P2P address so broadcast_to_nodes never sends twice
+            # to the same socket.
+            with self.nodes_lock:
+                stale = [
+                    addr for addr, info in self.nodes.items()
+                    if info.get("comm") is comm and addr != (reg_ip, reg_port)
+                ]
+                for addr in stale:
+                    self.nodes.pop(addr, None)
             self.register_comm(reg_ip, reg_port, comm, chain_length=chain_length)
             with self.nodes_lock:
                 self.nodes[(reg_ip, reg_port)]["registered"] = True
@@ -485,6 +492,14 @@ class GatewayServer:
             node_id=f"{reg_ip}:{reg_port}",
             address=f"{reg_ip}:{reg_port}",
         )
+
+        # Ask every registering node for its minted asset IDs so seen_minted_asset_ids
+        # stays accurate without any local ledger file (stateless gateway).
+        if comm:
+            try:
+                comm.send_one_message({"type": "GET_MINTED_IDS"})
+            except Exception:
+                pass
 
         # If this node's chain is shorter than the current best, tell it to sync immediately
         if comm and reg_ip and reg_port:
@@ -567,16 +582,81 @@ class GatewayServer:
         }
         self.broadcast_to_nodes(outbound)
 
+    # ── Fail-fast guards ──────────────────────────────────────────────────────
+
+    def _require_block(self, block: dict, label: str):
+        if not block:
+            raise BlockchainError(f"[{label}] missing block in message")
+
+    def _require_asset_id(self, asset_id: str, label: str):
+        if not asset_id:
+            raise ValidationError(f"[{label}] missing asset_id")
+
+    def _verify_and_get_hash(self, block: dict, label: str) -> str:
+        ok, result = self.verify_block(block, label)
+        if not ok:
+            raise BlockchainError(result)
+        return result
+
+    def _guard_duplicate_mint(self, asset_id: str):
+        if asset_id in self.seen_minted_asset_ids:
+            raise DuplicateError(f"asset_id={asset_id} already in minted set")
+
+    def _broadcast_verified_block(self, block: dict, sender_ip: str, sender_port: int):
+        skip = (sender_ip, sender_port) if sender_ip and sender_port else None
+        self.broadcast_to_nodes({
+            "type": "BROADCAST_TX_TO_VERIFY",
+            "data": {"block": block, "publisher_chain_length": 0},
+            "sender_ip": sender_ip,
+            "sender_port": sender_port,
+        }, skip_addr=skip)
+
+    def _reject_duplicate_tx(self, data: dict, label: str, owner: str, asset_id: str) -> bool:
+        """Return True and notify server if this tx_id was already seen."""
+        if not self.check_tx_id(data, label):
+            return False
+        self.route_to_server({
+            "type": "BLOCK_REJECTED",
+            "data": {
+                "asset_id": asset_id, "owner": owner, "username": owner,
+                "message": "Duplicate transaction — this upload was already submitted",
+                "reason": "TX_DUPLICATE",
+            },
+        })
+        return True
+
+    def _reject_already_minted(self, asset_id: str, owner: str) -> bool:
+        """Return True and notify server if this asset was already minted."""
+        if not asset_id or asset_id not in self.seen_minted_asset_ids:
+            return False
+        self.log_event(f"[ASSET_MINT] duplicate rejected: asset_id={asset_id} already minted")
+        self.route_to_server({
+            "type": "BLOCK_REJECTED",
+            "data": {
+                "asset_id": asset_id, "owner": owner, "username": owner,
+                "message": f"Asset {asset_id} is already minted on the blockchain",
+                "reason": "DUPLICATE_MINT",
+            },
+        })
+        self.route_to_server({"type": "FULLY_UPLOAD", "asset_id": asset_id, "block_hash": ""})
+        return True
+
+    # ── Gateway-operation handlers ────────────────────────────────────────────
+
     def handle_upload_asset(self, request: dict, comm=None):
-        """Server requests asset mining — dedup check then broadcast to nodes."""
+        """Dedup-check a mint request then broadcast to nodes."""
         _ = comm
         data = request.get("data") if isinstance(request.get("data"), dict) else {}
-        if self.check_tx_id(data, "UPLOAD_ASSET"):
-            return
+        owner = str(data.get("owner") or "")
         asset_id = str(data.get("asset_id") or "")
-        if asset_id and asset_id in self.seen_minted_asset_ids:
-            self.log_event(f"[ASSET_MINT] duplicate rejected: asset_id={asset_id} already minted", status="warning")
+
+        if self._reject_duplicate_tx(data, "UPLOAD_ASSET", owner, asset_id):
             return
+        if self._reject_already_minted(asset_id, owner):
+            return
+
+        if asset_id:
+            self.seen_minted_asset_ids.add(asset_id)
         self.broadcast_to_nodes(request)
 
     def handle_unlist_asset_from_server(self, request: dict, comm=None):
@@ -598,86 +678,57 @@ class GatewayServer:
     def handle_asset_list_signed_in_blockchain(self, request: dict, comm=None):
         """Handle a LIST_ASSET block mined by a node — verify, append, route FULLY_UPLOAD."""
         _ = comm
-        sender_ip = str(request.get("sender_ip") or "")
-        sender_port = int(request.get("sender_port") or 0)
-        data = request.get("data") if isinstance(request.get("data"), dict) else {}
-        block = data.get("block") if isinstance(data.get("block"), dict) else {}
-        asset_id = str(data.get("asset_id", ""))
-
-        if not block or not asset_id:
-            self.log_event("[LIST_ASSET] missing block or asset_id", status="warning")
-            return
-
-        ok, result = self.verify_mined_block(block, "LIST_ASSET")
-        if not ok:
-            self.log_event(result, status="warning")
-            return
-
-        block_hash = result
-        self.log_event(f"[LIST_ASSET] verified asset={asset_id} nonce={block.get('nonce')} hash={block_hash[:16]}...")
-        self.gateway_ledger.append(block)
-        self.save_gateway_ledger()
-
-        skip = (sender_ip, sender_port) if sender_ip and sender_port else None
-        self.broadcast_to_nodes({
-            "type": "BROADCAST_TX_TO_VERIFY",
-            "data": {"block": block, "publisher_chain_length": len(self.gateway_ledger)},
-            "sender_ip": sender_ip,
-            "sender_port": sender_port,
-        }, skip_addr=skip)
-
-        self.route_to_server({
-            "type": "FULLY_UPLOAD",
-            "asset_id": asset_id,
-            "block_hash": block_hash,
-        })
+        try:
+            sender_ip = str(request.get("sender_ip") or "")
+            sender_port = int(request.get("sender_port") or 0)
+            data = request.get("data") if isinstance(request.get("data"), dict) else {}
+            block = data.get("block") if isinstance(data.get("block"), dict) else {}
+            asset_id = str(data.get("asset_id", ""))
+            self._require_block(block, "LIST_ASSET")
+            self._require_asset_id(asset_id, "LIST_ASSET")
+            block_hash = self._verify_and_get_hash(block, "LIST_ASSET")
+            self.log_event(f"[LIST_ASSET] verified asset={asset_id} hash={block_hash[:16]}...")
+            self._broadcast_verified_block(block, sender_ip, sender_port)
+            self.route_to_server({"type": "FULLY_UPLOAD", "asset_id": asset_id, "block_hash": block_hash})
+        except AurexError as e:
+            self.log_event(f"[LIST_ASSET] rejected: {e}")
 
     def broadcast_tx_to_verify(self, request: dict, comm=None):
         """
         Validate a mined block from a node and broadcast it to all other nodes.
 
         Steps:
-          1. Calls ``_validate_block`` — checks index, prev_hash, signature, PoW.
-          2. If valid: appends to ``self.gateway_ledger``, updates the publisher
-             node's chain-length, and broadcasts ``BROADCAST_TX_TO_VERIFY`` to
-             every other node so they can stop mining and add the block.
-          3. Calls ``_maybe_sync_lagging_nodes`` to push ``GET_LEDGER`` to any
+          1. Calls ``verify_block`` — checks hash, PoW, and ECDSA signature.
+          2. If valid: updates the publisher node's chain-length and broadcasts
+             ``BROADCAST_TX_TO_VERIFY`` to every other node so they can stop
+             mining and add the block.
+          3. Calls ``maybe_sync_lagging_nodes`` to push ``GET_LEDGER`` to any
              nodes whose chain length is behind the publisher's.
 
         Args:
             request: Raw message from the publishing node.
             comm:    The publisher node's communication object (for address extraction).
         """
-        sender_ip, sender_port = self.extract_sender_addr(comm) if comm else ("", 0)
-        publisher_addr = (request.get("sender_ip") or sender_ip, int(request.get("sender_port") or sender_port or 0))
-
-        req_data = request.get("data") if isinstance(request.get("data"), dict) else {}
-        block = req_data.get("block") if isinstance(req_data.get("block"), dict) else req_data
-        publisher_chain_length = int(req_data.get("publisher_chain_length") or request.get("publisher_chain_length") or len(self.gateway_ledger) + 1)
-
-        ok, reason = self.validate_block(block)
-        if not ok:
-            self.log_event(f"Rejected block: {reason}", status="warning")
-            return
-
-        self.gateway_ledger.append(block)
-        self.save_gateway_ledger()
-        self.update_node_length((publisher_addr[0], publisher_addr[1]), publisher_chain_length)
-
-        tx = block.get("tx") if isinstance(block.get("tx"), dict) else (block.get("transaction") if isinstance(block.get("transaction"), dict) else {})
-        userpk = str(tx.get("sender") or "")
-        self.maybe_sync_lagging_nodes((publisher_addr[0], publisher_addr[1]), publisher_chain_length, userpk)
-
-        outbound = {
-            "type": "BROADCAST_TX_TO_VERIFY",
-            "data": {
-                "block": block,
-                "publisher_chain_length": publisher_chain_length,
-            },
-            "sender_ip": publisher_addr[0],
-            "sender_port": publisher_addr[1],
-        }
-        self.broadcast_to_nodes(outbound, skip_addr=(publisher_addr[0], publisher_addr[1]))
+        try:
+            sender_ip, sender_port = self.extract_sender_addr(comm) if comm else ("", 0)
+            publisher_addr = (request.get("sender_ip") or sender_ip, int(request.get("sender_port") or sender_port or 0))
+            req_data = request.get("data") if isinstance(request.get("data"), dict) else {}
+            block = req_data.get("block") if isinstance(req_data.get("block"), dict) else req_data
+            publisher_chain_length = int(req_data.get("publisher_chain_length") or request.get("publisher_chain_length") or 0)
+            self._require_block(block, "BROADCAST_TX")
+            self._verify_and_get_hash(block, "BROADCAST_TX")
+            self.update_node_length(publisher_addr, publisher_chain_length)
+            tx = block.get("tx") if isinstance(block.get("tx"), dict) else {}
+            userpk = str(tx.get("user_public_key") or tx.get("sender") or "")
+            self.maybe_sync_lagging_nodes(publisher_addr, publisher_chain_length, userpk)
+            self.broadcast_to_nodes({
+                "type": "BROADCAST_TX_TO_VERIFY",
+                "data": {"block": block, "publisher_chain_length": publisher_chain_length},
+                "sender_ip": publisher_addr[0],
+                "sender_port": publisher_addr[1],
+            }, skip_addr=publisher_addr)
+        except AurexError as e:
+            self.log_event(f"Rejected block: {e}")
 
     def handle_get_balance(self, request: dict, comm=None):
         _ = comm
@@ -730,21 +781,6 @@ class GatewayServer:
         }
         self.route_to_server(payload)
 
-    def verify_mined_block(self, block: dict, label: str) -> tuple[bool, str]:
-        """Shared PoW + hash validation for ASSET_MINT and UNLIST blocks."""
-        block_copy = {k: v for k, v in block.items() if k != "hash"}
-        block_hash = str(block.get("hash", ""))
-        recomputed = hashlib.sha256(
-            json.dumps(block_copy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        ).hexdigest()
-        difficulty = int(block.get("difficulty", 0) or 0)
-        if block_hash != recomputed:
-            return False, f"[{label}] hash mismatch: got {block_hash[:16]}... expected {recomputed[:16]}..."
-        if difficulty > 0 and not recomputed.startswith("0" * difficulty):
-            return False, f"[{label}] PoW invalid nonce={block.get('nonce')} hash={block_hash[:16]}..."
-        block["hash"] = recomputed
-        return True, block_hash
-
     def handle_asset_signed_in_blockchain(self, request: dict, comm=None):
         """
         Handle an ASSET_MINT block that a node successfully mined.
@@ -760,83 +796,41 @@ class GatewayServer:
             comm:    Sender's communication object (unused — sender info is
                      read from request fields).
         """
-        sender_ip = str(request.get("sender_ip") or "")
-        sender_port = int(request.get("sender_port") or 0)
-        data = request.get("data") if isinstance(request.get("data"), dict) else {}
-        block = data.get("block") if isinstance(data.get("block"), dict) else {}
-        asset_id = str(data.get("asset_id", ""))
-
-        if not block or not asset_id:
-            self.log_event("[ASSET_MINT] missing block or asset_id", status="warning")
-            return
-
-        ok, result = self.verify_mined_block(block, "ASSET_MINT")
-        if not ok:
-            self.log_event(result, status="warning")
-            return
-
-        block_hash = result
-        # Guard: reject if this asset was already minted (race: two nodes both finished)
-        if asset_id in self.seen_minted_asset_ids:
-            self.log_event(f"[ASSET_MINT] duplicate block rejected: asset_id={asset_id} already in minted set", status="warning")
-            return
-        self.seen_minted_asset_ids.add(asset_id)
-        self.log_event(f"[ASSET_MINT] verified asset={asset_id} nonce={block.get('nonce')} hash={block_hash[:16]}...")
-        self.gateway_ledger.append(block)
-        self.save_gateway_ledger()
-
-        # Stop other nodes that are still mining this asset
-        skip = (sender_ip, sender_port) if sender_ip and sender_port else None
-        self.broadcast_to_nodes({
-            "type": "BROADCAST_TX_TO_VERIFY",
-            "data": {"block": block, "publisher_chain_length": len(self.gateway_ledger)},
-            "sender_ip": sender_ip,
-            "sender_port": sender_port,
-        }, skip_addr=skip)
-
-        self.route_to_server({
-            "type": "FULLY_UPLOAD",
-            "asset_id": asset_id,
-            "block_hash": block_hash,
-        })
+        _ = comm
+        try:
+            sender_ip = str(request.get("sender_ip") or "")
+            sender_port = int(request.get("sender_port") or 0)
+            data = request.get("data") if isinstance(request.get("data"), dict) else {}
+            block = data.get("block") if isinstance(data.get("block"), dict) else {}
+            asset_id = str(data.get("asset_id", ""))
+            self._require_block(block, "ASSET_MINT")
+            self._require_asset_id(asset_id, "ASSET_MINT")
+            block_hash = self._verify_and_get_hash(block, "ASSET_MINT")
+            self._guard_duplicate_mint(asset_id)
+            self.seen_minted_asset_ids.add(asset_id)
+            self.log_event(f"[ASSET_MINT] verified asset={asset_id} hash={block_hash[:16]}...")
+            self._broadcast_verified_block(block, sender_ip, sender_port)
+            self.route_to_server({"type": "FULLY_UPLOAD", "asset_id": asset_id, "block_hash": block_hash})
+        except AurexError as e:
+            self.log_event(f"[ASSET_MINT] rejected: {e}")
 
     def handle_asset_unlist_signed_in_blockchain(self, request: dict, comm=None):
-        sender_ip = str(request.get("sender_ip") or "")
-        sender_port = int(request.get("sender_port") or 0)
-        data = request.get("data") if isinstance(request.get("data"), dict) else {}
-        block = data.get("block") if isinstance(data.get("block"), dict) else {}
-        asset_id = str(data.get("asset_id", ""))
-        owner = str(data.get("owner", ""))
-
-        if not block or not asset_id:
-            self.log_event("[UNLIST] missing block or asset_id", status="warning")
-            return
-
-        ok, result = self.verify_mined_block(block, "UNLIST")
-        if not ok:
-            self.log_event(result, status="warning")
-            return
-
-        block_hash = result
-        self.log_event(f"[UNLIST] verified asset={asset_id} nonce={block.get('nonce')} hash={block_hash[:16]}...")
-        self.gateway_ledger.append(block)
-        self.save_gateway_ledger()
-
-        # Stop other nodes that are still mining this unlist
-        skip = (sender_ip, sender_port) if sender_ip and sender_port else None
-        self.broadcast_to_nodes({
-            "type": "BROADCAST_TX_TO_VERIFY",
-            "data": {"block": block, "publisher_chain_length": len(self.gateway_ledger)},
-            "sender_ip": sender_ip,
-            "sender_port": sender_port,
-        }, skip_addr=skip)
-
-        self.route_to_server({
-            "type": "ASSET_UNLISTED",
-            "asset_id": asset_id,
-            "block_hash": block_hash,
-            "owner": owner,
-        })
+        _ = comm
+        try:
+            sender_ip = str(request.get("sender_ip") or "")
+            sender_port = int(request.get("sender_port") or 0)
+            data = request.get("data") if isinstance(request.get("data"), dict) else {}
+            block = data.get("block") if isinstance(data.get("block"), dict) else {}
+            asset_id = str(data.get("asset_id", ""))
+            owner = str(data.get("owner", ""))
+            self._require_block(block, "UNLIST")
+            self._require_asset_id(asset_id, "UNLIST")
+            block_hash = self._verify_and_get_hash(block, "UNLIST")
+            self.log_event(f"[UNLIST] verified asset={asset_id} hash={block_hash[:16]}...")
+            self._broadcast_verified_block(block, sender_ip, sender_port)
+            self.route_to_server({"type": "ASSET_UNLISTED", "asset_id": asset_id, "block_hash": block_hash, "owner": owner})
+        except AurexError as e:
+            self.log_event(f"[UNLIST] rejected: {e}")
 
     def create_balance(self, request: dict, comm=None):
         _ = comm
@@ -858,17 +852,7 @@ def main():
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%H:%M:%S",
     )
-    gateway_server = GatewayServer()
-
-    answer = input("Use gateway GUI dashboard? (y/n): ").strip().lower()
-    if answer in {"y", "yes"}:
-        from Gateway.gateway_dashboard import run_dashboard
-
-        threading.Thread(target=gateway_server.start, daemon=True).start()
-        run_dashboard(gateway_server)
-        return
-
-    gateway_server.start()
+    GatewayServer().start()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from SharedResources.classes import RSA_Client, RSA_Server
 from SharedResources.config import GATEWAY_UDP_PORT, BROADCAST_DISCOVERY_FREQUENCY, POW_DIFFICULTY, INITIAL_BALANCE, BLOCKCHAIN_NODE_IP
 from SharedResources.logging import Logger
+from SharedResources.exceptions import (
+    AurexError,
+    ValidationError,
+    DuplicateError,
+    BlockchainError,
+)
 
 
 def _mine_block(block_template: dict, difficulty: int,
@@ -96,6 +102,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self._node_stop_event = threading.Event()   # shuts down the whole node
         self._mining_stop_event = mp.Event()        # aborts the current mining task
         self._current_miner: "mp.Process | None" = None
+        self._pending_mint_ids: set[str] = set()    # asset_ids currently being mined (dedup guard)
 
         self.chain: list[dict[str, Any]] = []
         self.balances: dict[str, float] = {}
@@ -265,20 +272,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         return hashlib.sha256(content).hexdigest()
 
     def validate_tx(self, tx: dict[str, Any]):
-        """
-        Basic transaction validation: reject negative amounts and insufficient balances.
-
-        Args:
-            tx: Transaction dict with optional ``sender`` and ``amount`` keys.
-
-        Returns:
-            True if the transaction is acceptable, False otherwise.
-        """
-        sender = str(tx.get("sender", ""))
-        amount = float(tx.get("amount", 0.0))
+        sender = str(tx.get("user_public_key") or tx.get("sender") or "")
+        amount = float(tx.get("price") or tx.get("amount") or 0.0)
         if amount < 0:
             return False
-        if sender and self.get_balance(sender) < amount:
+        if sender and sender in self.balances and self.get_balance(sender) < amount:
             return False
         return True
 
@@ -305,8 +303,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "prev_hash":  self.last_hash(),
             "timestamp":  datetime.now().isoformat(),
             "tx":         transaction,
-            "public_key": str(transaction.get("public_key", "")),
-            "signature":  str(transaction.get("signature", "")),
             "nonce":      0,
             "difficulty": self.difficulty,
         }
@@ -345,36 +341,36 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             self.Print(f"[{self.node_id}] mine: aborted — new block received from network")
             return None
 
+        # If the stop signal arrived just as our miner found the nonce, another winner
+        # was already accepted. Discard our block so we don't write a duplicate.
+        if self._mining_stop_event.is_set():
+            self.Print(f"[{self.node_id}] mine: found block but stop was signalled — discarding (another winner accepted)")
+            return None
+
         self.Print(f"[{self.node_id}] mine: block found nonce={block['nonce']} hash={block['hash'][:16]}...")
         self.add_block(block)
         return block
 
     def add_block(self, block: dict[str, Any]):
-        """Append a validated block to the chain and update the balance table.
-
-        Handles both the 'tx' and legacy 'transaction' key names, and supports
-        payloads where the actual amounts are nested inside a 'data' sub-dict.
-        """
-        # normalise the transaction field name
+        """Append a validated block to the chain and update the balance table."""
         tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
         if not tx and isinstance(block.get("transaction"), dict):
             tx = block.get("transaction")
 
-        # amounts can be one level deeper inside a 'data' key
-        tx_data = tx.get("data") if isinstance(tx.get("data"), dict) else tx
-        sender   = str(tx_data.get("sender",   tx.get("sender",   "")))
-        receiver = str(tx_data.get("receiver", tx.get("receiver", "")))
-        amount   = float(tx_data.get("amount", tx.get("amount", 0.0)))
+        tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
 
         with self.lock:
-            # debit sender, credit receiver
-            if sender:
-                self.balances[sender]   = round(float(self.balances.get(sender,   0.0)) - amount, 8)
-            if receiver:
-                self.balances[receiver] = round(float(self.balances.get(receiver, 0.0)) + amount, 8)
+            if tx_type == "BUY":
+                buyer_pk = str(tx.get("user_public_key") or tx.get("sender") or "")
+                seller_pk = str(tx.get("seller_public_key") or "")
+                price = float(tx.get("price") or tx.get("amount") or 0.0)
+                if buyer_pk and price > 0:
+                    self.balances[buyer_pk] = round(float(self.balances.get(buyer_pk, 0.0)) - price, 8)
+                if seller_pk and price > 0:
+                    self.balances[seller_pk] = round(float(self.balances.get(seller_pk, 0.0)) + price, 8)
 
             self.chain.append(block)
-            self.pending_txs = []       # block was mined — clear the queue
+            self.pending_txs = []
             self.persist_local_state()
 
     # -------- gateway communication --------
@@ -470,6 +466,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "BROADCAST_TX_TO_VERIFY": self.handle_broadcast_tx_to_verify,
             "CREATE_BALANCE":        self.handle_create_balance,
             "GET_LEDGER":            self.handle_get_ledger_sync,
+            "GET_MINTED_IDS":        self.handle_get_minted_ids,
         }
 
         if msg_type in threaded_handlers:
@@ -493,21 +490,65 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
     def tx_from_gateway_message(self, msg: dict[str, Any], tx_type: str):
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        # Client payload may be one level deeper inside a "data" key
         payload = data.get("data") if isinstance(data.get("data"), dict) else data
+        signed = payload.get("signed_payload") if isinstance(payload.get("signed_payload"), dict) else {}
 
-        tx = {
+        return {
             "type": tx_type,
-            "tx_id": payload.get("tx_id") or f"{tx_type}-{int(time.time() * 1000)}",
-            "sender": str(payload.get("sender") or payload.get("buyer") or ""),
-            "receiver": str(payload.get("receiver") or payload.get("seller") or ""),
-            "amount": float(payload.get("amount") or payload.get("price") or 0.0),
-            "asset_id": payload.get("asset_id"),
-            "timestamp": payload.get("timestamp") or datetime.now().isoformat(),
-            "data": payload.get("data") if isinstance(payload.get("data"), dict) else payload,
-            "signature": str(payload.get("signature", "")),
-            "public_key": str(payload.get("public_key", "")),
+            "tx_id": str(payload.get("tx_id") or f"{tx_type}-{int(time.time() * 1000)}"),
+            "asset_id": str(payload.get("asset_id") or signed.get("asset_id") or ""),
+            "buyer": str(payload.get("buyer") or signed.get("buyer") or ""),
+            "price": float(payload.get("price") or signed.get("price") or payload.get("amount") or 0.0),
+            "user_public_key": str(payload.get("public_key") or ""),
+            "seller_public_key": str(payload.get("seller_public_key") or ""),
+            "user_signature": str(payload.get("signature") or ""),
+            "timestamp": payload.get("timestamp") or signed.get("timestamp") or datetime.now().isoformat(),
         }
-        return tx
+
+    # ── Fail-fast guards ──────────────────────────────────────────────────────
+
+    def _require_asset_id(self, asset_id: str):
+        if not asset_id:
+            raise ValidationError("Missing asset_id in request")
+
+    def _require_owner(self, owner: str):
+        if not owner:
+            raise ValidationError("Missing owner in request")
+
+    def _guard_duplicate_pending(self, asset_id: str):
+        if asset_id in self._pending_mint_ids:
+            raise DuplicateError(f"asset_id={asset_id} already pending mint")
+
+    def _guard_already_minted(self, asset_id: str):
+        with self.lock:
+            already_minted = any(
+                isinstance(b.get("tx"), dict)
+                and str(b["tx"].get("type") or b["tx"].get("tx_type") or "").upper() == "ASSET_MINT"
+                and str(b["tx"].get("asset_id", "")) == asset_id
+                for b in self.chain
+            )
+        if already_minted:
+            raise DuplicateError(f"asset_id={asset_id} already minted in chain")
+
+    def _mine_or_raise(self, tx: dict) -> dict:
+        block = self.mine(tx)
+        if block is None:
+            raise BlockchainError("Mining aborted or validation failed")
+        return block
+
+    def _build_mint_tx(self, asset_id: str, owner: str, public_key: str,
+                       signature: str, file_hash: str = "") -> dict:
+        _ = owner
+        return {
+            "type": "ASSET_MINT",
+            "tx_id": f"mint-{asset_id}-{int(time.time() * 1000)}",
+            "asset_id": asset_id,
+            "user_public_key": public_key,
+            "user_signature": signature,
+            "img_hash": file_hash,
+            "timestamp": datetime.now().isoformat(),
+        }
 
     def handle_mint_request(self, msg: dict[str, Any]):
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
@@ -517,52 +558,40 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         signature = str(data.get("signature", ""))
         file_hash = str(data.get("file_hash", ""))
 
-        if not asset_id:
-            self.Print(f"[{self.node_id}] ASSET_MINT: missing asset_id, skipping")
+        # Reject if this asset was already minted in our local chain, or if another
+        # thread is currently mining it (prevents duplicate blocks when two
+        # UPLOAD_ASSET messages arrive before the first one finishes mining).
+        try:
+            self._require_asset_id(asset_id)
+            with self.lock:
+                self._guard_already_minted(asset_id)
+                self._guard_duplicate_pending(asset_id)
+                self._pending_mint_ids.add(asset_id)
+        except DuplicateError as e:
+            self.Print(f"[{self.node_id}] ASSET_MINT: {e}, skipping")
+            return
+        except AurexError as e:
+            self.Print(f"[{self.node_id}] MINT rejected: {e}")
             return
 
-        # Reject if this asset was already minted in our local chain
-        with self.lock:
-            already_minted = any(
-                isinstance(b.get("tx"), dict)
-                and str(b["tx"].get("tx_type", "")).upper() == "ASSET_MINT"
-                and str(b["tx"].get("asset_id", "")) == asset_id
-                for b in self.chain
-            )
-        if already_minted:
-            self.Print(f"[{self.node_id}] ASSET_MINT: asset_id={asset_id} already minted in chain, skipping")
-            return
-
-        tx = {
-            "tx_type": "ASSET_MINT",
-            "tx_id": f"mint-{asset_id}-{int(time.time() * 1000)}",
-            "asset_id": asset_id,
-            "owner_public_key": public_key,
-            "sender": public_key,
-            "receiver": "",
-            "amount": 0.0,
-            "signature": signature,
-            "public_key": public_key,
-            "timestamp": datetime.now().isoformat(),
-            "img_hash": file_hash,
-        }
-
-        self.Print(f"[{self.node_id}] ASSET_MINT: starting mining for asset_id={asset_id}")
-        block = self.mine(tx)
-        if block is not None:
+        try:
+            tx = self._build_mint_tx(asset_id, owner, public_key, signature, file_hash)
+            self.Print(f"[{self.node_id}] ASSET_MINT: starting mining for asset_id={asset_id}")
+            block = self._mine_or_raise(tx)
             self.Print(f"[{self.node_id}] ASSET_MINT: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
             self.send_gateway({
                 "type": "ASSET_SIGNED_IN_BLOCKCHAIN",
-                "data": {
-                    "block": block,
-                    "asset_id": asset_id,
-                    "owner": owner,
-                },
+                "data": {"block": block, "asset_id": asset_id, "owner": owner},
                 "sender_ip": self.advertised_ip(),
                 "sender_port": self.port,
             })
-        else:
-            self.Print(f"[{self.node_id}] ASSET_MINT: mining failed for asset_id={asset_id}")
+        except BlockchainError:
+            pass  # mine aborted — another node won, that's normal PoW
+        except AurexError as e:
+            self.Print(f"[{self.node_id}] MINT failed: {e}")
+        finally:
+            with self.lock:
+                self._pending_mint_ids.discard(asset_id)
 
     def handle_unlist_request(self, msg: dict[str, Any]):
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
@@ -576,14 +605,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             return
 
         tx = {
-            "tx_type": "UNLIST_ASSET_FROM_BLOCKCHAIN",
+            "type": "UNLIST",
             "tx_id": f"unlist-{asset_id}-{int(time.time() * 1000)}",
             "asset_id": asset_id,
-            "sender": public_key,
-            "receiver": "",
-            "amount": 0.0,
-            "signature": signature,
-            "public_key": public_key,
+            "user_public_key": public_key,
+            "user_signature": signature,
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -617,14 +643,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             return
 
         tx = {
-            "tx_type": "LIST_ASSET",
+            "type": "LIST",
             "tx_id": f"list-{asset_id}-{int(time.time() * 1000)}",
             "asset_id": asset_id,
-            "sender": public_key,
-            "receiver": "",
-            "amount": 0.0,
-            "signature": signature,
-            "public_key": public_key,
+            "user_public_key": public_key,
+            "user_signature": signature,
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -645,13 +668,44 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         else:
             self.Print(f"[{self.node_id}] LIST_ASSET: mining failed for asset_id={asset_id}")
 
+    def _validate_buy_tx(self, tx: dict):
+        if not self.validate_tx(tx):
+            sender = tx.get("sender", "")
+            raise ValidationError(
+                f"Insufficient balance: sender={sender[:12] if sender else '?'} "
+                f"balance={self.get_balance(sender)} amount={tx.get('amount')}"
+            )
+
     def handle_tx_request_buy(self, msg: dict[str, Any]):
         tx = self.tx_from_gateway_message(msg, "BUY")
-        self.pending_txs.append(tx)
-        block = self.mine(tx)
-        if block is not None:
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        asset_id = str(tx.get("asset_id") or data.get("asset_id") or "")
+        try:
+            self._validate_buy_tx(tx)
+            # Reject before mining if this asset was already purchased on our chain.
+            # This guards against duplicate TX_REQUEST_BUY deliveries and race conditions
+            # where two nodes finish mining the same BUY tx — only the first block should
+            # debit the buyer's balance.
+            if asset_id and self._is_double_buy(asset_id):
+                raise ValidationError(f"Asset {asset_id} already purchased — double-buy rejected")
+            self.pending_txs.append(tx)
+            block = self._mine_or_raise(tx)
             self.notify_buy_success(tx)
             self.notify_gateway(block)
+        except BlockchainError:
+            pass  # mining aborted — normal, another node won
+        except AurexError as e:
+            self.Print(f"[{self.node_id}] BUY failed: {e}")
+            self.send_gateway({
+                "type": "BUY_FAILED",
+                "data": {
+                    "asset_id": asset_id,
+                    "buyer": str(tx.get("buyer") or data.get("buyer") or ""),
+                    "user_public_key": str(tx.get("user_public_key") or data.get("public_key") or ""),
+                    "message": str(e),
+                    "tx_id": str(tx.get("tx_id") or data.get("tx_id") or ""),
+                },
+            })
 
     def handle_tx_request_sell(self, msg: dict[str, Any]):
         tx = self.tx_from_gateway_message(msg, "SELL")
@@ -731,6 +785,23 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         publisher_port = int(msg.get("publisher_port") or 0)
         publisher_chain_length = int(msg.get("publisher_chain_length") or 0)
         self.ensure_local_state_or_fetch(publisher_ip, publisher_port, publisher_chain_length, "")
+
+    def handle_get_minted_ids(self, msg: dict[str, Any]):
+        """Respond to gateway's GET_MINTED_IDS with all ASSET_MINT asset_ids from our chain."""
+        _ = msg
+        with self.lock:
+            minted = [
+                str(b["tx"].get("asset_id", ""))
+                for b in self.chain
+                if isinstance(b.get("tx"), dict)
+                and str(b["tx"].get("type") or b["tx"].get("tx_type") or "").upper() == "ASSET_MINT"
+            ]
+        minted = [a for a in minted if a]
+        self.send_gateway({
+            "type": "MINTED_IDS",
+            "data": {"asset_ids": minted},
+        })
+        self.Print(f"[{self.node_id}] GET_MINTED_IDS: sent {len(minted)} minted id(s) to gateway")
 
     def handle_get_balance_sync(self, msg: dict[str, Any]):
         publisher_ip = str(msg.get("publisher_ip") or "")

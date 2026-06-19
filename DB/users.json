@@ -14,7 +14,7 @@
     "email": "nadavthecool1@gmail.com",
     "salt": "4589205",
     "password_hash": "64252a31f12994352fb46a3d8d637907ed54c4db4a243dd36e08128002e179d0",
-    "public_key": "04ae42b96e3b2da7d333e4ac12f6fb8a7deb996ed35b3842b315410003c9b7d143a59bb397284ef3a46e641674f4307dbff8abc96b26f4fdf43761f9c1e5b1c47b",
+    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
     "verification_code": null,
     "reset_time": null,
     "user_status": "ACTIVE"
@@ -34,7 +34,7 @@
     "email": "cohennadav3@gmail.com",
     "salt": "7587428",
     "password_hash": "9cc94e8affb23382fe63428f9364f43554b0ed6298fc9ca6804e482a43e31e8c",
-    "public_key": "",
+    "public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
     "verification_code": null,
     "reset_time": null,
     "user_status": "ACTIVE"

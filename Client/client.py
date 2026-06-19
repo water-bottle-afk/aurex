@@ -82,6 +82,7 @@ _PUSH_EVENTS = frozenset({
     "ASSET_REMOVED",
     "ASSET_UNLISTED",
     "HIDE_ASSETS_OF_USER",
+    "GATEWAY_ONLINE",
 })
 
 
@@ -283,6 +284,102 @@ class Client:
         self.hide_assets_queue: "queue.Queue[str]" = queue.Queue()    # HIDE_ASSETS_OF_USER silent removal
         self.balance_queue: "queue.Queue[float]" = queue.Queue()
         self.bought_asset_queue: "queue.Queue[str]" = queue.Queue()
+        self.buy_success_queue: "queue.Queue[str]" = queue.Queue()   # feeds My Assets live update
+        self.push_snackbar_queue: "queue.Queue[tuple[str, bool]]" = queue.Queue()
+        self.gateway_online_queue: "queue.Queue[None]" = queue.Queue()
+
+        self._push_handlers: dict[str, Any] = {
+            "NOTIFICATION":       self._on_notification,
+            "BUY_SUCCESS":        self._on_buy_success,
+            "BUY_FAILED":         self._on_buy_failed,
+            "BLOCK_ACCEPTED":     self._on_block_accepted,
+            "BLOCK_REJECTED":     self._on_block_rejected,
+            "BALANCE_UPDATED":    self._on_balance,
+            "BALANCE_IS":         self._on_balance,
+            "FULLY_UPLOADED":     self._on_fully_uploaded,
+            "ASSET_LISTED":       self._on_fully_uploaded,
+            "ASSET_SOLD":         self._on_asset_sold,
+            "ASSET_REMOVED":      self._on_asset_removed,
+            "ASSET_UNLISTED":     self._on_asset_unlisted,
+            "HIDE_ASSETS_OF_USER": self._on_hide_assets_of_user,
+            "GATEWAY_ONLINE":      self._on_gateway_online,
+        }
+
+    # ── Push-event handlers ───────────────────────────────────────────────────
+
+    def _on_notification(self, msg):
+        text = str(msg.get("msg", ""))
+        if text:
+            self.notification_queue.put(text)
+            self.push_snackbar_queue.put((text, False))
+
+    def _on_buy_success(self, msg):
+        asset_id = str(msg.get("asset_id", ""))
+        text = str(msg.get("msg") or f"Purchase confirmed — asset {asset_id} at {msg.get('price', '')} AUR is now yours!")
+        self.notification_queue.put(text)
+        if asset_id:
+            self.bought_asset_queue.put(asset_id)
+            self.buy_success_queue.put(asset_id)
+        self.push_snackbar_queue.put((text, False))
+
+    def _on_buy_failed(self, msg):
+        text = f"Transaction failed: {msg.get('message', 'Unknown reason')}"
+        self.notification_queue.put(text)
+        self.push_snackbar_queue.put((text, True))
+
+    def _on_block_accepted(self, msg):
+        text = f"Block accepted for asset {msg.get('asset_id', '')}"
+        self.notification_queue.put(text)
+        self.push_snackbar_queue.put((text, False))
+
+    def _on_block_rejected(self, msg):
+        text = f"Block rejected: {msg.get('message', 'Unknown reason')}"
+        self.notification_queue.put(text)
+        self.push_snackbar_queue.put((text, True))
+
+    def _on_balance(self, msg):
+        self.balance_queue.put(float(msg.get("balance", 0.0)))
+
+    def _on_fully_uploaded(self, msg):
+        text = str(msg.get("msg", f"Asset {msg.get('asset_id', '')} is now live on the marketplace"))
+        self.notification_queue.put(text)
+        _aid = str(msg.get("asset_id", ""))
+        if _aid:
+            self.asset_listed_queue.put(_aid)
+        self.push_snackbar_queue.put((text, False))
+
+    def _on_asset_sold(self, msg):
+        asset_id = str(msg.get("asset_id", ""))
+        text = str(msg.get("msg") or f"Your asset {asset_id} was sold")
+        self.notification_queue.put(text)
+        if asset_id:
+            self.asset_sold_queue.put(asset_id)
+        self.push_snackbar_queue.put((text, False))
+
+    def _on_asset_removed(self, msg):
+        asset_id = str(msg.get("asset_id", ""))
+        if asset_id:
+            self.asset_removed_queue.put(asset_id)
+
+    def _on_asset_unlisted(self, msg):
+        asset_id = str(msg.get("asset_id", ""))
+        text = str(msg.get("msg", f"Asset {asset_id} was unlisted"))
+        self.notification_queue.put(text)
+        if asset_id:
+            self.asset_unlisted_queue.put(asset_id)
+        self.push_snackbar_queue.put((text, False))
+
+    def _on_hide_assets_of_user(self, msg):
+        asset_ids = msg.get("asset_ids", [])
+        if isinstance(asset_ids, list):
+            for aid in asset_ids:
+                if aid:
+                    self.hide_assets_queue.put(str(aid))
+
+    def _on_gateway_online(self, _msg):
+        self.gateway_online_queue.put(None)
+
+    # ── Connection ────────────────────────────────────────────────────────────
 
     def connect(self):
         with self._lock:
@@ -329,53 +426,9 @@ class Client:
                 continue
             msg_type = str(msg.get("type", "")).upper()
             if msg_type in _PUSH_EVENTS:
-                if msg_type == "NOTIFICATION":
-                    self.notification_queue.put(str(msg.get("msg", "")))
-                elif msg_type == "BUY_SUCCESS":
-                    asset_id = str(msg.get("asset_id", ""))
-                    text = str(msg.get("msg") or f"Purchase confirmed — asset {asset_id} at {msg.get('price', '')} AUR is now yours!")
-                    self.notification_queue.put(text)
-                    if asset_id:
-                        self.bought_asset_queue.put(asset_id)
-                elif msg_type == "BUY_FAILED":
-                    self.notification_queue.put(f"Transaction failed: {msg.get('message', 'Unknown reason')}")
-                elif msg_type == "BLOCK_ACCEPTED":
-                    self.notification_queue.put(f"Block accepted for asset {msg.get('asset_id', '')}")
-                elif msg_type == "BLOCK_REJECTED":
-                    self.notification_queue.put(f"Block rejected: {msg.get('message', 'Unknown reason')}")
-                elif msg_type in ("BALANCE_UPDATED", "BALANCE_IS"):
-                    balance = float(msg.get("balance", 0.0))
-                    self.balance_queue.put(balance)
-                elif msg_type in ("FULLY_UPLOADED", "ASSET_LISTED"):
-                    self.notification_queue.put(str(msg.get("msg", f"Asset {msg.get('asset_id', '')} is now live on the marketplace")))
-                    _aid = str(msg.get("asset_id", ""))
-                    if _aid:
-                        self.asset_listed_queue.put(_aid)
-                elif msg_type == "ASSET_SOLD":
-                    asset_id = str(msg.get("asset_id", ""))
-                    text = str(msg.get("msg") or f"Your asset {asset_id} was sold")
-                    self.notification_queue.put(text)
-                    if asset_id:
-                        self.asset_sold_queue.put(asset_id)
-                elif msg_type == "ASSET_REMOVED":
-                    asset_id = str(msg.get("asset_id", ""))
-                    asset_name = str(msg.get("asset_name", asset_id))
-                    self.notification_queue.put(f"Asset '{asset_name}' was removed from marketplace")
-                    if asset_id:
-                        self.asset_removed_queue.put(asset_id)
-                elif msg_type == "ASSET_UNLISTED":
-                    asset_id = str(msg.get("asset_id", ""))
-                    msg_text = str(msg.get("msg", f"Asset {asset_id} was unlisted"))
-                    self.notification_queue.put(msg_text)
-                    if asset_id:
-                        self.asset_unlisted_queue.put(asset_id)
-                elif msg_type == "HIDE_ASSETS_OF_USER":
-                    # Silently remove all assets of a deleted user from grids
-                    asset_ids = msg.get("asset_ids", [])
-                    if isinstance(asset_ids, list):
-                        for aid in asset_ids:
-                            if aid:
-                                self.hide_assets_queue.put(str(aid))
+                handler = self._push_handlers.get(msg_type)
+                if handler:
+                    handler(msg)
                 continue
             self._response_queue.put(msg)
 
@@ -538,6 +591,7 @@ class ClientApp:
         self.removed_asset_ids: set[str] = set()
         self.unlisted_asset_ids: set[str] = set()
         self.listed_asset_ids: set[str] = set()   # assets that moved from PENDING → FOR_SALE
+        self.recently_bought_ids: set[str] = set()   # assets the user just purchased
         self.gateway_online: bool | None = None   # None=unknown, True=online, False=offline
         # Refs to live header controls — updated by background monitors
         self._balance_text: ft.Text | None = None
@@ -546,6 +600,16 @@ class ClientApp:
 
     def start(self):
         self.page.go("/login")
+
+    # ── Fail-fast guards ──────────────────────────────────────────────────────
+
+    def _require_auth(self):
+        if not self.state.username:
+            raise RuntimeError("Not authenticated")
+
+    def _require_wallet(self):
+        if not self.wallet_session:
+            raise RuntimeError("Wallet not loaded")
 
     def notify(self, message, error=False):
         """
@@ -585,25 +649,26 @@ class ClientApp:
                         actions_alignment=ft.MainAxisAlignment.END,
                     )
                     self._error_dialog = dlg
-                    self.page.open(dlg)
+                    if dlg not in self.page.overlay:
+                        self.page.overlay.append(dlg)
+                    dlg.open = True
+                    self.page.update()
                 snack = ft.SnackBar(
                     content=ft.Text(_msg),
                     bgcolor="#7D2032" if _error else "#136F3A",
                     show_close_icon=True,
                     duration=5000,
                 )
-                self.page.open(snack)
+                self.page.snack_bar = snack
+                snack.open = True
+                self.page.update()
             except Exception as _e:
                 logger.warning(f"notify display error: {_e}")
 
         try:
             self.page.run_task(_show)
         except Exception:
-            try:
-                self.page.open(ft.SnackBar(content=ft.Text(_msg),
-                    bgcolor="#7D2032" if _error else "#136F3A"))
-            except Exception:
-                pass
+            pass
 
     def _drain_server_notifications(self):
         self._consume_notification_queue()
@@ -639,11 +704,42 @@ class ClientApp:
                 pass
         self._schedule_ui(_do)
 
+    def _show_snackbar(self, message: str, error: bool = False):
+        """Show a snackbar without blocking dialog or touching the notification history."""
+        _msg = str(message)
+        _error = error
+        async def _show():
+            try:
+                snack = ft.SnackBar(
+                    content=ft.Text(_msg),
+                    bgcolor="#7D2032" if _error else "#136F3A",
+                    show_close_icon=True,
+                    duration=5000,
+                )
+                self.page.snack_bar = snack
+                snack.open = True
+                self.page.update()
+            except Exception as e:
+                logger.warning(f"snackbar display error: {e}")
+        try:
+            self.page.run_task(_show)
+        except Exception:
+            pass
+
+    def _drain_push_snackbars(self):
+        while True:
+            try:
+                msg, is_error = self.client.push_snackbar_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._show_snackbar(msg, is_error)
+
     def _start_notification_monitor(self):
         def _monitor():
             while True:
                 time.sleep(0.4)
                 self._consume_notification_queue()
+                self._drain_push_snackbars()
         threading.Thread(target=_monitor, daemon=True).start()
 
     def drain_asset_events(self):
@@ -672,6 +768,12 @@ class ClientApp:
             except queue.Empty:
                 break
             self.listed_asset_ids.add(asset_id)
+        while True:
+            try:
+                asset_id = self.client.buy_success_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.recently_bought_ids.add(asset_id)
         # Hidden assets (deleted user's items) are treated as removed from marketplace grids
         while True:
             try:
@@ -683,6 +785,13 @@ class ClientApp:
 
     def _drain_balance_events(self):
         """Drain balance queue, update state, update UI text if visible."""
+        # GATEWAY_ONLINE push events also mark the gateway as reachable
+        while True:
+            try:
+                self.client.gateway_online_queue.get_nowait()
+                self._set_gateway_online()
+            except queue.Empty:
+                break
         latest = None
         while True:
             try:
@@ -691,6 +800,7 @@ class ClientApp:
                 break
         if latest is None:
             return
+        self._set_gateway_online()
         self.state.balance = latest
         if self._image_cache:
             self._image_cache.set_balance(latest)
@@ -763,10 +873,8 @@ class ClientApp:
         def _do():
             dlg = self._error_dialog
             if dlg:
-                try:
-                    self.page.close(dlg)
-                except Exception:
-                    pass
+                dlg.open = False
+                self.page.update()
                 self._error_dialog = None
         self._schedule_ui(_do)
 
@@ -879,14 +987,14 @@ class ClientApp:
         self.removed_asset_ids = set()
         self.unlisted_asset_ids = set()
         self.listed_asset_ids = set()
+        self.recently_bought_ids = set()
         self.gateway_online = None
         self._balance_text = None
         self._notification_badge = None
         self._error_dialog = None
 
     def delete_account(self):
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
+        self._require_auth()
         self.client.delete_account(self.state.username)
         try:
             self.client.close()
@@ -899,6 +1007,7 @@ class ClientApp:
         self.removed_asset_ids = set()
         self.unlisted_asset_ids = set()
         self.listed_asset_ids = set()
+        self.recently_bought_ids = set()
         self.gateway_online = None
         self._balance_text = None
         self._notification_badge = None
@@ -971,8 +1080,7 @@ class ClientApp:
             return None
 
     def get_my_asset_ids(self) -> list[dict]:
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
+        self._require_auth()
         resp = self.client.get_assets_ids(self.state.username)
         return [
             entry if isinstance(entry, dict) else {"id": str(entry), "version": 1}
@@ -980,10 +1088,8 @@ class ClientApp:
         ]
 
     def move_to_marketplace(self, asset_id: str) -> dict:
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
-        if not self.wallet_session:
-            raise RuntimeError("Wallet not loaded — cannot sign the listing transaction")
+        self._require_auth()
+        self._require_wallet()
         tx_id = uuid.uuid4().hex
         signed_payload = {"asset_id": asset_id, "owner": self.state.username, "tx_id": tx_id}
         try:
@@ -1004,16 +1110,14 @@ class ClientApp:
             raise
 
     def delete_asset(self, asset_id: str):
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
+        self._require_auth()
         resp = self.client.delete_asset(asset_id, self.state.username)
         # Invalidate local cache on success
         self.image_cache.invalidate(asset_id)
         return resp
 
     def unlist_asset(self, asset_id: str):
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
+        self._require_auth()
         public_key = self.state.wallet_public_key or ""
         signature = ""
         if self.wallet_session:
@@ -1049,10 +1153,8 @@ class ClientApp:
                     self.state.balance = cached
 
     def upload_asset(self, file_path, asset_name, description, file_type, cost, for_sale=True):
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
-        if not self.wallet_session:
-            raise RuntimeError("Wallet not loaded")
+        self._require_auth()
+        self._require_wallet()
         file_bytes = Path(file_path).read_bytes()
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         tx_payload = {
@@ -1105,10 +1207,8 @@ class ClientApp:
         return resp
 
     def buy_asset(self, item: MarketplaceItem):
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
-        if not self.wallet_session:
-            raise RuntimeError("Wallet not loaded")
+        self._require_auth()
+        self._require_wallet()
         payload = {
             "asset_id": item.asset_id,
             "buyer": self.state.username,
@@ -1136,16 +1236,14 @@ class ClientApp:
             raise
 
     def update_public_key(self, public_key):
-        if not self.state.username:
-            raise RuntimeError("Not authenticated")
+        self._require_auth()
         resp = self.client.update_public_key(self.state.username, public_key)
         # After registering key, request fresh balance
         threading.Thread(target=self.request_balance, daemon=True).start()
         return resp
 
     def sign_payload(self, payload: dict) -> str:
-        if not self.wallet_session:
-            raise RuntimeError("Wallet not loaded")
+        self._require_wallet()
         return self.wallet_session.sign_payload(payload)
 
     def _set_wallet_session(self, wallet: WalletData):
@@ -1195,8 +1293,7 @@ class ClientApp:
         return wallet
 
     def export_wallet(self, output_path: str):
-        if not self.wallet_session:
-            raise RuntimeError("Wallet not loaded")
+        self._require_wallet()
         self.wallet_manager.save_wallet(self.wallet_session, Path(output_path))
 
     def wallet_preview(self) -> str:

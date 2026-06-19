@@ -8,6 +8,7 @@ app.page.views.  They are pure UI — no business logic, no direct server calls.
 All actions go through the ClientApp methods in client.py.
 """
 __author__ = "Nadav"
+import base64
 import flet as ft
 import logging
 import threading
@@ -414,21 +415,30 @@ STATUS_LABEL = {
 
 def open_zoomed_card(app, item, context="marketplace"):
     """Open an elegant full-detail asset dialog — the 'zoomed card'."""
-    is_own    = item.owner == (app.state.username or "")
+    is_own_username = item.owner == (app.state.username or "")
+    # Blockchain-signed actions (Unlist, Upload to Market) require the CURRENT
+    # wallet key to match the key used at upload time.  Username alone is not
+    # sufficient — a new wallet means a new key and the old asset can't be signed.
+    _wallet_pk = app.state.wallet_public_key or ""
+    _item_pk   = getattr(item, "public_key", "") or ""
+    is_pk_owner = is_own_username and bool(_wallet_pk) and _wallet_pk == _item_pk
+    is_own = is_own_username  # kept for Buy/display guards (can't buy own asset)
     s_color   = STATUS_COLOR.get(item.asset_status, MUTED)
     s_label   = STATUS_LABEL.get(item.asset_status, item.asset_status)
 
+    # _overlay_ref is populated in do_open() so close() can remove the right object.
+    _overlay_ref: list = []
+
     def close(_=None):
-        async def do_close():
+        async def _do():
             try:
-                if hasattr(app.page, "close") and app.page.dialog:
-                    app.page.close(app.page.dialog)
-                else:
-                    app.page.dialog.open = False
-                    app.page.update()
+                if _overlay_ref and _overlay_ref[0] in app.page.overlay:
+                    app.page.overlay.remove(_overlay_ref[0])
+                app.page.on_keyboard_event = None
+                app.page.update()
             except Exception:
                 pass
-        app.page.run_task(do_close)
+        app.page.run_task(_do)
 
     # ── Action buttons (same logic as the small card) ────────────────────────
     def do_buy(_):
@@ -451,7 +461,7 @@ def open_zoomed_card(app, item, context="marketplace"):
             resp = app.move_to_marketplace(item.asset_id)
             if str(resp.get("type", "")).upper() in ("MOVE_PENDING", "MOVE_SUCCESS"):
                 app.notify(f"'{item.asset_name}' sent to mining — will appear on marketplace once confirmed")
-            app.page.go("/my_assets")
+            app.page.go("/marketplace")
         except Exception as e:
             app.notify(str(e), error=True)
 
@@ -482,49 +492,66 @@ def open_zoomed_card(app, item, context="marketplace"):
             style=ft.ButtonStyle(color=ERROR, side=ft.BorderSide(1, ERROR),
                 shape=ft.RoundedRectangleBorder(radius=8),
                 padding=ft.padding.symmetric(horizontal=14, vertical=8))))
-        if item.asset_status in ("PENDING", "UNLISTED"):
+        # Upload To Market requires the current wallet key to match the asset's key
+        if is_pk_owner and item.asset_status in ("PENDING", "UNLISTED"):
             actions.append(ft.FilledButton("→ Upload To Market", bgcolor="#0E1C0E", color=SUCCESS,
                 style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
                     side=ft.BorderSide(1, SUCCESS), padding=ft.padding.symmetric(horizontal=14, vertical=8)),
                 on_click=do_upload_to_market))
     elif context == "marketplace":
-        if is_own:
+        # Unlist requires current wallet key to match the key that uploaded the asset
+        if is_pk_owner:
             actions.append(ft.OutlinedButton("Unlist", on_click=do_unlist,
                 style=ft.ButtonStyle(color=GOLD_DIM, side=ft.BorderSide(1, GOLD_DIM),
                     shape=ft.RoundedRectangleBorder(radius=8),
                     padding=ft.padding.symmetric(horizontal=16, vertical=8))))
-        else:
+        elif not is_own:
             actions.append(ft.FilledButton("Buy Now", bgcolor=GOLD, color="#130E00", on_click=do_buy,
                 style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
                     padding=ft.padding.symmetric(horizontal=20, vertical=8))))
 
     # ── Image ────────────────────────────────────────────────────────────────
-    try:
-        p = app.image_cache.get_path(item.asset_id)
-        img_content = (ft.Image(src=str(p), fit=ft.BoxFit.CONTAIN, width=520, height=300)
-                       if p and p.exists() else None)
-    except Exception:
-        img_content = None
+    img_box = ft.Container(
+        width=520, height=300, bgcolor="#07080C",
+        border_radius=ft.border_radius.only(top_left=20, top_right=20),
+        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        alignment=ft.Alignment(0, 0),
+        content=ft.Icon(ft.Icons.IMAGE_OUTLINED, color="#1E2030", size=60),
+    )
+
+    def _load_zoomed_image():
+        try:
+            path = app.image_cache.get_path(item.asset_id)
+            if path and path.exists():
+                img_box.content = ft.Image(
+                    src=str(path),
+                    fit=ft.BoxFit.CONTAIN,
+                    width=520, height=300,
+                )
+                async def _upd():
+                    try:
+                        app.page.update()
+                    except Exception:
+                        pass
+                app.page.run_task(_upd)
+        except Exception:
+            pass
+
+    threading.Thread(target=_load_zoomed_image, daemon=True).start()
+
+    close_btn = ft.Container(
+        width=36, height=36, border_radius=18,
+        bgcolor="#1A1200",
+        border=ft.border.all(1.5, GOLD),
+        alignment=ft.Alignment(0, 0),
+        on_click=close,
+        tooltip="Close (Esc)",
+        content=ft.Icon(ft.Icons.CLOSE_ROUNDED, color=GOLD, size=18),
+    )
 
     img_section = ft.Stack(controls=[
-        ft.Container(
-            width=520, height=300, bgcolor="#07080C",
-            border_radius=ft.border_radius.only(top_left=20, top_right=20),
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-            alignment=ft.Alignment(0, 0),
-            content=img_content or ft.Icon(ft.Icons.IMAGE_OUTLINED, color="#1E2030", size=60),
-        ),
-        # Close button overlaid top-right
-        ft.Container(
-            content=ft.Container(
-                width=32, height=32, border_radius=16,
-                bgcolor="#00000099",
-                alignment=ft.Alignment(0, 0),
-                on_click=close,
-                content=ft.Icon(ft.Icons.CLOSE_ROUNDED, color="#CCCCCC", size=16),
-            ),
-            right=12, top=12,
-        ),
+        img_box,
+        ft.Container(content=close_btn, right=10, top=10),
     ])
 
     # ── Badges ───────────────────────────────────────────────────────────────
@@ -578,33 +605,64 @@ def open_zoomed_card(app, item, context="marketplace"):
         ]),
     )
 
-    # ── Compose and open dialog ───────────────────────────────────────────────
-    dlg = ft.AlertDialog(
-        modal=False,
+    # ── Compose the card ─────────────────────────────────────────────────────
+    card = ft.Container(
+        width=520,
         bgcolor="#0D0F14",
-        content_padding=0,
-        shape=ft.RoundedRectangleBorder(radius=20),
-        content=ft.Container(
-            width=520,
-            content=ft.Column(spacing=0, tight=True, controls=[img_section, details]),
+        border_radius=20,
+        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        shadow=ft.BoxShadow(
+            blur_radius=48, spread_radius=2,
+            color="#88000000", offset=ft.Offset(0, 12),
         ),
+        content=ft.Column(spacing=0, tight=True, controls=[img_section, details]),
     )
 
-    # Schedule the dialog opening on Flet's event loop so it always renders,
-    # regardless of which thread triggered the click.
+    # ── Full-screen overlay: backdrop (clickable to close) + centred card ────
+    # We build this ourselves instead of using ft.AlertDialog because AlertDialog
+    # collapses its content in newer Flet versions when content_padding=0 or when
+    # no title/actions are supplied.  Adding a plain Stack to page.overlay is
+    # rock-solid across all Flet versions.
+    backdrop = ft.Container(
+        expand=True,
+        bgcolor="#CC000000",
+        on_click=close,   # click outside card → close
+    )
+
+    # Container that fills the screen and centres the card.
+    # We do NOT put on_click here — clicks on the card itself don't bubble up
+    # to the backdrop in Flet, so the backdrop handler only fires on empty space.
+    centre = ft.Container(
+        expand=True,
+        alignment=ft.alignment.center,
+        content=card,
+    )
+
+    overlay = ft.Stack(
+        expand=True,
+        controls=[backdrop, centre],
+    )
+
+    def _on_key(e: ft.KeyboardEvent):
+        if e.key == "Escape":
+            close()
+
     async def do_open():
-        try:
-            app.page.open(dlg)
-        except AttributeError:
-            app.page.dialog = dlg
-            dlg.open = True
-            app.page.update()
+        _overlay_ref.append(overlay)   # let the single close() find the overlay
+        if overlay not in app.page.overlay:
+            app.page.overlay.append(overlay)
+        app.page.on_keyboard_event = _on_key
+        app.page.update()
 
     app.page.run_task(do_open)
 
 
 def asset_card(app, item, context="marketplace"):
-    is_own = item.owner == (app.state.username or "")
+    is_own_username = item.owner == (app.state.username or "")
+    _wallet_pk = app.state.wallet_public_key or ""
+    _item_pk   = getattr(item, "public_key", "") or ""
+    is_pk_owner = is_own_username and bool(_wallet_pk) and _wallet_pk == _item_pk
+    is_own = is_own_username  # kept for Buy guard (can't buy your own asset)
     status_color = STATUS_COLOR.get(item.asset_status, MUTED)
     status_label = STATUS_LABEL.get(item.asset_status, item.asset_status)
 
@@ -629,7 +687,7 @@ def asset_card(app, item, context="marketplace"):
             resp_type = str(resp.get("type", "")).upper()
             if resp_type in ("MOVE_PENDING", "MOVE_SUCCESS"):
                 app.notify(f"'{item.asset_name}' sent to mining — will appear on marketplace once confirmed")
-            app.page.go("/my_assets")
+            app.page.go("/marketplace")
         except Exception as e:
             app.notify(str(e), error=True)
 
@@ -720,7 +778,7 @@ def asset_card(app, item, context="marketplace"):
     action_controls = []
 
     if context == "my_assets":
-        # Delete always available in My Assets
+        # Delete is always available — username ownership is enough (server-side op)
         action_controls.append(
             ft.OutlinedButton("Delete", on_click=do_delete,
                 style=ft.ButtonStyle(
@@ -730,8 +788,8 @@ def asset_card(app, item, context="marketplace"):
                     padding=ft.padding.symmetric(horizontal=12, vertical=8),
                 ))
         )
-        # Upload To Market for PENDING / UNLISTED
-        if item.asset_status in ("PENDING", "UNLISTED"):
+        # Upload To Market requires the current wallet key to match the asset's key
+        if is_pk_owner and item.asset_status in ("PENDING", "UNLISTED"):
             action_controls.append(
                 ft.FilledButton("→ Upload To Market", bgcolor="#0E1C0E", color=SUCCESS,
                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
@@ -741,8 +799,8 @@ def asset_card(app, item, context="marketplace"):
             )
 
     elif context == "marketplace":
-        if is_own:
-            # User's own FOR_SALE asset: offer Unlist
+        # Unlist requires current wallet key to match the key that uploaded the asset
+        if is_pk_owner:
             action_controls.append(
                 ft.OutlinedButton("Unlist", on_click=do_unlist,
                     style=ft.ButtonStyle(
@@ -752,7 +810,7 @@ def asset_card(app, item, context="marketplace"):
                         padding=ft.padding.symmetric(horizontal=14, vertical=8),
                     ))
             )
-        else:
+        elif not is_own:
             action_controls.append(
                 ft.FilledButton("Buy Now", bgcolor=GOLD, color="#130E00", on_click=do_buy,
                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
@@ -793,7 +851,8 @@ def asset_card(app, item, context="marketplace"):
 
 
 def build_marketplace_view(app):
-    # Clear stale event sets so assets just loaded aren't immediately removed
+    # Clear stale removal sets — listed_asset_ids is NOT cleared here so that
+    # events drained by _on_route_change before this call aren't lost.
     app.sold_asset_ids.clear()
     app.removed_asset_ids.clear()
     app.unlisted_asset_ids.clear()
@@ -821,11 +880,12 @@ def build_marketplace_view(app):
         try:
             id_entries = app.get_market_asset_ids()
         except Exception as exc:
+            _msg = str(exc)  # capture before Python deletes exc on except-block exit
             async def err():
-                status_text.value = f"Error: {exc}"
+                status_text.value = f"Error: {_msg}"
                 app.page.update()
             app.page.run_task(err)
-            app.notify(str(exc), error=True)
+            app.notify(_msg, error=True)
             return
 
         if not id_entries:
@@ -877,6 +937,30 @@ def build_marketplace_view(app):
             if not active[0]:
                 return
             app.drain_asset_events()
+
+            # Add assets that just became FOR_SALE (FULLY_UPLOADED push event)
+            new_ids = list(app.listed_asset_ids - set(card_map.keys()))
+            for asset_id in new_ids:
+                if not active[0]:
+                    return
+                app.listed_asset_ids.discard(asset_id)
+                item = app.load_asset_by_id(asset_id)
+                if not item:
+                    continue
+                card = asset_card(app, item)
+                wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4, "lg": 3}, content=card)
+                card_map[asset_id] = wrapper
+                n = len(card_map)
+                async def _add_card(w=wrapper, n=n):
+                    if not active[0]:
+                        return
+                    if w not in grid.controls:
+                        grid.controls.append(w)
+                    status_text.value = f"{n} asset{'s' if n != 1 else ''} listed"
+                    app.page.update()
+                app.page.run_task(_add_card)
+
+            # Remove assets that left the marketplace (sold, unlisted, deleted)
             removed_ids = list(app.sold_asset_ids | app.removed_asset_ids | app.unlisted_asset_ids)
             changed = False
             for asset_id in removed_ids:
@@ -906,13 +990,17 @@ def build_marketplace_view(app):
         async def clear():
             grid.controls.clear()
             card_map.clear()
+            status_text.value = "Loading..."
+            status_text.color = MUTED
             app.page.update()
         app.page.run_task(clear)
         try:
             app.request_balance()
         except Exception as e:
             app.notify(str(e), error=True)
-        app.page.go("/marketplace")
+        active[0] = True
+        threading.Thread(target=load, daemon=True).start()
+        threading.Thread(target=monitor, daemon=True).start()
 
     threading.Thread(target=load, daemon=True).start()
     threading.Thread(target=monitor, daemon=True).start()
@@ -1124,10 +1212,11 @@ def build_upload_view(app):
                     app.page.snack_bar.open = True
                     app.page.update()
                 app.page.run_task(success)
-                dest = "/marketplace" if for_sale_snap else "/my_assets"
-                # Navigate on the Flet event loop to avoid coroutine/threading issues
+                # Always land on My Assets so the user sees the pending asset.
+                # Once mining completes (FULLY_UPLOADED), the card auto-leaves My Assets
+                # and the asset appears in the Marketplace for all online users.
                 async def navigate():
-                    app.page.go(dest)
+                    app.page.go("/my_assets")
                 app.page.run_task(navigate)
             except Exception as exc:
                 show_error(str(exc))
@@ -1207,14 +1296,12 @@ def build_settings_view(app):
         setattr(app.page, "_wallet_export_picker", export_picker)
 
     def generate_wallet(_):
-        dlg_gen: list = []  # mutable cell so closures can reference the dialog
+        def _close_dlg(dlg):
+            dlg.open = False
+            app.page.update()
 
         def _on_confirm(e):
-            try:
-                if dlg_gen:
-                    app.page.close(dlg_gen[0])
-            except Exception:
-                pass
+            _close_dlg(dlg)
 
             def _worker():
                 try:
@@ -1226,11 +1313,7 @@ def build_settings_view(app):
             threading.Thread(target=_worker, daemon=True).start()
 
         def _on_cancel(e):
-            try:
-                if dlg_gen:
-                    app.page.close(dlg_gen[0])
-            except Exception:
-                pass
+            _close_dlg(dlg)
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -1252,8 +1335,10 @@ def build_settings_view(app):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        dlg_gen.append(dlg)
-        app.page.open(dlg)
+        if dlg not in app.page.overlay:
+            app.page.overlay.append(dlg)
+        dlg.open = True
+        app.page.update()
 
     def load_default(_):
         try:
@@ -1307,15 +1392,12 @@ def build_settings_view(app):
         app.page.go("/marketplace")
 
     def do_delete_account(_):
-        dlg_del: list = []
+        def _close_dlg(dlg):
+            dlg.open = False
+            app.page.update()
 
         def on_confirm(e):
-            # Close dialog immediately, then run blocking network call in background
-            try:
-                if dlg_del:
-                    app.page.close(dlg_del[0])
-            except Exception:
-                pass
+            _close_dlg(dlg)
 
             def _worker():
                 try:
@@ -1328,11 +1410,7 @@ def build_settings_view(app):
             threading.Thread(target=_worker, daemon=True).start()
 
         def on_cancel(e):
-            try:
-                if dlg_del:
-                    app.page.close(dlg_del[0])
-            except Exception:
-                pass
+            _close_dlg(dlg)
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -1351,8 +1429,10 @@ def build_settings_view(app):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        dlg_del.append(dlg)
-        app.page.open(dlg)
+        if dlg not in app.page.overlay:
+            app.page.overlay.append(dlg)
+        dlg.open = True
+        app.page.update()
 
     refresh_wallet_ui()
 
@@ -1453,7 +1533,9 @@ def build_notifications_view(app):
 def build_my_assets_view(app):
     app.unlisted_asset_ids.clear()
     app.removed_asset_ids.clear()
-    app.listed_asset_ids.clear()
+    # listed_asset_ids intentionally NOT cleared — preserves FULLY_UPLOADED events for
+    # the marketplace monitor. We only pop IDs that are already in this page's card_map.
+    app.recently_bought_ids.clear()   # initial load() covers assets bought before page opened
 
     grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
     status_text = ft.Text("Loading...", color=MUTED, size=12)
@@ -1464,11 +1546,12 @@ def build_my_assets_view(app):
         try:
             id_entries = app.get_my_asset_ids()
         except Exception as exc:
+            _msg = str(exc)
             async def err():
-                status_text.value = f"Error: {exc}"
+                status_text.value = f"Error: {_msg}"
                 app.page.update()
             app.page.run_task(err)
-            app.notify(str(exc), error=True)
+            app.notify(_msg, error=True)
             return
 
         if not id_entries:
@@ -1514,12 +1597,34 @@ def build_my_assets_view(app):
         app.page.run_task(done)
 
     def monitor():
-        """Remove cards for assets that moved away (deleted, or PENDING→FOR_SALE)."""
+        """Add newly bought assets; remove assets that moved away (deleted or PENDING→FOR_SALE)."""
         while active[0]:
             time.sleep(2)
             if not active[0]:
                 return
             app.drain_asset_events()
+
+            # Add newly purchased assets (bought while this page is open)
+            new_buys = list(app.recently_bought_ids - set(card_map.keys()))
+            for asset_id in new_buys:
+                if not active[0]:
+                    return
+                app.recently_bought_ids.discard(asset_id)
+                item = app.load_asset_by_id(asset_id)
+                if not item:
+                    continue
+                card = asset_card(app, item, context="my_assets")
+                wrapper = ft.Container(col={"xs": 12, "sm": 6, "md": 4}, content=card)
+                card_map[asset_id] = wrapper
+                n = len(card_map)
+                async def add_new(w=wrapper, n=n):
+                    if not active[0]:
+                        return
+                    grid.controls.insert(0, w)
+                    status_text.value = f"{n} asset{'s' if n != 1 else ''} owned"
+                    app.page.update()
+                app.page.run_task(add_new)
+
             # Assets that went FOR_SALE leave my_assets; deleted/removed too
             gone = list(
                 app.listed_asset_ids    # PENDING → FOR_SALE: no longer in my_assets
@@ -1544,13 +1649,17 @@ def build_my_assets_view(app):
         async def clear():
             grid.controls.clear()
             card_map.clear()
+            status_text.value = "Loading..."
+            status_text.color = MUTED
             app.page.update()
         app.page.run_task(clear)
         try:
             app.request_balance()
         except Exception as e:
             app.notify(str(e), error=True)
-        app.page.go("/my_assets")
+        active[0] = True
+        threading.Thread(target=load, daemon=True).start()
+        threading.Thread(target=monitor, daemon=True).start()
 
     threading.Thread(target=load, daemon=True).start()
     threading.Thread(target=monitor, daemon=True).start()

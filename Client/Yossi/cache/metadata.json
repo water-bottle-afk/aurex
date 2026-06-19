@@ -36,7 +36,7 @@
     "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
     "path": "assets/2675ccc1eabe955a.jpg"
   },
-  "balance": 100.0,
+  "balance": 65.0,
   "e6c7aecbba75a628": {
     "asset_id": "e6c7aecbba75a628",
     "version": 1,
@@ -87,17 +87,78 @@
     "asset_status": "UNLISTED",
     "path": "assets/d9c4cf3c37ff9de1.jpg"
   },
-  "7876b091a42ee071": {
-    "asset_id": "7876b091a42ee071",
+  "23d8d7ec6f447ded": {
+    "asset_id": "23d8d7ec6f447ded",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "OWL IMAGE",
+    "description": "no",
+    "file_type": "jpg",
+    "cost": 15.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/23d8d7ec6f447ded.jpg"
+  },
+  "e64f8e0aef77ff4e": {
+    "asset_id": "e64f8e0aef77ff4e",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "RED panda",
+    "description": "red panda img",
+    "file_type": "jpg",
+    "cost": 5.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/e64f8e0aef77ff4e.jpg"
+  },
+  "fc5a16c88f483794": {
+    "asset_id": "fc5a16c88f483794",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "BLACK TIGER",
+    "description": "tiger",
+    "file_type": "jpg",
+    "cost": 52.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/fc5a16c88f483794.jpg"
+  },
+  "639f82f50a587d0d": {
+    "asset_id": "639f82f50a587d0d",
     "version": 1,
     "owner": "Michael",
-    "asset_name": "gd",
-    "description": "4",
+    "asset_name": "FOX",
+    "description": "fox",
     "file_type": "jpg",
-    "cost": 2.0,
-    "created_at": "2026-05-31T16:21:28.157299",
-    "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c",
+    "cost": 12.0,
+    "created_at": "2026-06-19T22:49:44.887011",
+    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
     "asset_status": "FOR_SALE",
-    "path": "assets/7876b091a42ee071.jpg"
+    "path": "assets/639f82f50a587d0d.jpg"
+  },
+  "09fd30b56109f07d": {
+    "asset_id": "09fd30b56109f07d",
+    "version": 3,
+    "owner": "Yossi",
+    "asset_name": "Dog",
+    "description": "d",
+    "file_type": "jpg",
+    "cost": 23.0,
+    "created_at": "2026-06-19T22:48:33.778502",
+    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+    "asset_status": "UNLISTED",
+    "path": "assets/09fd30b56109f07d.jpg"
+  },
+  "ae17fb946cf7b501": {
+    "asset_id": "ae17fb946cf7b501",
+    "version": 1,
+    "owner": "Yossi",
+    "asset_name": "Bear",
+    "description": "pic",
+    "file_type": "jpg",
+    "cost": 4.0,
+    "asset_status": "PENDING",
+    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+    "path": "assets/ae17fb946cf7b501.jpg"
   }
 }

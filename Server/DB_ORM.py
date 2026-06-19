@@ -346,8 +346,13 @@ class ORM:
                 # Migrate status fields on load
                 item_dict = MarketplaceItem.from_dict(value).to_dict()
                 aid = item_dict.get("asset_id") or key
-                if aid:
-                    result[str(aid)] = item_dict
+                if not aid:
+                    continue
+                # Resolve relative storage_path back to absolute
+                sp = item_dict.get("storage_path", "")
+                if sp and not Path(sp).is_absolute():
+                    item_dict["storage_path"] = str(DB_FOLDER / sp)
+                result[str(aid)] = item_dict
             return result
         except Exception:
             return {}
@@ -361,7 +366,13 @@ class ORM:
         _ = username  # owner is stored inside asset.owner
         with self.lock:
             market = self.load_marketplace()
-            market[asset.asset_id] = asset.to_dict()
+            d = asset.to_dict()
+            # Store storage_path as path relative to DB_FOLDER (portable, matches client format)
+            try:
+                d["storage_path"] = str(Path(asset.storage_path).relative_to(DB_FOLDER)).replace("\\", "/")
+            except (ValueError, TypeError):
+                pass  # keep as-is if not under DB_FOLDER
+            market[asset.asset_id] = d
             self.save_marketplace(market)
         return True
 
@@ -513,6 +524,32 @@ class ORM:
     # Keep old name so callers that pre-existed the soft-delete refactor still work
     def delete_user_assets(self, username: str):
         self.set_assets_pending_deletion(username)
+
+    def finalize_pending_deletions(self, exclude_asset_ids: list | None = None) -> list[str]:
+        """Mark all PENDING_DELETION assets as DELETED, skipping exclude_asset_ids.
+
+        Called whenever a new block is confirmed on the blockchain — the settlement
+        window has closed and any asset still in PENDING_DELETION was not purchased,
+        so it becomes permanently DELETED.  Assets in exclude_asset_ids were part of
+        the confirming block (e.g. just transferred via BUY) and must not be touched.
+
+        Returns the list of asset_ids that were finalized.
+        """
+        exclude = set(exclude_asset_ids or [])
+        finalized: list[str] = []
+        with self.lock:
+            market = self.load_marketplace()
+            changed = False
+            for aid, d in market.items():
+                if not isinstance(d, dict) or aid in exclude:
+                    continue
+                if d.get("asset_status") == ASSET_STATUS_PENDING_DELETION:
+                    d["asset_status"] = ASSET_STATUS_DELETED
+                    finalized.append(aid)
+                    changed = True
+            if changed:
+                self.save_marketplace(market)
+        return finalized
 
     def find_asset_by_id(self, asset_id: str):
         asset_id = (asset_id or "").strip()

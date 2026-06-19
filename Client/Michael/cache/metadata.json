@@ -1,31 +1,5 @@
 {
   "balance": 100.0,
-  "de987ea86ed2333a": {
-    "asset_id": "de987ea86ed2333a",
-    "version": 3,
-    "owner": "Yossi",
-    "asset_name": "TIGER",
-    "description": "tiger",
-    "file_type": "jpg",
-    "cost": 32.0,
-    "created_at": "2026-05-27T00:59:27.233770",
-    "public_key": "",
-    "asset_status": "FOR_SALE",
-    "path": "assets/de987ea86ed2333a.jpg"
-  },
-  "9c8bc96fef5d4138": {
-    "asset_id": "9c8bc96fef5d4138",
-    "version": 1,
-    "owner": "Yossi",
-    "asset_name": "Wolf",
-    "description": "wolf image",
-    "file_type": "jpg",
-    "cost": 5.0,
-    "created_at": "2026-05-27T00:58:23.217470",
-    "public_key": "",
-    "asset_status": "FOR_SALE",
-    "path": "assets/9c8bc96fef5d4138.jpg"
-  },
   "2675ccc1eabe955a": {
     "asset_id": "2675ccc1eabe955a",
     "version": 3,
@@ -63,5 +37,42 @@
     "public_key": "04f88b213ec296fa658f6b9007b2e252ef27fe063a664a750da567856d0dc73a4ac70192f184b001dde7322f58b33c9870ac8f0574456053181f163f2a887e086c",
     "asset_status": "UNLISTED",
     "path": "assets/7876b091a42ee071.jpg"
+  },
+  "02a952dcc6f02fe7": {
+    "asset_id": "02a952dcc6f02fe7",
+    "version": 1,
+    "owner": "Michael",
+    "asset_name": "LUTRA",
+    "description": "img",
+    "file_type": "jpg",
+    "cost": 37.0,
+    "asset_status": "PENDING",
+    "public_key": "04ae42b96e3b2da7d333e4ac12f6fb8a7deb996ed35b3842b315410003c9b7d143a59bb397284ef3a46e641674f4307dbff8abc96b26f4fdf43761f9c1e5b1c47b",
+    "path": "assets/02a952dcc6f02fe7.jpg"
+  },
+  "09fd30b56109f07d": {
+    "asset_id": "09fd30b56109f07d",
+    "version": 2,
+    "owner": "Michael",
+    "asset_name": "Dog",
+    "description": "d",
+    "file_type": "jpg",
+    "cost": 23.0,
+    "created_at": "2026-06-19T22:48:33.778502",
+    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+    "asset_status": "UNLISTED",
+    "path": "assets/09fd30b56109f07d.jpg"
+  },
+  "639f82f50a587d0d": {
+    "asset_id": "639f82f50a587d0d",
+    "version": 1,
+    "owner": "Michael",
+    "asset_name": "FOX",
+    "description": "fox",
+    "file_type": "jpg",
+    "cost": 12.0,
+    "asset_status": "PENDING",
+    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+    "path": "assets/639f82f50a587d0d.jpg"
   }
 }

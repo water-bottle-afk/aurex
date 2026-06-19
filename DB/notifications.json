@@ -1,5 +1,26 @@
 {
-  "Michael": [],
-  "Yossi": [],
-  "Dan": []
+  "Michael": [
+    {
+      "msg": "'Dog' is now live on the marketplace!"
+    },
+    {
+      "msg": "Your asset 'Dog' was sold to Yossi for 23.00 AUR"
+    }
+  ],
+  "Yossi": [
+    {
+      "msg": "Asset 'Bear' was uploaded to My Assets"
+    },
+    {
+      "msg": "Blockchain error for asset ae17fb946cf7b501: Asset ae17fb946cf7b501 is already minted on the blockchain"
+    },
+    {
+      "msg": "'Bear' is now live on the marketplace!"
+    }
+  ],
+  "Dan": [
+    {
+      "msg": "Blockchain error for asset 59f7e5cb1bd1a7cc: Asset 59f7e5cb1bd1a7cc is already minted on the blockchain"
+    }
+  ]
 }
