@@ -426,14 +426,32 @@ def asset_card(app, item, context="marketplace"):
 
     # ── Action callbacks ────────────────────────────────────────────────────────
 
+    _buy_btn_ref: list = [None]  # mutable cell so do_buy can access button defined below
+
     def do_buy(_):
         if app.gateway_online is False:
             app.notify("Gateway server is unreachable. Buying assets is currently unavailable.", error=True)
             return
+        btn = _buy_btn_ref[0]
+        if btn is not None:
+            btn.disabled = True
+            btn.text = "Sending..."
+            try:
+                app.page.update()
+            except Exception:
+                pass
         try:
             app.buy_asset(item)
             app.notify("Purchase request signed and sent")
+            # keep disabled after submit — card will vanish on BUY_SUCCESS/ASSET_REMOVED
         except Exception as e:
+            if btn is not None:
+                btn.disabled = False
+                btn.text = "Buy Now"
+                try:
+                    app.page.update()
+                except Exception:
+                    pass
             app.notify(str(e), error=True)
 
     def do_upload_to_market(_):
@@ -562,11 +580,11 @@ def asset_card(app, item, context="marketplace"):
                     ))
             )
         elif not is_own:
-            action_controls.append(
-                ft.FilledButton("Buy Now", bgcolor=GOLD, color="#130E00", on_click=do_buy,
-                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
-                        padding=ft.padding.symmetric(horizontal=18, vertical=8)))
-            )
+            _buy_btn = ft.FilledButton("Buy Now", bgcolor=GOLD, color="#130E00", on_click=do_buy,
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8),
+                    padding=ft.padding.symmetric(horizontal=18, vertical=8)))
+            _buy_btn_ref[0] = _buy_btn
+            action_controls.append(_buy_btn)
 
     price_row = ft.Row(
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -694,7 +712,8 @@ def build_marketplace_view(app):
                 return
             app.drain_asset_events()
 
-            # Add assets that just became MINTED/LISTED (FULLY_UPLOADED push event)
+            # Add assets that just became MINTED/LISTED (FULLY_UPLOADED push event).
+            # Discard after adding so that subsequent removal cannot re-add the card.
             new_ids = list(app.listed_asset_ids - set(card_map.keys()))
             for asset_id in new_ids:
                 if not active[0]:
@@ -716,10 +735,13 @@ def build_marketplace_view(app):
                     app.page.update()
                 app.page.run_task(_add_card)
 
-            # Remove assets that left the marketplace (sold, unlisted, deleted)
+            # Remove assets that left the marketplace (sold, unlisted, deleted).
+            # Also discard from listed_asset_ids so the add loop cannot re-add a card
+            # on the next cycle after it was just removed.
             removed_ids = list(app.sold_asset_ids | app.removed_asset_ids | app.unlisted_asset_ids)
             changed = False
             for asset_id in removed_ids:
+                app.listed_asset_ids.discard(asset_id)
                 wrapper = card_map.pop(asset_id, None)
                 if wrapper and wrapper in grid.controls:
                     grid.controls.remove(wrapper)
@@ -1292,16 +1314,21 @@ def build_notifications_view(app):
 
 
 def build_my_assets_view(app):
+    # Stop any background threads left over from a previous my_assets view
+    if getattr(app, "_my_assets_active", None) is not None:
+        app._my_assets_active[0] = False
+
     app.unlisted_asset_ids.clear()
     app.removed_asset_ids.clear()
-    # listed_asset_ids intentionally NOT cleared — preserves FULLY_UPLOADED events for
-    # the marketplace monitor. We only pop IDs that are already in this page's card_map.
+    # listed_asset_ids intentionally NOT cleared — preserves events for
+    # the monitor. We only pop IDs that are already in this page's card_map.
     app.recently_bought_ids.clear()   # initial load() covers assets bought before page opened
 
     grid = ft.ResponsiveRow(spacing=10, run_spacing=10)
     status_text = ft.Text("Loading...", color=MUTED, size=12)
     card_map: dict[str, ft.Container] = {}
     active = [True]
+    app._my_assets_active = active
 
     def load():
         try:
@@ -1386,12 +1413,11 @@ def build_my_assets_view(app):
                     app.page.update()
                 app.page.run_task(add_new)
 
-            # Assets that went LISTED/MINTED leave my_assets; deleted/removed too
-            gone = list(
-                app.listed_asset_ids    # UPLOADED → LISTED: no longer in my_assets
-                | app.removed_asset_ids
-                | app.sold_asset_ids
-            )
+            # Assets that were deleted, sold, or removed leave my_assets.
+            # "Moved to marketplace" (LISTED/MINTED) is handled by page_refresh_queue
+            # from the FULLY_UPLOADED push — not listed_asset_ids, which is owned by
+            # the marketplace monitor and is discarded as soon as the card is added there.
+            gone = list(app.removed_asset_ids | app.sold_asset_ids)
             changed = False
             for asset_id in gone:
                 wrapper = card_map.pop(asset_id, None)

@@ -604,9 +604,11 @@ class GatewayServer:
 
     def _broadcast_verified_block(self, block: dict, sender_ip: str, sender_port: int):
         skip = (sender_ip, sender_port) if sender_ip and sender_port else None
+        # block at index N means the publisher's chain is now N+1 blocks long
+        chain_length = int(block.get("index", 0)) + 1
         self.broadcast_to_nodes({
             "type": "BROADCAST_TX_TO_VERIFY",
-            "data": {"block": block, "publisher_chain_length": 0},
+            "data": {"block": block, "publisher_chain_length": chain_length},
             "sender_ip": sender_ip,
             "sender_port": sender_port,
         }, skip_addr=skip)

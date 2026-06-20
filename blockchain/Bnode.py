@@ -100,6 +100,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self.lock = threading.RLock()
         self._node_stop_event = threading.Event()   # shuts down the whole node
         self._mining_stop_event = mp.Event()        # aborts the current mining task
+        self._mining_stop_peer: str = ""            # address of the peer that triggered the last stop
         self._current_miner: "mp.Process | None" = None
         self._pending_mint_ids: set[str] = set()    # asset_ids currently being mined (dedup guard)
 
@@ -350,14 +351,16 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self._current_miner = None
 
         if status == "aborted":
-            self.logger.warning(f"[{self.node_id}] mine: aborted — chain advanced by peer")
+            peer = self._mining_stop_peer or "unknown"
+            self.logger.warning(f"[{self.node_id}] mine: abandoned — peer {peer} already mined it")
             return None
 
         # If the stop signal arrived just as our miner found the nonce, another winner
         # was already accepted. Discard our block so we don't write a duplicate.
         if self._mining_stop_event.is_set():
+            peer = self._mining_stop_peer or "unknown"
             self.logger.warning(
-                f"[{self.node_id}] mine: found block but stop was signalled — discarding (peer won)"
+                f"[{self.node_id}] mine: found block but peer {peer} already won — discarding"
             )
             return None
 
@@ -471,11 +474,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "START_MINING":   self.handle_mint_request,
             "UNLIST_ASSET":   self.handle_unlist_request,
             "LIST_ASSET":     self.handle_list_request,
+            "TX_REQUEST_BUY": self.handle_tx_request_buy,  # mine() blocks — must not run in listen loop
         }
 
         # Everything else is fast enough to handle inline
         inline_handlers = {
-            "TX_REQUEST_BUY":        self.handle_tx_request_buy,
             "TX_REQUEST_SELL":       self.handle_tx_request_sell,
             "BROADCAST_TX_TO_VERIFY": self.handle_broadcast_tx_to_verify,
             "CREATE_BALANCE":        self.handle_create_balance,
@@ -629,7 +632,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
         tx = {
             "type": "UNLIST",
-            "tx_id": f"unlist-{asset_id}-{int(time.time() * 1000)}",
+            "tx_id": str(data.get("tx_id") or f"unlist-{asset_id}-{int(time.time() * 1000)}"),
             "asset_id": asset_id,
             "user_public_key": public_key,
             "user_signature": signature,
@@ -673,7 +676,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
         tx = {
             "type": "LIST",
-            "tx_id": f"list-{asset_id}-{int(time.time() * 1000)}",
+            "tx_id": str(data.get("tx_id") or f"list-{asset_id}-{int(time.time() * 1000)}"),
             "asset_id": asset_id,
             "user_public_key": public_key,
             "user_signature": signature,
@@ -773,48 +776,83 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.persist_local_state()
 
     def _is_double_buy(self, asset_id: str) -> bool:
-        """Return True if a confirmed BUY tx for this asset_id already exists in our chain."""
+        """Return True if the asset is currently held (most recent tx is BUY, not LIST/MINT).
+
+        A BUY followed by a LIST means the owner re-listed it — the next BUY must be allowed.
+        We track the last ownership-changing tx and only block if it was a BUY.
+        """
+        last_relevant_type: str | None = None
         with self.lock:
             for b in self.chain:
                 tx = b.get("tx", {}) if isinstance(b.get("tx"), dict) else {}
+                if str(tx.get("asset_id") or "") != asset_id:
+                    continue
                 tx_type = str(tx.get("tx_type") or tx.get("type") or "").upper()
-                if tx_type == "BUY" and str(tx.get("asset_id") or "") == asset_id:
-                    return True
-        return False
+                if tx_type in ("BUY", "LIST", "ASSET_MINT"):
+                    last_relevant_type = tx_type
+        return last_relevant_type == "BUY"
 
     def handle_broadcast_tx_to_verify(self, msg: dict[str, Any]):
         sender_ip = str(msg.get("sender_ip") or "")
         sender_port = int(msg.get("sender_port") or 0)
+        peer_label = f"{sender_ip}:{sender_port}"
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         publisher_chain_length = int(data.get("publisher_chain_length") or 0)
-        if publisher_chain_length > len(self.chain) + 1:
+        block = data.get("block") if isinstance(data.get("block"), dict) else {}
+        block_index = int(block.get("index", -1)) if block else -1
+        my_len = len(self.chain)
+        self.logger.info(f"[{self.node_id}] BROADCAST: verifying block index={block_index} from {peer_label} (their chain={publisher_chain_length}, ours={my_len})")
+        # Primary chain-gap check: publisher explicitly told us they are ahead
+        if publisher_chain_length > my_len + 1:
+            self.logger.warning(f"[{self.node_id}] BROADCAST: chain gap — {peer_label} is at len={publisher_chain_length}, we are at {my_len}; stopping mine to sync")
+            self._mining_stop_peer = peer_label
             self._mining_stop_event.set()
             self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, str(data.get("userpk") or ""))
             return
-        block = data.get("block") if isinstance(data.get("block"), dict) else {}
-        if block and int(block.get("index", -1)) == len(self.chain) and str(block.get("prev_hash", "")) == self.last_hash():
-            # Double-buy protection: reject BUY blocks for already-purchased assets
+        # Fallback: block index alone shows we are lagging (catches missing/zero publisher_chain_length)
+        if block and block_index > my_len:
+            effective_len = publisher_chain_length if publisher_chain_length > 0 else block_index + 1
+            self.logger.warning(f"[{self.node_id}] BROADCAST: block index={block_index} is ahead of our chain len={my_len} — stopping mine to sync with {peer_label}")
+            self._mining_stop_peer = peer_label
+            self._mining_stop_event.set()
+            self.ensure_local_state_or_fetch(sender_ip, sender_port, effective_len, str(data.get("userpk") or ""))
+            return
+        if block and block_index == my_len and str(block.get("prev_hash", "")) == self.last_hash():
+            # Double-buy protection: if we already have a BUY for this asset (our own mined block),
+            # the peer's BUY block is the canonical winner — sync from them to correct our chain.
             tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
             tx_type = str(tx.get("tx_type") or tx.get("type") or "").upper()
             if tx_type == "BUY":
                 asset_id = str(tx.get("asset_id") or "")
                 if asset_id and self._is_double_buy(asset_id):
-                    self.logger.warning(f"[{self.node_id}] BROADCAST: double-buy detected for asset {asset_id} — block rejected")
+                    self.logger.warning(f"[{self.node_id}] BROADCAST: competing BUY for {asset_id} from {peer_label} — syncing chain from winner to fix balances")
+                    self._mining_stop_peer = peer_label
+                    self._mining_stop_event.set()
+                    self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, str(data.get("userpk") or ""), force=True)
                     return
             # Valid block received: abort current mining task and accept new chain state
+            self.logger.info(f"[{self.node_id}] BROADCAST: verification complete — accepted block index={block_index} from {peer_label}, abandoning mine")
+            self._mining_stop_peer = peer_label
             self._mining_stop_event.set()
             self.add_block(block)
             self.register_blockchain_node()
+        else:
+            # Stale block: index doesn't fit our chain or prev_hash doesn't match
+            if block:
+                self.logger.warning(f"[{self.node_id}] BROADCAST: verification failed — block index={block_index} doesn't fit our chain len={my_len} (stale/diverged block from {peer_label})")
+            else:
+                self.logger.warning(f"[{self.node_id}] BROADCAST: verification failed — no block in message from {peer_label}")
 
     # -------- peer ledger sharing --------
 
-    def ensure_local_state_or_fetch(self, publisher_ip: str, publisher_port: int, publisher_chain_length: int = 0, userpk: str = ""):
+    def ensure_local_state_or_fetch(self, publisher_ip: str, publisher_port: int, publisher_chain_length: int = 0, userpk: str = "", force: bool = False):
         if not publisher_ip or not publisher_port:
             return
         ledger_missing = (not self.ledger_path.exists()) or (self.ledger_path.stat().st_size == 0)
         balances_missing = (not self.balances_path.exists()) or (self.balances_path.stat().st_size == 0)
-        lagging = publisher_chain_length > len(self.chain) + 1
-        if ledger_missing or balances_missing or lagging:
+        # > (not +1): a fresh node with 0 blocks vs publisher with 1 should always sync
+        lagging = publisher_chain_length > len(self.chain)
+        if force or ledger_missing or balances_missing or lagging:
             self.request_ledger_from_peer(publisher_ip, publisher_port)
             if userpk:
                 self.request_balance_from_peer(publisher_ip, publisher_port, userpk)

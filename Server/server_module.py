@@ -164,6 +164,8 @@ class Server:
         self.gateway_lock = threading.RLock()
         self.online_users: dict[str, object] = {}
         self.online_users_lock = threading.RLock()
+        self._active_buys: dict[str, str] = {}       # asset_id -> buyer; one BUY in flight per asset
+        self._active_buys_lock = threading.Lock()
         self.client_listener = RSA_Server(
             self.host, self.port,
             dir_for_keys=_SERVER_KEYS_DIR,
@@ -807,6 +809,8 @@ class Server:
     def handle_buy_asset(self, comm, msg):
         """Forward a signed buy request from the client to the gateway."""
         _ = comm
+        asset_id = ""
+        _claimed = False  # True only if THIS call successfully added to _active_buys
         try:
             data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
             buyer = str(data.get("buyer", "")).strip()
@@ -815,6 +819,19 @@ class Server:
             asset_id = str(data.get("asset_id", "")).strip()
             self._require_fields(buyer, public_key, signature, msg="Missing buyer/public_key/signature")
             self._require_gateway()
+            # One BUY in flight per asset — prevents balance drain from double-click or concurrent buyers.
+            # _claimed tracks whether WE set the entry so the except block doesn't accidentally
+            # clear a lock that belongs to a different concurrent request.
+            with self._active_buys_lock:
+                existing = self._active_buys.get(asset_id)
+                if existing is not None:
+                    raise ValidationError(
+                        "Your purchase is already being processed — please wait"
+                        if existing == buyer else
+                        "This asset is currently being purchased by another user"
+                    )
+                self._active_buys[asset_id] = buyer
+                _claimed = True
             # Inject seller's public key so the node can credit them on the blockchain.
             if asset_id and "seller_public_key" not in data:
                 asset = self.db.find_asset_by_id(asset_id)
@@ -826,6 +843,9 @@ class Server:
             self._notify_gateway({"type": "TX_REQUEST_BUY", "data": data})
             return self._success("BUY_SUBMITTED")
         except AurexError as e:
+            if _claimed:  # only release the lock if WE acquired it
+                with self._active_buys_lock:
+                    self._active_buys.pop(asset_id, None)
             return self._fail("BUY_FAILED", str(e))
 
     def handle_buy_success(self, comm, msg):
@@ -843,17 +863,24 @@ class Server:
             self._transfer_asset(asset_id, seller_name, buyer_name, buyer_pk)
         except TransferError:
             self.logger.info(f"[buy_success] race — {asset_id} already transferred")
-            # If the asset now belongs to THIS buyer it was a harmless duplicate from a
-            # second node mining the same tx. The client already got BUY_SUCCESS — ignore.
+            with self._active_buys_lock:
+                self._active_buys.pop(asset_id, None)
+            # Harmless duplicate: same buyer, second node confirmed the same tx
             asset = self.db.find_asset_by_id(asset_id) if asset_id else None
             if asset and asset.owner == buyer_name:
                 return self._success("BUY_ACKNOWLEDGED")
+            # Real race: a different buyer won — notify loser and refresh their balance
             if buyer_name:
                 self._push_event(buyer_name, {
                     "type": "BUY_FAILED", "asset_id": asset_id,
                     "message": "This asset was just purchased by someone else",
-                })
+                    "msg": f"Purchase failed — asset was just bought by someone else",
+                }, persist=True)
+            if buyer_pk:
+                self._notify_gateway({"type": "GET_BALANCE", "userpk": buyer_pk})
             return self._success("BUY_ACKNOWLEDGED")
+        with self._active_buys_lock:
+            self._active_buys.pop(asset_id, None)
         self.logger.info(f"[buy_success] {asset_id} transferred {seller_name} -> {buyer_name}")
         self._push_buy_notifications(buyer_name, seller_name, asset_id, price)
         if asset_id:
@@ -869,7 +896,10 @@ class Server:
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         buyer = self._resolve_buyer(data)
         asset_id = str(data.get("asset_id") or "").strip()
+        buyer_pk = str(data.get("user_public_key") or data.get("public_key") or "").strip()
         message = str(data.get("message") or data.get("reason") or "Transaction rejected").strip()
+        with self._active_buys_lock:
+            self._active_buys.pop(asset_id, None)
         if buyer:
             self._push_event(buyer, {
                 "type": "BUY_FAILED",
@@ -877,6 +907,8 @@ class Server:
                 "message": message,
                 "msg": f"Purchase failed for asset {asset_id}: {message}",
             }, persist=True)
+        if buyer_pk:
+            self._notify_gateway({"type": "GET_BALANCE", "userpk": buyer_pk})
         return self._success("BUY_FAILED_ACKNOWLEDGED")
 
     def handle_sell_success(self, comm, msg):
@@ -997,7 +1029,7 @@ class Server:
                     "only UPLOADED or UNLISTED assets can be moved to the marketplace"
                 )
 
-            return self._success("MOVE_PENDING")
+            return self._success("MOVE_PENDING", asset_id=asset_id)
         except AurexError as e:
             return self._fail("MOVE_FAILED", str(e))
 

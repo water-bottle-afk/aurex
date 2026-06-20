@@ -1,0 +1,326 @@
+[
+  {
+    "index": 0,
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "timestamp": "2026-06-20T18:21:42.876994",
+    "tx": {
+      "type": "ASSET_MINT",
+      "tx_id": "mint-eeed9716dd26b1d4-1781968902876",
+      "asset_id": "eeed9716dd26b1d4",
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "user_signature": "3045022100ede650fcf097183cc5115681bac82d731e8daa2430a97c8d4237956692e3aa51022034b25831f4648ea17cd38b069e0b763984848509c8a6cea78d7b0d8597f29a00",
+      "img_hash": "e3d5af2e6e2eb50624c35ac7b53f2bf02048c6e3aa1a1429aae7431a794ff877",
+      "timestamp": "2026-06-20T18:21:42.876260"
+    },
+    "nonce": 839808,
+    "difficulty": 5,
+    "hash": "00000689d8b92fad8264f61d662638373f0fbe970f539f7379aed291f66c3c63"
+  },
+  {
+    "index": 1,
+    "prev_hash": "00000689d8b92fad8264f61d662638373f0fbe970f539f7379aed291f66c3c63",
+    "timestamp": "2026-06-20T18:28:21.875505",
+    "tx": {
+      "type": "ASSET_MINT",
+      "tx_id": "mint-7f7141992f46f077-1781969301874",
+      "asset_id": "7f7141992f46f077",
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "user_signature": "3044022042c49b4e3a52756397a17e02b85c75cf98c5a229b81071a02e47bfa7223ed4a802201fdc160a12e223940b97a547d8d592e838e835e042d5baa1759e8ed16798a121",
+      "img_hash": "b1ab12ce4aacc159bb3c5d6971842ceacebe6f8646f602bc8ee9da1f43e22437",
+      "timestamp": "2026-06-20T18:28:21.874701"
+    },
+    "nonce": 318126,
+    "difficulty": 5,
+    "hash": "00000b0bdb3b9cb050bda8525339e87af58f3c8618b28d0286897c748919679a"
+  },
+  {
+    "index": 2,
+    "prev_hash": "00000b0bdb3b9cb050bda8525339e87af58f3c8618b28d0286897c748919679a",
+    "timestamp": "2026-06-20T18:28:39.800236",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "22787403bf7d4dce950db546679b5b6b",
+      "asset_id": "7f7141992f46f077",
+      "buyer": "Michael",
+      "price": 6.0,
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "seller_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "user_signature": "3045022100b35c38d10e9f3273404c05eb6a783bbd3c4831cf2b8e28449970178930a3e215022010a44b103024d0253805e2730c7fa40e2b99c3b8bc249c24bf789d50db785e35",
+      "timestamp": 1781969319.7697818
+    },
+    "nonce": 688783,
+    "difficulty": 5,
+    "hash": "00000c38271d7a7800551c89d4d3ec0ce8c24755dcd1a2aec9d58059abdafe7b"
+  },
+  {
+    "difficulty": 5,
+    "hash": "000007e20daa0608dca305380c69af14b31f214f67a6d175add3903cc4937bf2",
+    "index": 3,
+    "nonce": 16043,
+    "prev_hash": "00000c38271d7a7800551c89d4d3ec0ce8c24755dcd1a2aec9d58059abdafe7b",
+    "timestamp": "2026-06-20T18:31:58.296289",
+    "tx": {
+      "asset_id": "eeed9716dd26b1d4",
+      "timestamp": "2026-06-20T18:31:58.295327",
+      "tx_id": "3904bfc72d5a43f2a5f2a5298aed4ebc",
+      "type": "UNLIST",
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "user_signature": "3046022100be3ba67ab14e2b8e16fd28092d2839514729ab9ff421bdddb7ddc21af1a9886e022100c6782e6dde38b4f8e40de9ac05d099cca897de21817c06c8613e333fec52e6af"
+    }
+  },
+  {
+    "difficulty": 5,
+    "hash": "00000ab5544a1351b9cc8dd8dce75962fa80184256298b913e6036dde35970a0",
+    "index": 4,
+    "nonce": 15123,
+    "prev_hash": "000007e20daa0608dca305380c69af14b31f214f67a6d175add3903cc4937bf2",
+    "timestamp": "2026-06-20T18:32:18.652550",
+    "tx": {
+      "asset_id": "eeed9716dd26b1d4",
+      "timestamp": "2026-06-20T18:32:18.651975",
+      "tx_id": "9bce593755644e4980825c4efd6b7aef",
+      "type": "LIST",
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "user_signature": "3044022078286e7e097ca76b847f07688e069bda01ab3f261e70871cd0faba6d161d316b02200325ae6724a12f5f9cb20197063678f13802efd230e74cd54aa3b0ee8e5f0225"
+    }
+  },
+  {
+    "difficulty": 5,
+    "hash": "00000c8893ebefad446d380ce6976f91333b7621df0bf47b5391466b0c704f5f",
+    "index": 5,
+    "nonce": 7714,
+    "prev_hash": "00000ab5544a1351b9cc8dd8dce75962fa80184256298b913e6036dde35970a0",
+    "timestamp": "2026-06-20T18:33:43.652379",
+    "tx": {
+      "asset_id": "9abcd17b623ee042",
+      "img_hash": "4fce0f1437b87ffbe03e483b62d0f511d971918006e5dae7efeac77ca1a96df8",
+      "timestamp": "2026-06-20T18:33:43.651834",
+      "tx_id": "mint-9abcd17b623ee042-1781969623651",
+      "type": "ASSET_MINT",
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "user_signature": "3045022100ab13ea46ba8fb5408ff7ae3f5913769aea699de4b67edac4cc6cc0fdc36f15ca02202e198405a6d0e11102ed4d5aec98bf95861d0742c00400fdfa83deb23e738f52"
+    }
+  },
+  {
+    "difficulty": 5,
+    "hash": "00000f723e65ef4b1a9deffea0d30ee5573d23ab6b49e398d38b53e250059848",
+    "index": 6,
+    "nonce": 1355764,
+    "prev_hash": "00000c8893ebefad446d380ce6976f91333b7621df0bf47b5391466b0c704f5f",
+    "timestamp": "2026-06-20T18:33:53.942805",
+    "tx": {
+      "asset_id": "9abcd17b623ee042",
+      "buyer": "Yossi",
+      "price": 5.0,
+      "seller_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "timestamp": 1781969633.931065,
+      "tx_id": "5d0708fc22884ccab3842c1af8369446",
+      "type": "BUY",
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "user_signature": "3046022100b91830c6527f649e01464d114955e58d9a32af1bf58f80a3ba43026fd7f90651022100cec4954b890009840bda04a5ad182e9d4bd9c207ddc4133d2b42c62e67fd5244"
+    }
+  },
+  {
+    "difficulty": 5,
+    "hash": "00000bb674e823c4b7c89ea9f0df2bbb002c9439a94e0cb0dd8c6989faf68244",
+    "index": 7,
+    "nonce": 46702,
+    "prev_hash": "00000f723e65ef4b1a9deffea0d30ee5573d23ab6b49e398d38b53e250059848",
+    "timestamp": "2026-06-20T18:35:38.031300",
+    "tx": {
+      "asset_id": "d7bcd4d8e15becfc",
+      "img_hash": "ab72abc23d95f2bf5e7d2846da2ce844f3d0bed06de10d3a55549e08d9cf3193",
+      "timestamp": "2026-06-20T18:35:38.030390",
+      "tx_id": "mint-d7bcd4d8e15becfc-1781969738030",
+      "type": "ASSET_MINT",
+      "user_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3045022100caae4928494cc9d8d800b89891e4a3c6298482d8bb0566f17cf5af5c4e423db902206ba86914abd01eebf764821d489316e72913d4c24afbfb6d41ad4633caf02e5e"
+    }
+  },
+  {
+    "index": 8,
+    "prev_hash": "00000bb674e823c4b7c89ea9f0df2bbb002c9439a94e0cb0dd8c6989faf68244",
+    "timestamp": "2026-06-20T18:36:07.798838",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "a9aa21dc10474604bd9cd90237b86787",
+      "asset_id": "d7bcd4d8e15becfc",
+      "buyer": "Yossi",
+      "price": 2.0,
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "304602210091aaf7c3b981243065a12894f65c0a0ef55b71b860416ef5496840af3955aac1022100f6916e8708f1a96e492303589873e88b02c142f8661e3537f5a3b5004f3c39ce",
+      "timestamp": 1781969767.0994492
+    },
+    "nonce": 476207,
+    "difficulty": 5,
+    "hash": "00000ec5a16283f6584ddfebd2186dc0ecc42939d42575f104b4324f9826a1fd"
+  },
+  {
+    "index": 8,
+    "prev_hash": "00000bb674e823c4b7c89ea9f0df2bbb002c9439a94e0cb0dd8c6989faf68244",
+    "timestamp": "2026-06-20T18:36:09.814273",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "c7bda588b66f4f99a8794b8e40e63f58",
+      "asset_id": "d7bcd4d8e15becfc",
+      "buyer": "Yossi",
+      "price": 2.0,
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "304602210093082cb55b9e75e2ca086998968a421a1e5a8973e5ad144c0548e66fb31e97e8022100b0a92eb5e4ce391b0e4745226a65895466765716d0be1cfa6623471619259424",
+      "timestamp": 1781969769.1119068
+    },
+    "nonce": 518901,
+    "difficulty": 5,
+    "hash": "0000019c5d76a8a1ebd5bdaac2953219f6fdb476ebe0a981a33b1ffea3b11eb3"
+  },
+  {
+    "index": 8,
+    "prev_hash": "00000bb674e823c4b7c89ea9f0df2bbb002c9439a94e0cb0dd8c6989faf68244",
+    "timestamp": "2026-06-20T18:36:07.400379",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "b4818f1d2fd2461e8fc003433e1d0ef3",
+      "asset_id": "d7bcd4d8e15becfc",
+      "buyer": "Michael",
+      "price": 2.0,
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3044022100be8a2ab1eaf485ffd72847d3ded983a63b054d39238bbad5e3e18f55dbebe5f1021f796d9fe85067da04f66af7b9c310c1053200d9a2e484d439b9bb0d3c064ac4",
+      "timestamp": 1781969767.3775957
+    },
+    "nonce": 1561649,
+    "difficulty": 5,
+    "hash": "000008a7cb47e1978e55651b1a551279f7cbb0cbb203b76f1ed3b29d5ac12905"
+  },
+  {
+    "index": 8,
+    "prev_hash": "00000bb674e823c4b7c89ea9f0df2bbb002c9439a94e0cb0dd8c6989faf68244",
+    "timestamp": "2026-06-20T18:36:09.305916",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "bc40ea46b4bb4d9184c7106c09a18ce5",
+      "asset_id": "d7bcd4d8e15becfc",
+      "buyer": "Michael",
+      "price": 2.0,
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "304402207ea859e7f67f040d886f8310db3f3515c45a94dd172b128c0f33ee137f4f9b84022024a263b5b4539f68f623794f6b54e5d370afbd6135e7fb143d8af15a6b50eb54",
+      "timestamp": 1781969769.295627
+    },
+    "nonce": 3058095,
+    "difficulty": 5,
+    "hash": "00000d8c5416fdae2c80071d3ae63c1e12b1a619f7e4b942d3168f11a5822833"
+  },
+  {
+    "index": 12,
+    "prev_hash": "00000d8c5416fdae2c80071d3ae63c1e12b1a619f7e4b942d3168f11a5822833",
+    "timestamp": "2026-06-20T18:38:14.029421",
+    "tx": {
+      "type": "ASSET_MINT",
+      "tx_id": "mint-2f93a383ec5fdc90-1781969894028",
+      "asset_id": "2f93a383ec5fdc90",
+      "user_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3045022100f25efd75fb77e28bf2f99bd069202a55e74fd40e64e60af171a7cc1ac7c01e5d022071083edba85c3fc6a8691e5550d7def20517eaaf908858c9faaf65b82172478a",
+      "img_hash": "c882d5784d1908d2ad13d5c5ad202ae89c39124a18539348238af67817e9dade",
+      "timestamp": "2026-06-20T18:38:14.028695"
+    },
+    "nonce": 8359,
+    "difficulty": 5,
+    "hash": "00000dfd7913697d8905cbeddafb298ab2657f6712b572a342629238b2e9991d"
+  },
+  {
+    "index": 11,
+    "prev_hash": "000008a7cb47e1978e55651b1a551279f7cbb0cbb203b76f1ed3b29d5ac12905",
+    "timestamp": "2026-06-20T18:38:13.768874",
+    "tx": {
+      "type": "ASSET_MINT",
+      "tx_id": "mint-2f93a383ec5fdc90-1781969893332",
+      "asset_id": "2f93a383ec5fdc90",
+      "user_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3045022100f25efd75fb77e28bf2f99bd069202a55e74fd40e64e60af171a7cc1ac7c01e5d022071083edba85c3fc6a8691e5550d7def20517eaaf908858c9faaf65b82172478a",
+      "img_hash": "c882d5784d1908d2ad13d5c5ad202ae89c39124a18539348238af67817e9dade",
+      "timestamp": "2026-06-20T18:38:13.332580"
+    },
+    "nonce": 18792,
+    "difficulty": 5,
+    "hash": "00000943663ce73e922576c90b33713f2294bd7180934c29de1014f55fe37952"
+  },
+  {
+    "index": 14,
+    "prev_hash": "00000943663ce73e922576c90b33713f2294bd7180934c29de1014f55fe37952",
+    "timestamp": "2026-06-20T18:38:52.704101",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "a7107e0f00244be4a55cde0f2251bcbd",
+      "asset_id": "2f93a383ec5fdc90",
+      "buyer": "Michael",
+      "price": 4.0,
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3045022007cf9b5895b83ff49fb5228cc740aca5b81f23d13d2326451259e167964511d0022100f02c8d133c34c753c22f8cc40b6e4417bde4fff90d0f73af2f46c9ad6271f972",
+      "timestamp": 1781969933.3850436
+    },
+    "nonce": 197212,
+    "difficulty": 5,
+    "hash": "000005e7b6da33276f3665a9c7ef8a31c7865819feaa2890a39783d230337174"
+  },
+  {
+    "index": 14,
+    "prev_hash": "00000943663ce73e922576c90b33713f2294bd7180934c29de1014f55fe37952",
+    "timestamp": "2026-06-20T18:38:53.092388",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "64a26b8f65af468b8b7ef62e47a530a4",
+      "asset_id": "2f93a383ec5fdc90",
+      "buyer": "Yossi",
+      "price": 4.0,
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3045022100be246e5dc238d0e33d72a28366fbd87d573764eef03b071453521ae5947d883e022038e3bd28332b6afe22d2cf010658ea4802059f855c7cf620e38f9616d80ec419",
+      "timestamp": 1781969933.0836277
+    },
+    "nonce": 391744,
+    "difficulty": 5,
+    "hash": "00000845ac783064955560cd904b133286b739effc81117db892ff81504ae47f"
+  },
+  {
+    "index": 14,
+    "prev_hash": "00000943663ce73e922576c90b33713f2294bd7180934c29de1014f55fe37952",
+    "timestamp": "2026-06-20T18:38:54.159655",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "3e35556f04884ff486726c732d0d869d",
+      "asset_id": "2f93a383ec5fdc90",
+      "buyer": "Yossi",
+      "price": 4.0,
+      "user_public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3046022100de39a4f79a4b89f60f349f4f10964c93cb80094f2da7de0b901b6641273d8aec022100cb0f7c729fb78114c0ef027b25df86ab33b87e72b79a3500868ff5f7e8ac214b",
+      "timestamp": 1781969934.1507776
+    },
+    "nonce": 1195211,
+    "difficulty": 5,
+    "hash": "00000ea79ef970cd53d9d7fbb1b3299c07a3075b9242e446422b7672e8012e78"
+  },
+  {
+    "index": 14,
+    "prev_hash": "00000943663ce73e922576c90b33713f2294bd7180934c29de1014f55fe37952",
+    "timestamp": "2026-06-20T18:38:53.705214",
+    "tx": {
+      "type": "BUY",
+      "tx_id": "e9dec7d23558492a90cb8f54bde78316",
+      "asset_id": "2f93a383ec5fdc90",
+      "buyer": "Michael",
+      "price": 4.0,
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "seller_public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
+      "user_signature": "3045022100ae1c11146efda4e845adfaba862f3fafc09724763b00836994b0f587e3c4814202202aedb67ce8f93fc3994d4a03553bf002931838580410ade7553eed23b2cb3f8e",
+      "timestamp": 1781969934.39184
+    },
+    "nonce": 1467376,
+    "difficulty": 5,
+    "hash": "00000d588ea6a7e74f0e222e11c866d1eda33efd5e6484db7b8687391d37d1a3"
+  }
+]
