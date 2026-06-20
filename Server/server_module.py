@@ -594,10 +594,6 @@ class Server:
                 "type": "FULLY_UPLOADED", "asset_id": asset_id,
                 "msg": f"'{asset.asset_name or asset_id}' is now live on the marketplace!",
             }, persist=True)
-            user = self.db.get_user(asset.owner)
-            owner_pk = getattr(user, "public_key", "") if user else ""
-            if owner_pk:
-                self._notify_gateway({"type": "GET_BALANCE", "userpk": owner_pk})
         # Tell all online clients a new asset appeared so their marketplace grids auto-refresh
         self._push_to_all_online({"type": "ASSET_LISTED", "asset_id": asset_id})
 

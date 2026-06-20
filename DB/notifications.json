@@ -1,15 +1,23 @@
 {
-  "Michael": [],
-  "Yossi": [],
+  "Michael": [
+    {
+      "msg": "'Bear' uploaded — mining MINT block, will appear on marketplace once confirmed"
+    },
+    {
+      "msg": "'Bear' is now live on the marketplace!"
+    },
+    {
+      "msg": "Your asset 'Bear' was sold to Yossi for 4.00 AUR"
+    }
+  ],
+  "Yossi": [
+    {
+      "msg": "'try' is now live on the marketplace!"
+    }
+  ],
   "Dan": [
     {
-      "msg": "'fdfdf' uploaded — mining MINT block, will appear on marketplace once confirmed"
-    },
-    {
-      "msg": "'fdfdf' is now live on the marketplace!"
-    },
-    {
-      "msg": "Your asset 'fdfdf' was sold to Yossi for 4.00 AUR"
+      "msg": "Your asset 'try' was sold to Michael for 2.00 AUR"
     }
   ]
 }

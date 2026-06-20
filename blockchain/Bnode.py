@@ -218,12 +218,69 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    def _deduplicate_chain(self, raw: list) -> list:
+        """Return a clean chain with at most one block per index.
+
+        Old ledger files may contain competing blocks at the same index (a side-effect
+        of the racing-miner bug).  Keep the first occurrence of each index so the
+        canonical chain is a strictly ascending sequence 0, 1, 2, …
+        Balances are then rebuilt from this clean chain so they reflect reality.
+        """
+        seen: set[int] = set()
+        clean: list[dict] = []
+        for block in raw:
+            idx = int(block.get("index", -1))
+            if idx < 0 or idx in seen:
+                continue
+            seen.add(idx)
+            clean.append(block)
+        # Sort so 0,1,2,... even if file was out of order
+        clean.sort(key=lambda b: int(b.get("index", 0)))
+        return clean
+
+    def _rebuild_balances(self, chain: list) -> dict:
+        """Recompute the balance table from scratch by replaying BUY blocks in the chain."""
+        balances: dict[str, float] = {}
+        for block in chain:
+            tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
+            tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
+            if tx_type == "BUY":
+                buyer_pk = str(tx.get("user_public_key") or tx.get("sender") or "")
+                seller_pk = str(tx.get("seller_public_key") or "")
+                price = float(tx.get("price") or tx.get("amount") or 0.0)
+                if buyer_pk and price > 0:
+                    balances[buyer_pk] = round(balances.get(buyer_pk, 0.0) - price, 8)
+                if seller_pk and price > 0:
+                    balances[seller_pk] = round(balances.get(seller_pk, 0.0) + price, 8)
+        return balances
+
     def load_local_state(self):
         with self.lock:
-            ledger = self.load_json(self.ledger_path, [])
-            balances = self.load_json(self.balances_path, {})
-            self.chain = ledger if isinstance(ledger, list) else []
-            self.balances = balances if isinstance(balances, dict) else {}
+            raw_ledger = self.load_json(self.ledger_path, [])
+            raw_balances = self.load_json(self.balances_path, {})
+            raw_chain = raw_ledger if isinstance(raw_ledger, list) else []
+            clean_chain = self._deduplicate_chain(raw_chain)
+
+            if len(clean_chain) < len(raw_chain):
+                # Ledger had duplicate-index blocks — rebuild balances from the clean chain.
+                # All users start at INITIAL_BALANCE (set by CREATE_BALANCE on signup, always
+                # uses the constant).  Apply BUY deltas from the canonical chain only.
+                self.logger.warning(
+                    f"[{self.node_id}] load: ledger had {len(raw_chain)} blocks with duplicates; "
+                    f"deduped to {len(clean_chain)}; rebuilding balances"
+                )
+                saved = {k: float(v) for k, v in raw_balances.items()} if isinstance(raw_balances, dict) else {}
+                # Seed every known pk at the initial balance
+                merged: dict[str, float] = {pk: float(INITIAL_BALANCE) for pk in saved}
+                # Re-apply only the canonical BUY deltas
+                for pk, delta in self._rebuild_balances(clean_chain).items():
+                    merged[pk] = round(merged.get(pk, float(INITIAL_BALANCE)) + delta, 8)
+                self.chain = clean_chain
+                self.balances = merged
+            else:
+                self.chain = clean_chain
+                self.balances = {k: float(v) for k, v in raw_balances.items()} if isinstance(raw_balances, dict) else {}
+
             self.save_json(self.ledger_path, self.chain)
             self.save_json(self.balances_path, self.balances)
 
@@ -377,6 +434,19 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
 
         with self.lock:
+            # Reject blocks that don't sit exactly at the end of our chain.
+            # A block already processed by mine() and then received again via broadcast,
+            # or a competing block whose peer won the race, must not be appended a second
+            # time — doing so would double-apply the balance deduction for BUY blocks.
+            expected_index = len(self.chain)
+            block_index = int(block.get("index", -1))
+            if block_index != expected_index:
+                self.logger.warning(
+                    f"[{self.node_id}] add_block: rejected block index={block_index} "
+                    f"(expected {expected_index}) — stale or duplicate"
+                )
+                return
+
             if tx_type == "BUY":
                 buyer_pk = str(tx.get("user_public_key") or tx.get("sender") or "")
                 seller_pk = str(tx.get("seller_public_key") or "")
