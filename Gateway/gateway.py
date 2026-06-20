@@ -655,8 +655,6 @@ class GatewayServer:
         if self._reject_already_minted(asset_id, owner):
             return
 
-        if asset_id:
-            self.seen_minted_asset_ids.add(asset_id)
         self.broadcast_to_nodes(request)
 
     def handle_unlist_asset_from_server(self, request: dict, comm=None):
@@ -668,7 +666,7 @@ class GatewayServer:
         self.broadcast_to_nodes(request)
 
     def handle_list_asset_from_server(self, request: dict, comm=None):
-        """Server requests re-list mining (UNLISTED → FOR_SALE) — dedup then broadcast."""
+        """Server requests re-list mining (UNLISTED → LISTED) — dedup then broadcast."""
         _ = comm
         data = request.get("data") if isinstance(request.get("data"), dict) else {}
         if self.check_tx_id(data, "LIST_ASSET"):
@@ -788,7 +786,7 @@ class GatewayServer:
         Validates the block's hash and PoW, appends it to the gateway ledger,
         broadcasts ``BROADCAST_TX_TO_VERIFY`` to all other nodes so they stop
         their parallel mining subprocesses, then tells the server to mark the
-        asset as ``FOR_SALE`` via ``FULLY_UPLOAD``.
+        asset as ``MINTED`` or ``LISTED`` via ``FULLY_UPLOAD``.
 
         Args:
             request: Message from the mining node containing the mined block,

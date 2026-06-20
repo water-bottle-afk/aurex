@@ -30,7 +30,7 @@ except Exception:
 from SharedResources.config import SERVER_IP, SERVER_PORT, INITIAL_BALANCE
 from SharedResources.classes import (
     RSA_Server, MarketplaceItem,
-    ASSET_STATUS_PENDING, ASSET_STATUS_FOR_SALE,
+    ASSET_STATUS_UPLOADED, ASSET_STATUS_MINTED, ASSET_STATUS_LISTED,
     ASSET_STATUS_UNLISTED,
 )
 from SharedResources.logging import Logger
@@ -142,6 +142,7 @@ class UploadSession:
     cost: float
     chunks_b64: list[str]
     created_at: str
+    for_sale: bool = False
 
 
 class Server:
@@ -196,11 +197,13 @@ class Server:
             "GET_ASSETS_IDS": self.handle_get_assets_ids,
             "GET_ASSET_BY_ID": self.handle_get_asset_by_id,
             "DELETE_ACCOUNT": self.handle_delete_account,
+            "DELETE_ASSET": self.handle_delete_asset,
             "GET_BALANCE": self.handle_get_balance,
             "FULLY_UPLOAD": self.handle_fully_upload,
             "ASSET_UNLISTED": self.handle_asset_unlisted,
             "MOVE_TO_MARKETPLACE": self.handle_move_to_marketplace,
             "UNLIST_ASSET": self.handle_unlist_asset,
+            "CLEAR_NOTIFICATIONS": self.handle_clear_notifications,
         }
 
     def start(self):
@@ -331,14 +334,13 @@ class Server:
 
 
     def _flush_notifications_for_user(self, username: str, comm):
-        msgs = self.db.flush_notifications(username)
+        msgs = self.db.peek_notifications(username)
         for msg in msgs:
             if not msg:
                 continue
             try:
                 comm.send_async({"type": "NOTIFICATION", "msg": msg})
             except Exception:
-                self.db.queue_notification(username, msg)
                 return
 
     def _push_to_all_online(self, event: dict):
@@ -415,16 +417,16 @@ class Server:
 
     def _push_buy_notifications(self, buyer_name: str, seller_name: str, asset_id: str, price):
         """Push BUY_SUCCESS to buyer and ASSET_SOLD to seller after a successful transfer."""
+        asset = self.db.find_asset_by_id(asset_id)
+        asset_label = asset.asset_name if asset else asset_id
         if buyer_name:
             self._push_event(buyer_name, {
                 "type": "BUY_SUCCESS",
                 "asset_id": asset_id,
                 "price": price,
-                "msg": f"Purchase confirmed — asset {asset_id} at {price} AUR is now yours!",
+                "msg": f"Purchase confirmed — '{asset_label}' at {price} AUR is now yours!",
             })
         if seller_name:
-            asset = self.db.find_asset_by_id(asset_id)
-            asset_label = asset.asset_name if asset else asset_id
             self._push_event(seller_name, {
                 "type": "ASSET_SOLD",
                 "asset_id": asset_id,
@@ -503,8 +505,8 @@ class Server:
                 "only clean PNG/JPEG images are accepted"
             )
 
-    def _transfer_asset(self, asset_id: str, seller: str, buyer: str):
-        if not self.db.transfer_asset(asset_id, seller, buyer):
+    def _transfer_asset(self, asset_id: str, seller: str, buyer: str, buyer_public_key: str = ""):
+        if not self.db.transfer_asset(asset_id, seller, buyer, buyer_public_key):
             raise TransferError(f"Asset '{asset_id}' was already purchased by someone else")
 
     def _set_comm_user(self, comm, user):
@@ -577,10 +579,12 @@ class Server:
         return ""
 
     def _mark_asset_for_sale(self, asset_id: str, asset: MarketplaceItem, block_hash: str):
-        if not self.db.update_asset_status(asset_id, "FOR_SALE"):
-            raise BlockchainError(f"Failed to update asset {asset_id} to FOR_SALE")
+        # Determine new status from current: UPLOADED→MINTED (first mint), UNLISTED→LISTED (re-list)
+        new_status = ASSET_STATUS_MINTED if asset.asset_status == ASSET_STATUS_UPLOADED else ASSET_STATUS_LISTED
+        if not self.db.update_asset_status(asset_id, new_status):
+            raise BlockchainError(f"Failed to update asset {asset_id} to {new_status}")
         self.logger.info(
-            f"[fully_upload] {asset_id} is now FOR_SALE hash={block_hash[:16] if block_hash else '?'}"
+            f"[fully_upload] {asset_id} is now {new_status} hash={block_hash[:16] if block_hash else '?'}"
         )
         asset = self.db.find_asset_by_id(asset_id)
         if asset and asset.owner:
@@ -701,6 +705,7 @@ class Server:
             description = str(self._param(msg, "description", 3, "")).strip()
             file_type = str(self._param(msg, "file_type", 4, "")).strip().lower()
             cost = self._parse_cost(self._param(msg, "cost", 5, 0))
+            for_sale = bool(msg.get("for_sale", False))
             self._validate_upload_init(upload_id, username, asset_name, file_type, cost)
             if file_type == "jpeg":
                 file_type = "jpg"
@@ -708,6 +713,7 @@ class Server:
                 upload_id=upload_id, username=username, asset_name=asset_name,
                 description=description, file_type=file_type, cost=cost,
                 chunks_b64=[], created_at=datetime.now().isoformat(),
+                for_sale=for_sale,
             )
             with self.upload_lock:
                 self.upload_sessions[upload_id] = session
@@ -746,9 +752,13 @@ class Server:
             self._sanitize_image(raw, file_path, session.file_type)
             item = self._create_asset_item(session, asset_hash, file_path)
             self.db.add_asset(session.username, item)
+            if session.for_sale:
+                notif_msg = f"'{session.asset_name}' uploaded — mining MINT block, will appear on marketplace once confirmed"
+            else:
+                notif_msg = f"Asset '{session.asset_name}' uploaded to My Assets"
             self._push_event(session.username, {
                 "type": "NOTIFICATION",
-                "msg": f"Asset '{session.asset_name}' was uploaded to My Assets",
+                "msg": notif_msg,
             }, persist=True)
             return self._success("UPLOAD_SUCCESS", asset_id=item.asset_id)
         except AurexError as e:
@@ -823,13 +833,14 @@ class Server:
         _ = comm
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         buyer_name, seller_name, asset_id, price = self._parse_buy_parties(data)
+        buyer_pk = str(data.get("user_public_key") or data.get("sender") or data.get("public_key") or "").strip()
         # Seller not resolved via PK (e.g. old client) — look it up from DB
         if not seller_name and asset_id:
             asset = self.db.find_asset_by_id(asset_id)
             if asset and asset.owner:
                 seller_name = asset.owner
         try:
-            self._transfer_asset(asset_id, seller_name, buyer_name)
+            self._transfer_asset(asset_id, seller_name, buyer_name, buyer_pk)
         except TransferError:
             self.logger.info(f"[buy_success] race — {asset_id} already transferred")
             # If the asset now belongs to THIS buyer it was a harmless duplicate from a
@@ -848,7 +859,6 @@ class Server:
         if asset_id:
             self._push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
         # Refresh balances for both parties so their UI shows the updated amount instantly
-        buyer_pk = str(data.get("user_public_key") or data.get("sender") or data.get("public_key") or "").strip()
         seller_pk = str(data.get("seller_public_key") or "").strip()
         for pk in filter(None, [buyer_pk, seller_pk]):
             self._notify_gateway({"type": "GET_BALANCE", "userpk": pk})
@@ -886,12 +896,12 @@ class Server:
         reason = str(data.get("reason") or "").strip()
         message = str(data.get("message") or reason or "Block rejected").strip()
 
-        # Second node detecting DUPLICATE_MINT for an asset that's already FOR_SALE is
+        # Second node detecting DUPLICATE_MINT for an asset that's already on the marketplace is
         # a harmless race — the first node already accepted the block. Don't alarm the client.
         if reason == "DUPLICATE_MINT" and asset_id:
             asset = self.db.find_asset_by_id(asset_id)
-            if asset and asset.asset_status == "FOR_SALE":
-                self.logger.info(f"[block_rejected] suppressed spurious DUPLICATE_MINT for {asset_id} (already FOR_SALE)")
+            if asset and asset.asset_status in (ASSET_STATUS_MINTED, ASSET_STATUS_LISTED):
+                self.logger.info(f"[block_rejected] suppressed spurious DUPLICATE_MINT for {asset_id} (already {asset.asset_status})")
                 return self._success("BLOCK_REJECTED_ACKNOWLEDGED")
 
         # Fall back to the asset's owner if username not in the payload
@@ -941,10 +951,10 @@ class Server:
     def handle_move_to_marketplace(self, comm, msg):
         """List an asset on the marketplace.
 
-        PENDING  → first time: sends UPLOAD_ASSET (MINT tx on blockchain).
+        UPLOADED → first time: sends UPLOAD_ASSET (MINT tx on blockchain).
         UNLISTED → re-listing:  sends LIST_ASSET  (LIST tx on blockchain).
         Both paths complete when the gateway responds with FULLY_UPLOAD,
-        which sets the asset status to FOR_SALE.
+        which sets the asset status to MINTED or LISTED respectively.
         """
         _ = comm
         try:
@@ -960,7 +970,7 @@ class Server:
             self._require_asset_key(asset, public_key)
 
             status = asset.asset_status
-            if status == ASSET_STATUS_PENDING:
+            if status == ASSET_STATUS_UPLOADED:
                 # First time: mine a MINT block
                 file_hash = self._compute_file_hash(asset)
                 self._notify_gateway({
@@ -984,7 +994,7 @@ class Server:
             else:
                 raise ValidationError(
                     f"Asset '{asset_id}' has status '{status}' — "
-                    "only PENDING or UNLISTED assets can be moved to the marketplace"
+                    "only UPLOADED or UNLISTED assets can be moved to the marketplace"
                 )
 
             return self._success("MOVE_PENDING")
@@ -1018,15 +1028,15 @@ class Server:
             return self._fail("UNLIST_FAILED", str(e))
 
     def handle_fully_upload(self, comm, msg):
-        """Gateway confirms asset block was mined — mark asset FOR_SALE."""
+        """Gateway confirms asset block was mined — mark asset MINTED or LISTED."""
         _ = comm
         try:
             asset_id = str(self._param(msg, "asset_id", 0, "")).strip()
             block_hash = str(self._param(msg, "block_hash", 1, "")).strip()
             self._require_fields(asset_id, msg="Missing asset_id")
             asset = self._find_asset(asset_id)
-            if asset.asset_status == ASSET_STATUS_FOR_SALE:
-                self.logger.info(f"[fully_upload] {asset_id} already FOR_SALE, skipping")
+            if asset.asset_status in (ASSET_STATUS_MINTED, ASSET_STATUS_LISTED):
+                self.logger.info(f"[fully_upload] {asset_id} already {asset.asset_status}, skipping")
                 return self._success("FULLY_UPLOAD_ACKNOWLEDGED")
             self._mark_asset_for_sale(asset_id, asset, block_hash)
             return self._success("FULLY_UPLOAD_ACKNOWLEDGED")
@@ -1109,12 +1119,34 @@ class Server:
             "cost": item.cost,
             "created_at": item.created_at,
             "public_key": getattr(item, "public_key", ""),
-            "asset_status": getattr(item, "asset_status", "PENDING"),
+            "asset_status": getattr(item, "asset_status", ASSET_STATUS_UPLOADED),
         })
         for chunk in chunks:
             comm.send_async({"type": "ASSET_CHUNK", "chunk_b64": chunk})
         comm.send_async({"type": "ASSET_END"})
         return None
+
+    def handle_delete_asset(self, comm, msg):
+        """Delete an asset from the marketplace — removes DB entry, file, and notifies all users."""
+        _ = comm
+        try:
+            username = str(self._param(msg, "owner", 0, "")).strip()
+            asset_id = str(self._param(msg, "asset_id", 1, "")).strip()
+            self._require_fields(username, asset_id, msg="Missing owner or asset_id")
+            asset = self._find_asset(asset_id)
+            self._require_asset_owner(asset, username)
+            if asset.storage_path:
+                try:
+                    Path(asset.storage_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if not self.db.delete_asset(asset_id, username):
+                raise BlockchainError(f"Failed to delete asset '{asset_id}'")
+            self._push_to_all_online({"type": "ASSET_REMOVED", "asset_id": asset_id})
+            self.logger.info(f"[delete_asset] {asset_id} deleted by {username}")
+            return self._success("DELETE_ASSET_SUCCESS")
+        except AurexError as e:
+            return self._fail("DELETE_ASSET_FAILED", str(e))
 
     def handle_delete_account(self, comm, msg):
         username = str(self._param(msg, "username", 0, "")).strip()
@@ -1136,6 +1168,13 @@ class Server:
 
         self.logger.info(f"Account deleted: {username}")
         return self._success("ACCOUNT_IS_DELETED")
+
+    def handle_clear_notifications(self, comm, msg):
+        _ = comm
+        username = str(self._param(msg, "username", 0, "")).strip()
+        if username:
+            self.db.flush_notifications(username)
+        return self._success("NOTIFICATIONS_CLEARED")
 
 
 if __name__ == "__main__":

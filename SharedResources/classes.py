@@ -30,21 +30,35 @@ from cryptography.hazmat.primitives.asymmetric import dh, rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.serialization import load_pem_parameters, load_pem_public_key
 
-from SharedResources.logging import Logger
+from SharedResources.logging import Logger, CYAN, RESET
 
 class Communication:
     """For recv/sending messages over a socket with optional AES-CBC encryption."""
-    def log(self, dirct, data):
+    @staticmethod
+    def _format_log_payload(d: dict) -> str:
+        """Format a message dict for logging: type field first and cyan-coloured, rest in insertion order."""
+        type_val = d.get("type", "")
+        parts: list[str] = []
+        if "type" in d:
+            parts.append(f'"type": "{CYAN}{type_val}{RESET}"')
+        for k, v in d.items():
+            if k == "type":
+                continue
+            parts.append(f'"{k}": {json.dumps(v)}')
+        return "{" + ", ".join(parts) + "}"
+
+    def log(self, dirct, data: dict):
         try:
             ip, port = self.sock.getpeername()
             addr = f"{ip}:{port}"
         except Exception:
             addr = "?"
         label = self.peer_label or "Peer"
+        payload = self._format_log_payload(data) if isinstance(data, dict) else str(data)
         if dirct == 'recv':
-            self.Print(f"Recv From {label} at {addr} <<< {data}")
+            self.Print(f"Recv From {label} at {addr} <<< {payload}")
         else:
-            self.Print(f"Sent to {label} at {addr} >>> {data}")
+            self.Print(f"Sent to {label} at {addr} >>> {payload}")
 
     def __init__(self, sock, name="", peer_label=""):
         self.sock = sock
@@ -125,7 +139,7 @@ class Communication:
         # pack length as big-endian unsigned short then flush the whole thing atomically
         with self.lock:
             self.sock.sendall(struct.pack('!H', len(message)) + message)
-        self.log('send', json.dumps(self.sanitize_for_log(data), sort_keys=True))
+        self.log('send', self.sanitize_for_log(data))
 
 
     def recv_one_message(self, encryption=True):
@@ -151,7 +165,7 @@ class Communication:
 
         try:
             decoded = json.loads(data.decode())
-            self.log('recv', json.dumps(self.sanitize_for_log(decoded), sort_keys=True))
+            self.log('recv', self.sanitize_for_log(decoded))
             return decoded
         except Exception as e:
             self.logger.error(f"Error decoding JSON: {e}")
@@ -499,23 +513,34 @@ class UDPClient:
     
 
     
-ASSET_STATUS_PENDING          = "PENDING"
-ASSET_STATUS_FOR_SALE         = "FOR_SALE"
-ASSET_STATUS_UNLISTED         = "UNLISTED"
+ASSET_STATUS_UPLOADED         = "UPLOADED"    # file on server, not yet on blockchain
+ASSET_STATUS_MINTED           = "MINTED"      # MINT tx confirmed — first listing
+ASSET_STATUS_LISTED           = "LISTED"      # LIST tx confirmed — re-listing
+ASSET_STATUS_UNLISTED         = "UNLISTED"    # taken off marketplace
 ASSET_STATUS_SOLD             = "SOLD"
 ASSET_STATUS_PENDING_DELETION = "PENDING_DELETION"
 ASSET_STATUS_DELETED          = "DELETED"
+
+# Legacy aliases so old code that was not yet updated still compiles
+ASSET_STATUS_PENDING  = ASSET_STATUS_UPLOADED
+ASSET_STATUS_FOR_SALE = ASSET_STATUS_LISTED
 
 
 def migrate_asset_status(raw: dict) -> str:
     """Derive asset_status from old blockchain_status/for_sale fields when upgrading."""
     if "asset_status" in raw:
-        return str(raw["asset_status"])
+        value = str(raw["asset_status"])
+        # Migrate legacy names on read
+        if value == "PENDING":
+            return ASSET_STATUS_UPLOADED
+        if value == "FOR_SALE":
+            return ASSET_STATUS_LISTED
+        return value
     bc = str(raw.get("blockchain_status", "")).strip().lower()
     fs = bool(raw.get("for_sale", True))
     if bc in ("verified",):
-        return ASSET_STATUS_FOR_SALE if fs else ASSET_STATUS_UNLISTED
-    return ASSET_STATUS_PENDING
+        return ASSET_STATUS_LISTED if fs else ASSET_STATUS_UNLISTED
+    return ASSET_STATUS_UPLOADED
 
 
 @dataclass
@@ -531,7 +556,7 @@ class MarketplaceItem:
     created_at: str
     storage_path: str = ""
     version: int = 1
-    asset_status: str = ASSET_STATUS_PENDING
+    asset_status: str = ASSET_STATUS_UPLOADED
     public_key: str = ""
 
     def to_dict(self):

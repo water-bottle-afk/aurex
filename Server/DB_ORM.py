@@ -25,8 +25,9 @@ from SharedResources.logging import Logger
 from SharedResources.classes import (
     MarketplaceItem,
     migrate_asset_status,
-    ASSET_STATUS_PENDING,
-    ASSET_STATUS_FOR_SALE,
+    ASSET_STATUS_UPLOADED,
+    ASSET_STATUS_MINTED,
+    ASSET_STATUS_LISTED,
     ASSET_STATUS_UNLISTED,
     ASSET_STATUS_SOLD,
     ASSET_STATUS_PENDING_DELETION,
@@ -382,13 +383,15 @@ class ORM:
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
 
+    _MARKETPLACE_STATUSES = (ASSET_STATUS_MINTED, ASSET_STATUS_LISTED)
+
     def get_all_for_sale_assets(self) -> list[MarketplaceItem]:
-        """Return all FOR_SALE assets regardless of owner."""
+        """Return all MINTED or LISTED assets regardless of owner."""
         market = self.load_marketplace()
         assets = [
             MarketplaceItem.from_dict(d)
             for d in market.values()
-            if isinstance(d, dict) and d.get("asset_status") == ASSET_STATUS_FOR_SALE
+            if isinstance(d, dict) and d.get("asset_status") in self._MARKETPLACE_STATUSES
         ]
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
@@ -413,16 +416,17 @@ class ORM:
             self.save_marketplace(market)
         return True
 
-    def transfer_asset(self, asset_id: str, from_owner: str, to_owner: str) -> bool:
+    def transfer_asset(self, asset_id: str, from_owner: str, to_owner: str, buyer_public_key: str = "") -> bool:
         """Transfer an asset to a new owner after a confirmed blockchain purchase.
 
-        Accepts the transfer if the asset is FOR_SALE (normal case) or
+        Accepts the transfer if the asset is MINTED or LISTED (normal case) or
         PENDING_DELETION (purchase beat the account-deletion window — blockchain wins).
         Returns False for any other status (already sold / deleted) to prevent double-buys.
         """
         asset_id = (asset_id or "").strip()
         from_owner = (from_owner or "").strip()
         to_owner = (to_owner or "").strip()
+        buyer_public_key = (buyer_public_key or "").strip()
         if not asset_id or not from_owner or not to_owner:
             return False
         with self.lock:
@@ -436,7 +440,7 @@ class ORM:
             if current_status == ASSET_STATUS_PENDING_DELETION:
                 # Blockchain purchase beat the account-deletion — transfer allowed
                 pass
-            elif current_status == ASSET_STATUS_FOR_SALE and current_owner == from_owner:
+            elif current_status in (ASSET_STATUS_MINTED, ASSET_STATUS_LISTED) and current_owner == from_owner:
                 # Normal validated purchase
                 pass
             else:
@@ -446,6 +450,8 @@ class ORM:
             asset_dict["owner"] = to_owner
             asset_dict["asset_status"] = ASSET_STATUS_UNLISTED
             asset_dict["version"] = int(asset_dict.get("version", 1)) + 1
+            if buyer_public_key:
+                asset_dict["public_key"] = buyer_public_key
             market[asset_id] = asset_dict
             self.save_marketplace(market)
         return True
@@ -468,7 +474,7 @@ class ORM:
         return True
 
     def get_assets_for_user(self, username: str) -> list[MarketplaceItem]:
-        """Return assets owned by user that are NOT FOR_SALE (My Assets view)."""
+        """Return assets owned by user that are NOT on the marketplace (My Assets view)."""
         username = (username or "").strip()
         if not username:
             return []
@@ -478,7 +484,7 @@ class ORM:
             for d in market.values()
             if isinstance(d, dict)
             and d.get("owner") == username
-            and d.get("asset_status") != ASSET_STATUS_FOR_SALE
+            and d.get("asset_status") not in self._MARKETPLACE_STATUSES
         ]
         assets.sort(key=lambda a: a.created_at, reverse=True)
         return assets
@@ -584,6 +590,18 @@ class ORM:
             items.append({"msg": str(msg)})
             data[username] = items
             self.save_notifications(data)
+
+    def peek_notifications(self, username: str) -> list[str]:
+        """Return queued notifications for the user WITHOUT deleting them."""
+        username = str(username or "").strip()
+        if not username:
+            return []
+        with self.lock:
+            data = self.load_notifications()
+            items = data.get(username, [])
+        if not isinstance(items, list):
+            return []
+        return [str(i.get("msg", "")) if isinstance(i, dict) else str(i) for i in items if i]
 
     def flush_notifications(self, username: str) -> list[str]:
         """Return and clear all queued notifications for the user."""

@@ -71,7 +71,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self.difficulty = int(difficulty)
 
         self.logger = Logger("Bnode")
-        self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
 
         self.base_dir = Path(__file__).resolve().parent
         self.server_for_peers = RSA_Server(
@@ -122,7 +121,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         """
         self.connect_to_gateway()
         threading.Thread(target=self.server_for_peers.start, daemon=True).start()
-        self.Print(f"[{self.node_id}] listening for peers at {self.ip}:{self.port}")
+        self.logger.info(f"[{self.node_id}] listening for peers at {self.ip}:{self.port}")
         while not self._node_stop_event.is_set():
             time.sleep(0.2)
 
@@ -173,7 +172,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         while not self._node_stop_event.is_set():
             discovered = self.discover_gateway_once()
             if not discovered:
-                self.Print(f"[{self.node_id}] gateway not discovered, retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
+                self.logger.warning(f"[{self.node_id}] gateway not discovered, retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
                 time.sleep(float(BROADCAST_DISCOVERY_FREQUENCY))
                 continue
 
@@ -186,10 +185,10 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.gateway_comm = client.communication
                 threading.Thread(target=self.listen_gateway_loop, daemon=True).start()
                 self.register_blockchain_node()
-                self.Print(f"[{self.node_id}] connected to gateway at {gw_ip}:{gw_port}")
+                self.logger.info(f"[{self.node_id}] connected to gateway at {gw_ip}:{gw_port}")
                 return
             except Exception as exc:
-                self.Print(f"[{self.node_id}] gateway connect failed: {exc}; retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
+                self.logger.warning(f"[{self.node_id}] gateway connect failed: {exc}; retry in {BROADCAST_DISCOVERY_FREQUENCY}s")
                 time.sleep(float(BROADCAST_DISCOVERY_FREQUENCY))
 
     def listen_gateway_loop(self):
@@ -201,7 +200,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         if not self._node_stop_event.is_set():
             self.gateway_comm = None
             self.gateway_client = None
-            self.Print(f"[{self.node_id}] gateway disconnected, reconnecting")
+            self.logger.warning(f"[{self.node_id}] gateway disconnected, reconnecting")
             self.connect_to_gateway()
 
     def load_json(self, path: Path, default):
@@ -280,23 +279,36 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             return False
         return True
 
+    def _is_tx_in_chain(self, tx_id: str) -> bool:
+        """Return True if a transaction with this tx_id already exists in the local chain."""
+        if not tx_id:
+            return False
+        with self.lock:
+            return any(
+                isinstance(b.get("tx"), dict) and str(b["tx"].get("tx_id", "")) == tx_id
+                for b in self.chain
+            )
+
     def mine(self, transaction: dict[str, Any]):
         """Perform PoW mining in a separate Process (non-blocking for the gateway listener).
 
         Spawns a multiprocessing.Process running _mine_block so the GIL never
-        blocks the gateway listener thread.  The listener can abort mining at any
-        time by setting self._mining_stop_event; the miner process exits cleanly
-        and mine() returns None so the caller can restart with fresh chain state.
+        blocks the gateway listener thread.  The listener can abort mining only
+        when BROADCAST_TX_TO_VERIFY arrives and passes validation (chain advanced).
+        mine() returns None on abort so the caller can check whether the tx was
+        already committed and either discard or retry.
 
-        Returns the mined block dict on success, or None if aborted / invalid.
+        Returns the mined block dict on success, or None if aborted.
         """
         if not self.validate_tx(transaction):
-            self.Print(f"[{self.node_id}] mine: tx validation failed for "
-                       f"tx_type={transaction.get('tx_type', transaction.get('type', 'TX'))}")
+            self.logger.warning(
+                f"[{self.node_id}] mine: tx validation failed for "
+                f"tx_type={transaction.get('tx_type', transaction.get('type', 'TX'))}"
+            )
             return None
 
         tx_label = transaction.get("tx_type") or transaction.get("type") or "TX"
-        self.Print(f"[{self.node_id}] mine: starting PoW for {tx_label} difficulty={self.difficulty}...")
+        self.logger.info(f"[{self.node_id}] mine: starting PoW for {tx_label} difficulty={self.difficulty}...")
 
         block_template = {
             "index":      len(self.chain),
@@ -338,16 +350,18 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self._current_miner = None
 
         if status == "aborted":
-            self.Print(f"[{self.node_id}] mine: aborted — new block received from network")
+            self.logger.warning(f"[{self.node_id}] mine: aborted — chain advanced by peer")
             return None
 
         # If the stop signal arrived just as our miner found the nonce, another winner
         # was already accepted. Discard our block so we don't write a duplicate.
         if self._mining_stop_event.is_set():
-            self.Print(f"[{self.node_id}] mine: found block but stop was signalled — discarding (another winner accepted)")
+            self.logger.warning(
+                f"[{self.node_id}] mine: found block but stop was signalled — discarding (peer won)"
+            )
             return None
 
-        self.Print(f"[{self.node_id}] mine: block found nonce={block['nonce']} hash={block['hash'][:16]}...")
+        self.logger.info(f"[{self.node_id}] mine: block found nonce={block['nonce']} hash={block['hash'][:16]}...")
         self.add_block(block)
         return block
 
@@ -381,7 +395,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         try:
             self.gateway_comm.send_one_message(msg)
         except Exception as exc:
-            self.Print(f"[{self.node_id}] gateway send failed: {exc}")
+            self.logger.warning(f"[{self.node_id}] gateway send failed: {exc}")
 
     def advertised_ip(self) -> str:
         try:
@@ -521,15 +535,17 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             raise DuplicateError(f"asset_id={asset_id} already pending mint")
 
     def _guard_already_minted(self, asset_id: str):
+        if self._guard_already_minted_bool(asset_id):
+            raise DuplicateError(f"asset_id={asset_id} already minted in chain")
+
+    def _guard_already_minted_bool(self, asset_id: str) -> bool:
         with self.lock:
-            already_minted = any(
+            return any(
                 isinstance(b.get("tx"), dict)
                 and str(b["tx"].get("type") or b["tx"].get("tx_type") or "").upper() == "ASSET_MINT"
                 and str(b["tx"].get("asset_id", "")) == asset_id
                 for b in self.chain
             )
-        if already_minted:
-            raise DuplicateError(f"asset_id={asset_id} already minted in chain")
 
     def _mine_or_raise(self, tx: dict) -> dict:
         block = self.mine(tx)
@@ -568,27 +584,34 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self._guard_duplicate_pending(asset_id)
                 self._pending_mint_ids.add(asset_id)
         except DuplicateError as e:
-            self.Print(f"[{self.node_id}] ASSET_MINT: {e}, skipping")
+            self.logger.warning(f"[{self.node_id}] ASSET_MINT: {e}, skipping")
             return
         except AurexError as e:
-            self.Print(f"[{self.node_id}] MINT rejected: {e}")
+            self.logger.warning(f"[{self.node_id}] MINT rejected: {e}")
             return
 
         try:
             tx = self._build_mint_tx(asset_id, owner, public_key, signature, file_hash)
-            self.Print(f"[{self.node_id}] ASSET_MINT: starting mining for asset_id={asset_id}")
-            block = self._mine_or_raise(tx)
-            self.Print(f"[{self.node_id}] ASSET_MINT: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
+            self.logger.info(f"[{self.node_id}] ASSET_MINT: starting mining for asset_id={asset_id}")
+            while True:
+                block = self.mine(tx)
+                if block is not None:
+                    break
+                if self._node_stop_event.is_set():
+                    return
+                if self._is_tx_in_chain(tx["tx_id"]) or self._guard_already_minted_bool(asset_id):
+                    self.logger.info(f"[{self.node_id}] ASSET_MINT: {asset_id} already mined by peer — discarding")
+                    return
+                self.logger.warning(f"[{self.node_id}] ASSET_MINT: aborted, peer mined different tx — retrying with updated chain")
+            self.logger.info(f"[{self.node_id}] ASSET_MINT: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
             self.send_gateway({
                 "type": "ASSET_SIGNED_IN_BLOCKCHAIN",
                 "data": {"block": block, "asset_id": asset_id, "owner": owner},
                 "sender_ip": self.advertised_ip(),
                 "sender_port": self.port,
             })
-        except BlockchainError:
-            pass  # mine aborted — another node won, that's normal PoW
         except AurexError as e:
-            self.Print(f"[{self.node_id}] MINT failed: {e}")
+            self.logger.error(f"[{self.node_id}] MINT failed: {e}")
         finally:
             with self.lock:
                 self._pending_mint_ids.discard(asset_id)
@@ -601,7 +624,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         signature = str(data.get("signature", ""))
 
         if not asset_id:
-            self.Print(f"[{self.node_id}] UNLIST: missing asset_id, skipping")
+            self.logger.warning(f"[{self.node_id}] UNLIST: missing asset_id, skipping")
             return
 
         tx = {
@@ -613,22 +636,28 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "timestamp": datetime.now().isoformat(),
         }
 
-        self.Print(f"[{self.node_id}] UNLIST: starting mining for asset_id={asset_id}")
-        block = self.mine(tx)
-        if block is not None:
-            self.Print(f"[{self.node_id}] UNLIST: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
-            self.send_gateway({
-                "type": "ASSET_UNLIST_SIGNED_IN_BLOCKCHAIN",
-                "data": {
-                    "block": block,
-                    "asset_id": asset_id,
-                    "owner": owner,
-                },
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            })
-        else:
-            self.Print(f"[{self.node_id}] UNLIST: mining failed for asset_id={asset_id}")
+        self.logger.info(f"[{self.node_id}] UNLIST: starting mining for asset_id={asset_id}")
+        while True:
+            block = self.mine(tx)
+            if block is not None:
+                break
+            if self._node_stop_event.is_set():
+                return
+            if self._is_tx_in_chain(tx["tx_id"]):
+                self.logger.info(f"[{self.node_id}] UNLIST: {asset_id} already mined by peer — discarding")
+                return
+            self.logger.warning(f"[{self.node_id}] UNLIST: aborted, peer mined different tx — retrying")
+        self.logger.info(f"[{self.node_id}] UNLIST: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
+        self.send_gateway({
+            "type": "ASSET_UNLIST_SIGNED_IN_BLOCKCHAIN",
+            "data": {
+                "block": block,
+                "asset_id": asset_id,
+                "owner": owner,
+            },
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
     def handle_list_request(self, msg: dict[str, Any]):
         """Mine a LIST_ASSET tx for a previously-unlisted asset (re-listing it)."""
@@ -639,7 +668,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         signature = str(data.get("signature", ""))
 
         if not asset_id:
-            self.Print(f"[{self.node_id}] LIST_ASSET: missing asset_id, skipping")
+            self.logger.warning(f"[{self.node_id}] LIST_ASSET: missing asset_id, skipping")
             return
 
         tx = {
@@ -651,22 +680,28 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "timestamp": datetime.now().isoformat(),
         }
 
-        self.Print(f"[{self.node_id}] LIST_ASSET: starting mining for asset_id={asset_id}")
-        block = self.mine(tx)
-        if block is not None:
-            self.Print(f"[{self.node_id}] LIST_ASSET: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
-            self.send_gateway({
-                "type": "ASSET_LIST_SIGNED_IN_BLOCKCHAIN",
-                "data": {
-                    "block": block,
-                    "asset_id": asset_id,
-                    "owner": owner,
-                },
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            })
-        else:
-            self.Print(f"[{self.node_id}] LIST_ASSET: mining failed for asset_id={asset_id}")
+        self.logger.info(f"[{self.node_id}] LIST_ASSET: starting mining for asset_id={asset_id}")
+        while True:
+            block = self.mine(tx)
+            if block is not None:
+                break
+            if self._node_stop_event.is_set():
+                return
+            if self._is_tx_in_chain(tx["tx_id"]):
+                self.logger.info(f"[{self.node_id}] LIST_ASSET: {asset_id} already mined by peer — discarding")
+                return
+            self.logger.warning(f"[{self.node_id}] LIST_ASSET: aborted, peer mined different tx — retrying")
+        self.logger.info(f"[{self.node_id}] LIST_ASSET: mined asset_id={asset_id} nonce={block['nonce']} hash={block['hash'][:16]}...")
+        self.send_gateway({
+            "type": "ASSET_LIST_SIGNED_IN_BLOCKCHAIN",
+            "data": {
+                "block": block,
+                "asset_id": asset_id,
+                "owner": owner,
+            },
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
     def _validate_buy_tx(self, tx: dict):
         if not self.validate_tx(tx):
@@ -682,20 +717,24 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         asset_id = str(tx.get("asset_id") or data.get("asset_id") or "")
         try:
             self._validate_buy_tx(tx)
-            # Reject before mining if this asset was already purchased on our chain.
-            # This guards against duplicate TX_REQUEST_BUY deliveries and race conditions
-            # where two nodes finish mining the same BUY tx — only the first block should
-            # debit the buyer's balance.
             if asset_id and self._is_double_buy(asset_id):
                 raise ValidationError(f"Asset {asset_id} already purchased — double-buy rejected")
             self.pending_txs.append(tx)
-            block = self._mine_or_raise(tx)
+            while True:
+                block = self.mine(tx)
+                if block is not None:
+                    break
+                if self._node_stop_event.is_set():
+                    return
+                # BUY abort: if this asset was purchased (by us or peer), stop; else retry
+                if self._is_double_buy(asset_id) or self._is_tx_in_chain(tx["tx_id"]):
+                    self.logger.info(f"[{self.node_id}] BUY: {asset_id} already purchased by peer — discarding")
+                    return
+                self.logger.warning(f"[{self.node_id}] BUY: aborted, peer mined different tx — retrying")
             self.notify_buy_success(tx)
             self.notify_gateway(block)
-        except BlockchainError:
-            pass  # mining aborted — normal, another node won
         except AurexError as e:
-            self.Print(f"[{self.node_id}] BUY failed: {e}")
+            self.logger.error(f"[{self.node_id}] BUY failed: {e}")
             self.send_gateway({
                 "type": "BUY_FAILED",
                 "data": {
@@ -749,6 +788,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         publisher_chain_length = int(data.get("publisher_chain_length") or 0)
         if publisher_chain_length > len(self.chain) + 1:
+            self._mining_stop_event.set()
             self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, str(data.get("userpk") or ""))
             return
         block = data.get("block") if isinstance(data.get("block"), dict) else {}
@@ -759,7 +799,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             if tx_type == "BUY":
                 asset_id = str(tx.get("asset_id") or "")
                 if asset_id and self._is_double_buy(asset_id):
-                    self.Print(f"[{self.node_id}] BROADCAST: double-buy detected for asset {asset_id} — block rejected")
+                    self.logger.warning(f"[{self.node_id}] BROADCAST: double-buy detected for asset {asset_id} — block rejected")
                     return
             # Valid block received: abort current mining task and accept new chain state
             self._mining_stop_event.set()
@@ -801,7 +841,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "type": "MINTED_IDS",
             "data": {"asset_ids": minted},
         })
-        self.Print(f"[{self.node_id}] GET_MINTED_IDS: sent {len(minted)} minted id(s) to gateway")
+        self.logger.debug(f"[{self.node_id}] GET_MINTED_IDS: sent {len(minted)} minted id(s) to gateway")
 
     def handle_get_balance_sync(self, msg: dict[str, Any]):
         publisher_ip = str(msg.get("publisher_ip") or "")
@@ -893,10 +933,10 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.balances = {k: float(v) for k, v in balances.items()}
                 self.persist_local_state()
 
-            self.Print(f"[{self.node_id}] ledger synced from {peer_ip}:{peer_port}")
+            self.logger.info(f"[{self.node_id}] ledger synced from {peer_ip}:{peer_port}")
             return True
         except Exception as exc:
-            self.Print(f"[{self.node_id}] ledger sync failed from {peer_ip}:{peer_port}: {exc}")
+            self.logger.warning(f"[{self.node_id}] ledger sync failed from {peer_ip}:{peer_port}: {exc}")
             return False
         finally:
             try:
@@ -920,7 +960,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.persist_local_state()
             return True
         except Exception as exc:
-            self.Print(f"[{self.node_id}] balance sync failed from {peer_ip}:{peer_port}: {exc}")
+            self.logger.warning(f"[{self.node_id}] balance sync failed from {peer_ip}:{peer_port}: {exc}")
             return False
         finally:
             try:

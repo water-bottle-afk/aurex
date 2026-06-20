@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 YELLOW  = "\033[33m"
+CYAN    = "\033[36m"
 ORANGE  = "\033[38;5;208m"
 RED     = "\033[31m"
 RESET   = "\033[0m"

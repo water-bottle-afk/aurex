@@ -103,7 +103,7 @@ class ImageCache:
         "file_type": "png",
         "cost": 100.0,
         "created_at": "...",
-        "asset_status": "FOR_SALE",
+        "asset_status": "LISTED",
         "public_key": "..."
       },
       ...
@@ -280,12 +280,13 @@ class Client:
         self.asset_sold_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_removed_queue: "queue.Queue[str]" = queue.Queue()
         self.asset_unlisted_queue: "queue.Queue[str]" = queue.Queue()
-        self.asset_listed_queue: "queue.Queue[str]" = queue.Queue()   # PENDING → FOR_SALE
+        self.asset_listed_queue: "queue.Queue[str]" = queue.Queue()   # UPLOADED → LISTED (FULLY_UPLOADED event)
         self.hide_assets_queue: "queue.Queue[str]" = queue.Queue()    # HIDE_ASSETS_OF_USER silent removal
         self.balance_queue: "queue.Queue[float]" = queue.Queue()
         self.bought_asset_queue: "queue.Queue[str]" = queue.Queue()
         self.buy_success_queue: "queue.Queue[str]" = queue.Queue()   # feeds My Assets live update
         self.push_snackbar_queue: "queue.Queue[tuple[str, bool]]" = queue.Queue()
+        self.page_refresh_queue: "queue.Queue[None]" = queue.Queue()  # signals ClientApp to reload current page
         self.gateway_online_queue: "queue.Queue[None]" = queue.Queue()
 
         self._push_handlers: dict[str, Any] = {
@@ -297,7 +298,7 @@ class Client:
             "BALANCE_UPDATED":    self._on_balance,
             "BALANCE_IS":         self._on_balance,
             "FULLY_UPLOADED":     self._on_fully_uploaded,
-            "ASSET_LISTED":       self._on_fully_uploaded,
+            "ASSET_LISTED":       self._on_asset_listed,
             "ASSET_SOLD":         self._on_asset_sold,
             "ASSET_REMOVED":      self._on_asset_removed,
             "ASSET_UNLISTED":     self._on_asset_unlisted,
@@ -341,12 +342,19 @@ class Client:
         self.balance_queue.put(float(msg.get("balance", 0.0)))
 
     def _on_fully_uploaded(self, msg):
-        text = str(msg.get("msg", f"Asset {msg.get('asset_id', '')} is now live on the marketplace"))
+        text = str(msg.get("msg", "Your asset is now live on the marketplace!"))
         self.notification_queue.put(text)
         _aid = str(msg.get("asset_id", ""))
         if _aid:
             self.asset_listed_queue.put(_aid)
         self.push_snackbar_queue.put((text, False))
+        self.page_refresh_queue.put(None)
+
+    def _on_asset_listed(self, msg):
+        _aid = str(msg.get("asset_id", ""))
+        if _aid:
+            self.asset_listed_queue.put(_aid)
+        self.page_refresh_queue.put(None)
 
     def _on_asset_sold(self, msg):
         asset_id = str(msg.get("asset_id", ""))
@@ -375,6 +383,8 @@ class Client:
             for aid in asset_ids:
                 if aid:
                     self.hide_assets_queue.put(str(aid))
+        if asset_ids:
+            self.page_refresh_queue.put(None)
 
     def _on_gateway_online(self, _msg):
         self.gateway_online_queue.put(None)
@@ -590,7 +600,7 @@ class ClientApp:
         self.sold_asset_ids: set[str] = set()
         self.removed_asset_ids: set[str] = set()
         self.unlisted_asset_ids: set[str] = set()
-        self.listed_asset_ids: set[str] = set()   # assets that moved from PENDING → FOR_SALE
+        self.listed_asset_ids: set[str] = set()   # assets that moved from UPLOADED → LISTED
         self.recently_bought_ids: set[str] = set()   # assets the user just purchased
         self.gateway_online: bool | None = None   # None=unknown, True=online, False=offline
         # Refs to live header controls — updated by background monitors
@@ -697,9 +707,14 @@ class ClientApp:
         if label is not None:
             label.value = str(min(count, 99))
         _b = badge
-        def _do(b=_b):
+        _p = self.page
+        def _do(b=_b, p=_p):
             try:
                 b.update()
+            except Exception:
+                pass
+            try:
+                p.update()
             except Exception:
                 pass
         self._schedule_ui(_do)
@@ -734,12 +749,37 @@ class ClientApp:
                 break
             self._show_snackbar(msg, is_error)
 
+    def _drain_page_refreshes(self):
+        any_refresh = False
+        while True:
+            try:
+                self.client.page_refresh_queue.get_nowait()
+                any_refresh = True
+            except queue.Empty:
+                break
+        if not any_refresh:
+            return
+        # Marketplace has its own live monitor; page.go() there restarts threads and
+        # causes download races that drop cards / leave images blank.
+        if self.page.route == "/marketplace":
+            return
+        async def _go():
+            try:
+                self.page.go(self.page.route)
+            except Exception:
+                pass
+        try:
+            self.page.run_task(_go)
+        except Exception:
+            pass
+
     def _start_notification_monitor(self):
         def _monitor():
             while True:
                 time.sleep(0.4)
                 self._consume_notification_queue()
                 self._drain_push_snackbars()
+                self._drain_page_refreshes()
         threading.Thread(target=_monitor, daemon=True).start()
 
     def drain_asset_events(self):
@@ -1019,14 +1059,14 @@ class ClientApp:
             entry if isinstance(entry, dict) else {"id": str(entry), "version": 1}
             for entry in resp.get("ids", [])
         ]
-        # Evict cached FOR_SALE assets that are no longer in the server's marketplace list
+        # Evict cached marketplace assets that are no longer in the server's marketplace list
         server_ids = {e["id"] for e in entries if isinstance(e, dict)}
         cache = self._image_cache
         if cache:
             for aid, meta in list(cache._metadata.items()):
                 if aid == "balance":
                     continue
-                if isinstance(meta, dict) and meta.get("asset_status") == "FOR_SALE" and aid not in server_ids:
+                if isinstance(meta, dict) and meta.get("asset_status") in ("MINTED", "LISTED") and aid not in server_ids:
                     cache.invalidate(aid)
         return entries
 
@@ -1044,7 +1084,7 @@ class ClientApp:
                     cost=float(entry.get("cost", 0.0)),
                     created_at=str(entry.get("created_at", "")),
                     public_key=str(entry.get("public_key", "")),
-                    asset_status=str(entry.get("asset_status", "PENDING")),
+                    asset_status=str(entry.get("asset_status", "UPLOADED")),
                     version=int(entry.get("version", 1)),
                 )
             init_meta, raw = self.client.download_asset(asset_id)
@@ -1060,7 +1100,7 @@ class ClientApp:
                 "cost": float(init_meta.get("cost", 0.0)),
                 "created_at": str(init_meta.get("created_at", "")),
                 "public_key": str(init_meta.get("public_key", "")),
-                "asset_status": str(init_meta.get("asset_status", "PENDING")),
+                "asset_status": str(init_meta.get("asset_status", "UPLOADED")),
             }
             self.image_cache.store(asset_id, file_type, server_version, meta_to_store, raw)
             return MarketplaceItem(
@@ -1108,6 +1148,12 @@ class ClientApp:
             if "gateway" in str(exc).lower():
                 self._set_gateway_offline()
             raise
+
+    def clear_notifications(self):
+        try:
+            self.client._request({"type": "CLEAR_NOTIFICATIONS", "username": self.state.username or ""})
+        except Exception:
+            pass
 
     def delete_asset(self, asset_id: str):
         self._require_auth()
@@ -1190,7 +1236,7 @@ class ClientApp:
                     "description": description,
                     "file_type": file_type,
                     "cost": float(cost),
-                    "asset_status": "PENDING",
+                    "asset_status": "UPLOADED",
                     "public_key": self.wallet_session.public_key,
                 }
                 self.image_cache.store(asset_id, file_type, 1, meta_to_store, file_bytes)
