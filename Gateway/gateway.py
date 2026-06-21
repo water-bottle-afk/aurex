@@ -1,16 +1,3 @@
-"""
-gateway.py — the Aurex gateway server.
-
-Sits between the marketplace server and the blockchain nodes.  Its job is to:
-  - relay buy/sell/upload/unlist requests from the server to all nodes
-  - validate mined blocks before broadcasting them to the rest of the network
-  - deduplicate transactions so the same tx can't be mined twice
-  - route balance queries to the node with the longest chain
-  - run a UDP server so nodes can discover the gateway by broadcast
-
-The gateway itself holds no wallet and writes no user data — it is purely a
-routing and validation layer.
-"""
 __author__ = "Nadav"
 
 import os
@@ -22,7 +9,6 @@ import json
 import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -73,12 +59,12 @@ class GatewayServer:
         self.udp_service = UDPServer("0.0.0.0", GATEWAY_UDP_PORT, GATEWAY_IP, GATEWAY_BLOCKCHAIN_PORT)
 
         self.nodes_lock = threading.Lock()
-        self.nodes: dict[tuple[str, int], dict[str, Any]] = {}
+        self.nodes = {}
 
         # TX_ID dedup cache — prevents the same transaction from being processed twice.
-        self.seen_tx_ids: set[str] = set()
-        # Asset-level mint dedup — populated in-memory from node on startup (no local file).
-        self.seen_minted_asset_ids: set[str] = set()
+        self.seen_tx_ids = set()
+        # Asset-level mint dedup — populated in-memory from node on startup.
+        self.seen_minted_asset_ids = set()
 
         self.gateway_operations = {
             "buy_asset": self.tx_request_buy,
@@ -142,7 +128,7 @@ class GatewayServer:
     def log_event(self, message: str, **_extra):
         self.logger.info(message)
 
-    def normalize_type(self, value: Any) -> str:
+    def normalize_type(self, value) -> str:
         return str(value or "").strip().lower()
 
     def handle_minted_ids_response(self, request: dict, comm=None):
@@ -247,10 +233,10 @@ class GatewayServer:
             except Exception as exc:
                 self.log_event(f"Node send failed {addr[0]}:{addr[1]}: {exc}", status="warning")
 
-    def canonical_json_bytes(self, payload: dict[str, Any]) -> bytes:
+    def canonical_json_bytes(self, payload: dict) -> bytes:
         return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
-    def verify_user_signature(self, public_key_hex: str, payload: dict[str, Any], signature_hex: str) -> bool:
+    def verify_user_signature(self, public_key_hex: str, payload: dict, signature_hex: str) -> bool:
         try:
             pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), bytes.fromhex(public_key_hex))
             pub.verify(bytes.fromhex(signature_hex), self.canonical_json_bytes(payload), ec.ECDSA(hashes.SHA256()))
@@ -258,7 +244,7 @@ class GatewayServer:
         except (InvalidSignature, ValueError, TypeError):
             return False
 
-    def verify_block(self, block: dict[str, Any], label: str = "") -> tuple[bool, str]:
+    def verify_block(self, block: dict, label: str = "") -> tuple[bool, str]:
         """Validate a mined block: hash integrity, PoW target, and ECDSA signature if present.
 
         Chain continuity (index / prev_hash) is intentionally not checked here —

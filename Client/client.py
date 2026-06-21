@@ -1,20 +1,4 @@
-from __future__ import annotations
-
-"""
-client.py — the Aurex desktop client.
-
-ClientApp  is the main Flet controller: it owns all app state, talks to the
-server through Client class, and drives page navigation.
-
-Client class  wraps the raw RSA+AES connection and routes push events (balance
-updates, notifications, asset sold/unlisted) into separate queues so the UI can
-poll them at its own pace without blocking on the socket.
-
-ImageCache  stores downloaded asset images on disk per user so we don't fetch
-the same file twice.  It also persists the wallet balance between sessions.
-"""
 __author__ = "Nadav"
-
 
 import base64
 import json
@@ -275,21 +259,21 @@ class Client:
         self._comm = None
         self._receiver_thread = None
         self._stop_event = threading.Event()
-        self._response_queue: "queue.Queue[dict | None]" = queue.Queue()
-        self.notification_queue: "queue.Queue[str]" = queue.Queue()
-        self.asset_sold_queue: "queue.Queue[str]" = queue.Queue()
-        self.asset_removed_queue: "queue.Queue[str]" = queue.Queue()
-        self.asset_unlisted_queue: "queue.Queue[str]" = queue.Queue()
-        self.asset_listed_queue: "queue.Queue[str]" = queue.Queue()   # UPLOADED → LISTED (FULLY_UPLOADED event)
-        self.hide_assets_queue: "queue.Queue[str]" = queue.Queue()    # HIDE_ASSETS_OF_USER silent removal
-        self.balance_queue: "queue.Queue[float]" = queue.Queue()
-        self.bought_asset_queue: "queue.Queue[str]" = queue.Queue()
-        self.buy_success_queue: "queue.Queue[str]" = queue.Queue()   # feeds My Assets live update
-        self.push_snackbar_queue: "queue.Queue[tuple[str, bool]]" = queue.Queue()
-        self.page_refresh_queue: "queue.Queue[None]" = queue.Queue()  # signals ClientApp to reload current page
-        self.gateway_online_queue: "queue.Queue[None]" = queue.Queue()
+        self._response_queue = queue.Queue()
+        self.notification_queue = queue.Queue()
+        self.asset_sold_queue = queue.Queue()
+        self.asset_removed_queue = queue.Queue()
+        self.asset_unlisted_queue = queue.Queue()
+        self.asset_listed_queue = queue.Queue()     # UPLOADED → LISTED (FULLY_UPLOADED event)
+        self.hide_assets_queue = queue.Queue()      # HIDE_ASSETS_OF_USER silent removal
+        self.balance_queue = queue.Queue()
+        self.bought_asset_queue = queue.Queue()
+        self.buy_success_queue = queue.Queue()      # feeds My Assets live update
+        self.push_snackbar_queue = queue.Queue()
+        self.page_refresh_queue = queue.Queue()     # signals ClientApp to reload current page
+        self.gateway_online_queue = queue.Queue()
 
-        self._push_handlers: dict[str, Any] = {
+        self._push_handlers = {
             "NOTIFICATION":       self._on_notification,
             "BUY_SUCCESS":        self._on_buy_success,
             "BUY_FAILED":         self._on_buy_failed,
@@ -406,7 +390,7 @@ class Client:
                 raise RuntimeError(f"Cannot connect to server: {_e}")
             self._transport.contact_with_RSA()
             self._comm = self._transport.communication
-            self._comm.start_async(default_encryption=True)
+            self._comm.start_async()
             self._stop_event.clear()
             self._receiver_thread = threading.Thread(target=self._recv_dispatch_loop, daemon=True)
             self._receiver_thread.start()
@@ -597,11 +581,11 @@ class ClientApp:
         self.page.on_route_change = self._on_route_change
         self.page.on_view_pop = self._on_view_pop
         self._image_cache: ImageCache | None = None
-        self.sold_asset_ids: set[str] = set()
-        self.removed_asset_ids: set[str] = set()
-        self.unlisted_asset_ids: set[str] = set()
-        self.listed_asset_ids: set[str] = set()   # assets that moved from UPLOADED → LISTED
-        self.recently_bought_ids: set[str] = set()   # assets the user just purchased
+        self.sold_asset_ids = set()
+        self.removed_asset_ids = set()
+        self.unlisted_asset_ids = set()
+        self.listed_asset_ids = set()       # assets that moved from UPLOADED → LISTED
+        self.recently_bought_ids = set()    # assets the user just purchased
         self.gateway_online: bool | None = None   # None=unknown, True=online, False=offline
         # Refs to live header controls — updated by background monitors
         self._balance_text: ft.Text | None = None

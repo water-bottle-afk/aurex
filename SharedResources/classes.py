@@ -1,13 +1,3 @@
-"""
-classes.py — shared data models and networking primitives used across the whole project.
-
-Anything that more than one module needs to import lives here:
-  Communication  — encrypted TCP framing (AES-CBC, async queues)
-  RSA_Client/Server — RSA key-exchange wrappers
-  UDPServer/Client  — broadcast discovery helpers
-  Transaction, Block — blockchain data structures
-  MarketplaceItem    — the asset record shared by server, gateway, and client
-"""
 __author__ = "Nadav"
 
 import time
@@ -33,12 +23,10 @@ from cryptography.hazmat.primitives.serialization import load_pem_parameters, lo
 from SharedResources.logging import Logger, CYAN, RESET
 
 class Communication:
-    """For recv/sending messages over a socket with optional AES-CBC encryption."""
     @staticmethod
     def _format_log_payload(d: dict) -> str:
-        """Format a message dict for logging: type field first and cyan-coloured, rest in insertion order."""
         type_val = d.get("type", "")
-        parts: list[str] = []
+        parts = []
         if "type" in d:
             parts.append(f'"type": "{CYAN}{type_val}{RESET}"')
         for k, v in d.items():
@@ -56,9 +44,9 @@ class Communication:
         label = self.peer_label or "Peer"
         payload = self._format_log_payload(data) if isinstance(data, dict) else str(data)
         if dirct == 'recv':
-            self.Print(f"Recv From {label} at {addr} <<< {payload}")
+            self.logger.info(f"Recv From {label} at {addr} <<< {payload}")
         else:
-            self.Print(f"Sent to {label} at {addr} >>> {payload}")
+            self.logger.info(f"Sent to {label} at {addr} >>> {payload}")
 
     def __init__(self, sock, name="", peer_label=""):
         self.sock = sock
@@ -68,14 +56,13 @@ class Communication:
         self.recv_lock = threading.Lock()   # guards concurrent recv_one_message calls
         self.lock = self.send_lock          # backward-compat alias
         self.logger = Logger(name or __file__)
-        self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
         self.name = name
         self.peer_label = peer_label
         self.AES_key = None
 
         self.user = None
-        self.msg_queue: "queue.Queue[object]" = queue.Queue()
-        self.send_queue: "queue.Queue[tuple[dict, bool | None] | None]" = queue.Queue()
+        self.msg_queue = queue.Queue()
+        self.send_queue = queue.Queue()
         self.async_running = False
         self.async_recv_thread = None
         self.async_send_thread = None
@@ -83,7 +70,6 @@ class Communication:
         self.default_encryption = True
         self.close_marker = object()
 
-    #used for server's communication
     def set_user(self, user):
         self.user = user
         
@@ -91,29 +77,19 @@ class Communication:
     def connect(self, ip, port):
         self.sock.connect((ip, port))
 
-    # Function to encrypt data using AES CBC mode
     def AES_encrypt(self, plaintext: bytes, key: bytes, iv: bytes) -> bytes:
-        # Pad the plaintext to block size
         padder = PADDING.PKCS7(AES.block_size).padder()
-        padded_plaintext = padder.update(plaintext) + padder.finalize()
-
-        # Create cipher and encrypt
+        padded = padder.update(plaintext) + padder.finalize()
         cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(padded_plaintext) + encryptor.finalize()
-        return ciphertext
+        enc = cipher.encryptor()
+        return enc.update(padded) + enc.finalize()
 
-    # Function to decrypt data using AES CBC mode
     def AES_decrypt(self, ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
-        # Create cipher and decrypt
         cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        decryptor = cipher.decryptor()
-        padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-        # Unpad the plaintext
+        dec = cipher.decryptor()
+        padded = dec.update(ciphertext) + dec.finalize()
         unpadder = PADDING.PKCS7(AES.block_size).unpadder()
-        plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
-        return plaintext
+        return unpadder.update(padded) + unpadder.finalize()
 
 
     def sanitize_for_log(self, d: dict) -> dict:
@@ -126,28 +102,18 @@ class Communication:
         return out
 
     def send_one_message(self, data: dict, encryption=True):
-        """Serialise *data* to JSON, optionally encrypt, and send with a 2-byte length header."""
         data_json = json.dumps(data, sort_keys=True).encode()
-
         if encryption:
-            new_iv = self.generate_iv()
-            # prepend IV so the receiver can decrypt without out-of-band state
-            message = new_iv + self.AES_encrypt(data_json, self.AES_key, new_iv)
+            iv = self.generate_iv()
+            message = iv + self.AES_encrypt(data_json, self.AES_key, iv)
         else:
             message = data_json
-
-        # pack length as big-endian unsigned short then flush the whole thing atomically
         with self.lock:
             self.sock.sendall(struct.pack('!H', len(message)) + message)
         self.log('send', self.sanitize_for_log(data))
 
 
     def recv_one_message(self, encryption=True):
-        """Read the next framed message and return it as a dict (or None on disconnect).
-
-        The recv_lock ensures that if two threads ever call this on the same
-        Communication object the length-header + payload bytes won't interleave.
-        """
         with self.recv_lock:
             len_section = self.recv_amount(2)
             if not len_section:
@@ -172,9 +138,6 @@ class Communication:
             return None
 
     def start_async(self, default_encryption=True):
-        """Switch to duplex queue mode: a background recv thread feeds msg_queue,
-        and a background send thread drains send_queue.  Call recv_async / send_async
-        after this instead of the blocking one-shot variants."""
         if self.async_running:
             return
         self.default_encryption = bool(default_encryption)
@@ -250,8 +213,7 @@ class Communication:
 
     @staticmethod
     def generate_iv():
-        iv = os.urandom(16)  # 16 bytes for CBC mode
-        return iv
+        return os.urandom(16)
 
     @staticmethod
     def generate_AES_key():
@@ -260,7 +222,7 @@ class Communication:
 
     def close(self):
         self.stop_async()
-        self.Print(f"Closes {self.name} socket!")
+        self.logger.info(f"Closes {self.name} socket!")
         self.sock.close()
 
 class RSA_Client:
@@ -290,12 +252,6 @@ class RSA_Client:
 
 
     def contact_with_RSA(self):
-        """Perform the RSA key-exchange handshake with the server.
-
-        Asks for the server's public key, encrypts a freshly-generated AES key
-        with it, sends the encrypted key, and waits for the OK.  After this the
-        communication object is ready for AES-encrypted traffic.
-        """
         msg = {"type": "SEND_PUBLIC_KEY"}
         self.communication.send_one_message(msg, False)
         answer = self.communication.recv_one_message(encryption=False)
@@ -447,7 +403,7 @@ class RSA_Server:
 # CLASS UDP SERVER
 
 class UDPServer:
-    """For discovery of the gateway by blockchain nodes: listens for "WHRSV" broadcasts and replies with the server's IP/port."""
+    """Listens for "WHRSV" broadcasts from nodes and replies with gateway IP/port."""
 
     def __init__(self, self_ip, self_port, srv_ip, srv_port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -455,10 +411,8 @@ class UDPServer:
         self.port = self_port
         self.srv_ip = srv_ip
         self.srv_port = srv_port
-        self.message_to_send = f"SRVAT|{srv_ip}|{str(srv_port)}"
-        self.message_to_send = self.message_to_send.encode()
+        self.message_to_send = f"SRVAT|{srv_ip}|{str(srv_port)}".encode()
         self.logger = Logger(__file__)
-        self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
 
     def run(self):
         try:
@@ -466,48 +420,42 @@ class UDPServer:
             while True:
                 bin_data, addr = self.sock.recvfrom(1024)
                 if bin_data == b"WHRSV":
-                    self.Print(f"Recv From Bnode at {addr[0]}:{addr[1]} <<< WHRSV")
+                    self.logger.info(f"Recv From Bnode at {addr[0]}:{addr[1]} <<< WHRSV")
                     self.sock.sendto(self.message_to_send, addr)
-                    self.Print(f"Sent to Bnode at {addr[0]}:{addr[1]} >>> {self.message_to_send.decode()}")
+                    self.logger.info(f"Sent to Bnode at {addr[0]}:{addr[1]} >>> {self.message_to_send.decode()}")
         except OSError as e:
-            self.Print(f"CONNECTION ERROR! {e}", 50)
+            self.logger.error(f"CONNECTION ERROR! {e}")
         except Exception as e:
-            self.Print(f"ERROR! {e}", 50)
+            self.logger.error(f"ERROR! {e}")
 
 
 
 
 class UDPClient:
-    """For discovery of the gateway by blockchain nodes: broadcasts "WHRSV" and waits for the server's reply with its IP/port."""
+    """Broadcasts "WHRSV" and waits for the gateway to reply with its IP/port."""
     def __init__(self, udp_srv_port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        # in order to send broadcast msgs (sol -> low level socket, so=socket option, val1  = enable)
-
         self.udp_srv_port = udp_srv_port
         self.broadcast_ip = "255.255.255.255"
         self.tcp_ip = None
         self.tcp_port = None
         self.logger = Logger(__file__)
-        self.Print = lambda *args: self.logger.info(" ".join(str(a) for a in args))
 
     def run(self):
         while self.tcp_ip is None:
-            message = b"WHRSV"
-            self.sock.sendto(message, (self.broadcast_ip, self.udp_srv_port))  # broadcast msg
+            self.sock.sendto(b"WHRSV", (self.broadcast_ip, self.udp_srv_port))
             bin_data, addr = self.sock.recvfrom(1024)
-
-            self.Print(f"UDP client received raw info from {addr}")
-            self.Print(bin_data, 10)
+            self.logger.info(f"UDP client received raw info from {addr}")
             try:
-                query, tcp_ip, tcp_port = bin_data.decode().split('|')
+                _, tcp_ip, tcp_port = bin_data.decode().split('|')
                 tcp_port = int(tcp_port)
-                self.Print(f"Server's At {tcp_ip}:{tcp_port}")
+                self.logger.info(f"Server's At {tcp_ip}:{tcp_port}")
                 self.tcp_port = tcp_port
                 self.tcp_ip = tcp_ip
                 break
             except Exception as e:
-                self.Print(f"UDP client Error: {e}")
+                self.logger.warning(f"UDP client Error: {e}")
         self.sock.close()
         return self.tcp_ip, self.tcp_port
     

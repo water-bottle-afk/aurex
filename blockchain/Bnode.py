@@ -12,9 +12,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-# Adds the root folder to enable imports from SharedResources
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from SharedResources.classes import RSA_Client, RSA_Server
@@ -28,13 +26,8 @@ from SharedResources.exceptions import (
 )
 
 
-def _mine_block(block_template: dict, difficulty: int,
-                stop_event: "mp.Event", result_queue: "mp.Queue"):
-    """Standalone PoW worker run inside a separate Process.
-
-    Must live at module level so Python's 'spawn' start method (Windows) can
-    pickle it.  Puts ("found", block) or ("aborted", None) into result_queue.
-    """
+def _mine_block(block_template, difficulty, stop_event, result_queue):
+    # Must live at module level so Windows 'spawn' can pickle it.
     target = "0" * difficulty
     block = dict(block_template)
     block["nonce"] = 0
@@ -49,7 +42,6 @@ def _mine_block(block_template: dict, difficulty: int,
     result_queue.put(("aborted", None))
 
 
-# Canonical key order for blocks and transactions persisted to the ledger.
 _BLOCK_KEYS = ("index", "prev_hash", "timestamp", "tx", "nonce", "difficulty", "hash")
 _TX_KEYS = (
     "type", "tx_id", "asset_id",
@@ -57,14 +49,13 @@ _TX_KEYS = (
     "img_hash", "timestamp",
 )
 
-def _canon_block(block: dict) -> dict:
-    """Return block with keys in canonical order so the ledger file is always consistent."""
+def _canon_block(block):
     tx_raw = block.get("tx") or {}
     tx_out = {k: tx_raw[k] for k in _TX_KEYS if k in tx_raw}
     for k in tx_raw:
         if k not in tx_out:
             tx_out[k] = tx_raw[k]
-    out: dict = {}
+    out = {}
     for k in _BLOCK_KEYS:
         if k == "tx":
             out["tx"] = tx_out
@@ -77,19 +68,6 @@ def _canon_block(block: dict) -> dict:
 
 
 class BlockchainNode:
-    """
-Bnode.py — a single Aurex blockchain node.
-
-Each node:
-  1. Discovers the gateway via UDP broadcast
-  2. Registers itself with the gateway and receives mining tasks
-  3. Mines PoW blocks and broadcasts them back through the gateway
-  4. Syncs its ledger and balance table with peers when it falls behind
-
-Multiple nodes can run simultaneously; the gateway validates mined blocks and
-broadcasts the winner to all other nodes so they stop mining and move on.
-"""
-
     CHUNK_SIZE = 8192
 
     def __init__(self, ip: str, port: int, difficulty: int):
@@ -109,13 +87,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         )
         self.server_for_peers.handle_client = self.handle_peer_connection
 
-        # Resolve effective bind values (port may be OS-assigned when 0).
         self.ip, self.port = self.server_for_peers.sock.getsockname()
         self.ip = str(self.ip)
         self.port = int(self.port)
         self.node_id = f"node_{self.ip}_{self.port}"
 
-        # Node local storage per node_<ip>_<port>/
         self.node_dir = self.base_dir / self.node_id
         self.node_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = self.node_dir / "ledger.json"
@@ -127,15 +103,15 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self.lock = threading.RLock()
         self._node_stop_event = threading.Event()   # shuts down the whole node
         self._mining_stop_event = mp.Event()        # aborts the current mining task
-        self._mining_stop_peer: str = ""            # address of the peer that triggered the last stop
-        self._current_miner: "mp.Process | None" = None
-        self._pending_mint_ids: set[str] = set()    # asset_ids currently being mined (dedup guard)
+        self._mining_stop_peer = ""
+        self._current_miner = None
+        self._pending_mint_ids = set()
 
-        self.chain: list[dict[str, Any]] = []
-        self.balances: dict[str, float] = {}
-        self.pending_txs: list[dict[str, Any]] = []
+        self.chain = []
+        self.balances = {}
+        self.pending_txs = []
 
-        self.gateway_client: RSA_Client | None = None
+        self.gateway_client = None
         self.gateway_comm = None
 
         self.load_local_state()
@@ -143,10 +119,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
     # -------- lifecycle --------
 
     def start(self):
-        """
-        Start the node: connect to the gateway, start the peer-server thread,
-        then block until ``stop()`` is called.
-        """
         self.connect_to_gateway()
         threading.Thread(target=self.server_for_peers.start, daemon=True).start()
         self.logger.info(f"[{self.node_id}] listening for peers at {self.ip}:{self.port}")
@@ -154,28 +126,17 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             time.sleep(0.2)
 
     def stop(self):
-        """Signal the node's main loop and all blocking operations to exit."""
         self._node_stop_event.set()
         self._mining_stop_event.set()
         if self._current_miner and self._current_miner.is_alive():
             self._current_miner.terminate()
 
     def discover_gateway_once(self):
-        """
-        Send a single UDP broadcast to discover the gateway and return its address.
-
-        Broadcasts ``WHRSV`` on the local network and waits up to
-        ``BROADCAST_DISCOVERY_FREQUENCY`` seconds for a ``SRVAT|ip|port`` reply.
-
-        Returns:
-            (gateway_ip, gateway_port) tuple, or None if no response received.
-        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.settimeout(float(BROADCAST_DISCOVERY_FREQUENCY))
             sock.sendto(b"WHRSV", ("255.255.255.255", int(GATEWAY_UDP_PORT)))
-            
             logger = Logger("Bnode-Discovery")
             logger.debug(f"[{self.node_id}] sent gateway discovery WHRSV to {"255.255.255.255", int(GATEWAY_UDP_PORT)}")
             raw, _ = sock.recvfrom(1024)
@@ -189,14 +150,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             sock.close()
 
     def connect_to_gateway(self):
-        """
-        Discover and establish an encrypted RSA connection to the gateway.
-
-        Retries with ``BROADCAST_DISCOVERY_FREQUENCY`` second delays until a
-        gateway responds.  On success, starts the ``_listen_gateway_loop``
-        thread and calls ``register_blockchain_node`` to announce this node.
-        Blocks until a connection is established (or ``stop()`` is called).
-        """
         while not self._node_stop_event.is_set():
             discovered = self.discover_gateway_once()
             if not discovered:
@@ -236,8 +189,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             return default
         try:
             with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data
+                return json.load(f)
         except Exception:
             return default
 
@@ -245,39 +197,30 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _deduplicate_chain(self, raw: list) -> list:
-        """Return a clean chain with at most one block per index.
-
-        Old ledger files may contain competing blocks at the same index (a side-effect
-        of the racing-miner bug).  Keep the first occurrence of each index so the
-        canonical chain is a strictly ascending sequence 0, 1, 2, …
-        Balances are then rebuilt from this clean chain so they reflect reality.
-        """
-        seen: set[int] = set()
-        clean: list[dict] = []
+    def _deduplicate_chain(self, raw):
+        """Remove competing blocks at the same index — keep first occurrence."""
+        seen = set()
+        clean = []
         for block in raw:
             idx = int(block.get("index", -1))
             if idx < 0 or idx in seen:
                 continue
             seen.add(idx)
             clean.append(block)
-        # Sort so 0,1,2,... even if file was out of order
         clean.sort(key=lambda b: int(b.get("index", 0)))
         return clean
 
-    def _rebuild_balances(self, chain: list) -> dict:
-        """Recompute the balance table from scratch by replaying BUY blocks in the chain."""
-        balances: dict[str, float] = {}
+    def _rebuild_balances(self, chain):
+        balances = {}
         for block in chain:
             tx = block.get("tx") or {}
             if str(tx.get("type", "")).upper() == "BUY":
-                buyer_pk = str(tx.get("user_public_key") or "")
-                seller_pk = str(tx.get("seller_public_key") or "")
-                price = float(tx.get("price") or 0.0)
-                if buyer_pk and price > 0:
-                    balances[buyer_pk] = round(balances.get(buyer_pk, 0.0) - price, 8)
-                if seller_pk and price > 0:
-                    balances[seller_pk] = round(balances.get(seller_pk, 0.0) + price, 8)
+                buyer_pk = tx.get("user_public_key", "")
+                seller_pk = tx.get("seller_public_key", "")
+                price = float(tx.get("price", 0.0))
+                if buyer_pk and seller_pk and price > 0:
+                    balances[buyer_pk] = round(balances.get(buyer_pk, 0.0) - price, 3)
+                    balances[seller_pk] = round(balances.get(seller_pk, 0.0) + price, 3)
         return balances
 
     def load_local_state(self):
@@ -288,17 +231,12 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             clean_chain = self._deduplicate_chain(raw_chain)
 
             if len(clean_chain) < len(raw_chain):
-                # Ledger had duplicate-index blocks — rebuild balances from the clean chain.
-                # All users start at INITIAL_BALANCE (set by CREATE_BALANCE on signup, always
-                # uses the constant).  Apply BUY deltas from the canonical chain only.
                 self.logger.warning(
                     f"[{self.node_id}] load: ledger had {len(raw_chain)} blocks with duplicates; "
                     f"deduped to {len(clean_chain)}; rebuilding balances"
                 )
                 saved = {k: float(v) for k, v in raw_balances.items()} if isinstance(raw_balances, dict) else {}
-                # Seed every known pk at the initial balance
-                merged: dict[str, float] = {pk: float(INITIAL_BALANCE) for pk in saved}
-                # Re-apply only the canonical BUY deltas
+                merged = {pk: float(INITIAL_BALANCE) for pk in saved}
                 for pk, delta in self._rebuild_balances(clean_chain).items():
                     merged[pk] = round(merged.get(pk, float(INITIAL_BALANCE)) + delta, 8)
                 self.chain = clean_chain
@@ -311,7 +249,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             self.save_json(self.balances_path, self.balances)
 
     def persist_local_state(self):
-        """Write the current in-memory chain and balances to disk atomically."""
         with self.lock:
             self.save_json(self.ledger_path, [_canon_block(b) for b in self.chain])
             self.save_json(self.balances_path, self.balances)
@@ -319,44 +256,21 @@ broadcasts the winner to all other nodes so they stop mining and move on.
     # -------- blockchain logic --------
 
     def get_balance(self, userpk: str) -> float:
-        """
-        Return the current balance for a public key.
-
-        Args:
-            userpk: Hex-encoded public key to look up.
-
-        Returns:
-            Float balance (0.0 if the key has never been seen).
-        """
         with self.lock:
             return float(self.balances.get(userpk, 0.0))
 
     def last_hash(self) -> str:
-        """Return the hash of the last block, or 64 zeros for an empty chain."""
         if not self.chain:
             return "0" * 64
         return str(self.chain[-1].get("hash", "0" * 64))
 
-    def block_hash(self, block: dict[str, Any]) -> str:
-        """
-        Compute the SHA-256 hash of a block dict.
-
-        Keys are sorted and whitespace is eliminated so the same logical block
-        always produces the same hash regardless of insertion order.
-
-        Args:
-            block: Block dict (must NOT already contain a 'hash' key when
-                   computing the target hash for PoW).
-
-        Returns:
-            64-character lowercase hex digest.
-        """
+    def block_hash(self, block) -> str:
         content = json.dumps(block, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(content).hexdigest()
 
-    def validate_tx(self, tx: dict[str, Any]):
-        sender = str(tx.get("user_public_key") or "")
-        amount = float(tx.get("price") or 0.0)
+    def validate_tx(self, tx):
+        sender = tx.get("user_public_key", "")
+        amount = float(tx.get("price", 0.0))
         if amount < 0:
             return False
         if sender and sender in self.balances and self.get_balance(sender) < amount:
@@ -364,7 +278,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         return True
 
     def _is_tx_in_chain(self, tx_id: str) -> bool:
-        """Return True if a transaction with this tx_id already exists in the local chain."""
         if not tx_id:
             return False
         with self.lock:
@@ -373,17 +286,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 for b in self.chain
             )
 
-    def mine(self, transaction: dict[str, Any]):
-        """Perform PoW mining in a separate Process (non-blocking for the gateway listener).
-
-        Spawns a multiprocessing.Process running _mine_block so the GIL never
-        blocks the gateway listener thread.  The listener can abort mining only
-        when BROADCAST_TX_TO_VERIFY arrives and passes validation (chain advanced).
-        mine() returns None on abort so the caller can check whether the tx was
-        already committed and either discard or retry.
-
-        Returns the mined block dict on success, or None if aborted.
-        """
+    def mine(self, transaction):
         if not self.validate_tx(transaction):
             self.logger.warning(
                 f"[{self.node_id}] mine: tx validation failed for "
@@ -403,7 +306,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "difficulty": self.difficulty,
         }
 
-        result_queue: mp.Queue = mp.Queue()
+        result_queue = mp.Queue()
         self._mining_stop_event.clear()
         miner = mp.Process(
             target=_mine_block,
@@ -413,7 +316,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self._current_miner = miner
         miner.start()
 
-        # Block this thread until the miner finishes or the node shuts down
         status, block = None, None
         while not self._node_stop_event.is_set():
             try:
@@ -438,8 +340,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             self.logger.warning(f"[{self.node_id}] mine: abandoned — peer {peer} already mined it")
             return None
 
-        # If the stop signal arrived just as our miner found the nonce, another winner
-        # was already accepted. Discard our block so we don't write a duplicate.
         if self._mining_stop_event.is_set():
             peer = self._mining_stop_peer or "unknown"
             self.logger.warning(
@@ -451,16 +351,12 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         self.add_block(block)
         return block
 
-    def add_block(self, block: dict[str, Any]):
+    def add_block(self, block):
         """Append a validated block to the chain and update the balance table."""
         tx = block.get("tx") or {}
         tx_type = str(tx.get("type", "")).upper()
 
         with self.lock:
-            # Reject blocks that don't sit exactly at the end of our chain.
-            # A block already processed by mine() and then received again via broadcast,
-            # or a competing block whose peer won the race, must not be appended a second
-            # time — doing so would double-apply the balance deduction for BUY blocks.
             expected_index = len(self.chain)
             block_index = int(block.get("index", -1))
             if block_index != expected_index:
@@ -471,9 +367,9 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 return
 
             if tx_type == "BUY":
-                buyer_pk = str(tx.get("user_public_key") or "")
-                seller_pk = str(tx.get("seller_public_key") or "")
-                price = float(tx.get("price") or 0.0)
+                buyer_pk = tx.get("user_public_key", "")
+                seller_pk = tx.get("seller_public_key", "")
+                price = float(tx.get("price", 0.0))
                 if buyer_pk and price > 0:
                     self.balances[buyer_pk] = round(float(self.balances.get(buyer_pk, 0.0)) - price, 8)
                 if seller_pk and price > 0:
@@ -485,7 +381,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
     # -------- gateway communication --------
 
-    def send_gateway(self, msg: dict[str, Any]):
+    def send_gateway(self, msg):
         if not self.gateway_comm:
             return
         try:
@@ -504,61 +400,50 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         return self.ip
 
     def register_blockchain_node(self):
-        self.send_gateway(
-            {
-                "type": "REGISTER_BLOCKCHAIN_NODE",
-                "data": {"ip": self.advertised_ip(), "port": self.port, "chain_length": len(self.chain)},
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            }
-        )
+        self.send_gateway({
+            "type": "REGISTER_BLOCKCHAIN_NODE",
+            "data": {"ip": self.advertised_ip(), "port": self.port, "chain_length": len(self.chain)},
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
-    def notify_gateway(self, block: dict[str, Any]):
-        self.send_gateway(
-            {
-                "type": "BROADCAST_TX_TO_VERIFY",
-                "data": {
-                    "block": block,
-                    "publisher_chain_length": len(self.chain),
-                },
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            }
-        )
+    def notify_gateway(self, block):
+        self.send_gateway({
+            "type": "BROADCAST_TX_TO_VERIFY",
+            "data": {
+                "block": block,
+                "publisher_chain_length": len(self.chain),
+            },
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
-    def notify_buy_success(self, tx_data: dict[str, Any]):
-        self.send_gateway(
-            {
-                "type": "BUY_SUCCESS",
-                "data": tx_data,
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            }
-        )
+    def notify_buy_success(self, tx_data):
+        self.send_gateway({
+            "type": "BUY_SUCCESS",
+            "data": tx_data,
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
-    def notify_sell_success(self, tx_data: dict[str, Any]):
-        self.send_gateway(
-            {
-                "type": "SELL_SUCCESS",
-                "data": tx_data,
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            }
-        )
+    def notify_sell_success(self, tx_data):
+        self.send_gateway({
+            "type": "SELL_SUCCESS",
+            "data": tx_data,
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
     def send_balance(self, userpk: str):
-        self.send_gateway(
-            {
-                "type": "SEND_BALANCE",
-                "userpk": userpk,
-                "data": {"userpk": userpk, "balance": self.get_balance(userpk)},
-                "sender_ip": self.advertised_ip(),
-                "sender_port": self.port,
-            }
-        )
+        self.send_gateway({
+            "type": "SEND_BALANCE",
+            "userpk": userpk,
+            "data": {"userpk": userpk, "balance": self.get_balance(userpk)},
+            "sender_ip": self.advertised_ip(),
+            "sender_port": self.port,
+        })
 
-    def handle_gateway_message(self, msg: dict[str, Any]):
-        """Route an incoming gateway message to the right handler."""
+    def handle_gateway_message(self, msg):
         msg_type = str(msg.get("type", "")).strip().upper()
 
         # Mining is blocking, so it always runs in its own thread
@@ -567,16 +452,15 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "START_MINING":   self.handle_mint_request,
             "UNLIST_ASSET":   self.handle_unlist_request,
             "LIST_ASSET":     self.handle_list_request,
-            "TX_REQUEST_BUY": self.handle_tx_request_buy,  # mine() blocks — must not run in listen loop
+            "TX_REQUEST_BUY": self.handle_tx_request_buy,
         }
 
-        # Everything else is fast enough to handle inline
         inline_handlers = {
-            "TX_REQUEST_SELL":       self.handle_tx_request_sell,
+            "TX_REQUEST_SELL":        self.handle_tx_request_sell,
             "BROADCAST_TX_TO_VERIFY": self.handle_broadcast_tx_to_verify,
-            "CREATE_BALANCE":        self.handle_create_balance,
-            "GET_LEDGER":            self.handle_get_ledger_sync,
-            "GET_MINTED_IDS":        self.handle_get_minted_ids,
+            "CREATE_BALANCE":         self.handle_create_balance,
+            "GET_LEDGER":             self.handle_get_ledger_sync,
+            "GET_MINTED_IDS":         self.handle_get_minted_ids,
         }
 
         if msg_type in threaded_handlers:
@@ -592,26 +476,25 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             if msg.get("publisher_ip") and msg.get("publisher_port"):
                 self.handle_get_balance_sync(msg)
             else:
-                data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+                data = msg.get("data") or {}
                 userpk = msg.get("userpk") or data.get("userpk")
                 if userpk:
                     self.send_balance(str(userpk))
-            return
 
-    def tx_from_gateway_message(self, msg: dict[str, Any], tx_type: str):
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+    def tx_from_gateway_message(self, msg, tx_type: str):
+        data = msg.get("data") or {}
         # Client payload may be one level deeper inside a "data" key
-        payload = data.get("data") if isinstance(data.get("data"), dict) else data
+        payload = data.get("data") or data
 
         return {
             "type": tx_type,
             "tx_id": str(payload.get("tx_id") or f"{tx_type}-{int(time.time() * 1000)}"),
-            "asset_id": str(payload.get("asset_id") or ""),
-            "buyer": str(payload.get("buyer") or ""),
-            "price": float(payload.get("price") or 0.0),
-            "user_public_key": str(payload.get("public_key") or ""),
-            "seller_public_key": str(payload.get("seller_public_key") or ""),
-            "user_signature": str(payload.get("signature") or ""),
+            "asset_id": payload.get("asset_id", ""),
+            "buyer": payload.get("buyer", ""),
+            "price": float(payload.get("price", 0.0)),
+            "user_public_key": payload.get("public_key", ""),
+            "seller_public_key": payload.get("seller_public_key", ""),
+            "user_signature": payload.get("signature", ""),
             "timestamp": payload.get("timestamp") or datetime.now().isoformat(),
         }
 
@@ -642,7 +525,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 for b in self.chain
             )
 
-    def _mine_or_raise(self, tx: dict) -> dict:
+    def _mine_or_raise(self, tx) -> dict:
         block = self.mine(tx)
         if block is None:
             raise BlockchainError("Mining aborted or validation failed")
@@ -661,17 +544,14 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "timestamp": datetime.now().isoformat(),
         }
 
-    def handle_mint_request(self, msg: dict[str, Any]):
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        asset_id = str(data.get("asset_id", ""))
-        owner = str(data.get("owner", ""))
-        public_key = str(data.get("public_key", ""))
-        signature = str(data.get("signature", ""))
-        file_hash = str(data.get("file_hash", ""))
+    def handle_mint_request(self, msg):
+        data = msg.get("data") or {}
+        asset_id = data.get("asset_id", "")
+        owner = data.get("owner", "")
+        public_key = data.get("public_key", "")
+        signature = data.get("signature", "")
+        file_hash = data.get("file_hash", "")
 
-        # Reject if this asset was already minted in our local chain, or if another
-        # thread is currently mining it (prevents duplicate blocks when two
-        # UPLOAD_ASSET messages arrive before the first one finishes mining).
         try:
             self._require_asset_id(asset_id)
             with self.lock:
@@ -711,12 +591,12 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             with self.lock:
                 self._pending_mint_ids.discard(asset_id)
 
-    def handle_unlist_request(self, msg: dict[str, Any]):
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        asset_id = str(data.get("asset_id", ""))
-        owner = str(data.get("owner", ""))
-        public_key = str(data.get("public_key", ""))
-        signature = str(data.get("signature", ""))
+    def handle_unlist_request(self, msg):
+        data = msg.get("data") or {}
+        asset_id = data.get("asset_id", "")
+        owner = data.get("owner", "")
+        public_key = data.get("public_key", "")
+        signature = data.get("signature", "")
 
         if not asset_id:
             self.logger.warning(f"[{self.node_id}] UNLIST: missing asset_id, skipping")
@@ -754,13 +634,13 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "sender_port": self.port,
         })
 
-    def handle_list_request(self, msg: dict[str, Any]):
-        """Mine a LIST_ASSET tx for a previously-unlisted asset (re-listing it)."""
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        asset_id = str(data.get("asset_id", ""))
-        owner = str(data.get("owner", ""))
-        public_key = str(data.get("public_key", ""))
-        signature = str(data.get("signature", ""))
+    def handle_list_request(self, msg):
+        """Mine a LIST tx for re-listing a previously-unlisted asset."""
+        data = msg.get("data") or {}
+        asset_id = data.get("asset_id", "")
+        owner = data.get("owner", "")
+        public_key = data.get("public_key", "")
+        signature = data.get("signature", "")
 
         if not asset_id:
             self.logger.warning(f"[{self.node_id}] LIST_ASSET: missing asset_id, skipping")
@@ -798,17 +678,17 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             "sender_port": self.port,
         })
 
-    def _validate_buy_tx(self, tx: dict):
+    def _validate_buy_tx(self, tx):
         if not self.validate_tx(tx):
-            sender = str(tx.get("user_public_key") or tx.get("sender") or "")
-            price = float(tx.get("price") or tx.get("amount") or 0.0)
+            sender = tx.get("user_public_key", "")
+            price = float(tx.get("price", 0.0))
             raise ValidationError(
                 f"Insufficient balance: have {self.get_balance(sender):.2f} AUR, need {price:.2f} AUR"
             )
 
-    def handle_tx_request_buy(self, msg: dict[str, Any]):
+    def handle_tx_request_buy(self, msg):
         tx = self.tx_from_gateway_message(msg, "BUY")
-        asset_id = str(tx.get("asset_id") or "")
+        asset_id = tx.get("asset_id", "")
         try:
             self._validate_buy_tx(tx)
             if asset_id and self._is_double_buy(asset_id):
@@ -820,7 +700,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                     break
                 if self._node_stop_event.is_set():
                     return
-                # BUY abort: if this asset was purchased (by us or peer), stop; else retry
                 if self._is_double_buy(asset_id) or self._is_tx_in_chain(tx["tx_id"]):
                     self.logger.info(f"[{self.node_id}] BUY: {asset_id} already purchased by peer — discarding")
                     return
@@ -833,14 +712,14 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 "type": "BUY_FAILED",
                 "data": {
                     "asset_id": asset_id,
-                    "buyer": str(tx.get("buyer") or ""),
-                    "user_public_key": str(tx.get("user_public_key") or ""),
+                    "buyer": tx.get("buyer", ""),
+                    "user_public_key": tx.get("user_public_key", ""),
                     "message": str(e),
-                    "tx_id": str(tx.get("tx_id") or ""),
+                    "tx_id": tx.get("tx_id", ""),
                 },
             })
 
-    def handle_tx_request_sell(self, msg: dict[str, Any]):
+    def handle_tx_request_sell(self, msg):
         tx = self.tx_from_gateway_message(msg, "SELL")
         self.pending_txs.append(tx)
         block = self.mine(tx)
@@ -848,14 +727,14 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             self.notify_sell_success(tx)
             self.notify_gateway(block)
 
-    def handle_create_balance(self, msg: dict[str, Any]):
-        public_key = str(msg.get("public_key") or "")
+    def handle_create_balance(self, msg):
+        public_key = msg.get("public_key", "")
         if not public_key:
-            data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-            public_key = str(data.get("public_key") or "")
+            data = msg.get("data") or {}
+            public_key = data.get("public_key", "")
         if not public_key:
             return
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        data = msg.get("data") or {}
         target_balance = msg.get("balance", data.get("balance", INITIAL_BALANCE))
         try:
             target_balance = float(target_balance)
@@ -867,68 +746,61 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.persist_local_state()
 
     def _is_double_buy(self, asset_id: str) -> bool:
-        """Return True if the asset is currently held (most recent tx is BUY, not LIST/MINT).
+        """Return True if the asset is currently held (last relevant tx is BUY, not LIST/MINT).
 
-        A BUY followed by a LIST means the owner re-listed it — the next BUY must be allowed.
-        We track the last ownership-changing tx and only block if it was a BUY.
+        A BUY followed by a LIST means the owner re-listed — the next BUY must be allowed.
         """
-        last_relevant_type: str | None = None
+        last_relevant_type = None
         with self.lock:
             for b in self.chain:
                 tx = b.get("tx") or {}
-                if str(tx.get("asset_id") or "") != asset_id:
+                if tx.get("asset_id", "") != asset_id:
                     continue
                 tx_type = str(tx.get("type", "")).upper()
                 if tx_type in ("BUY", "LIST", "ASSET_MINT"):
                     last_relevant_type = tx_type
         return last_relevant_type == "BUY"
 
-    def handle_broadcast_tx_to_verify(self, msg: dict[str, Any]):
-        sender_ip = str(msg.get("sender_ip") or "")
-        sender_port = int(msg.get("sender_port") or 0)
+    def handle_broadcast_tx_to_verify(self, msg):
+        sender_ip = msg.get("sender_ip", "")
+        sender_port = int(msg.get("sender_port", 0))
         peer_label = f"{sender_ip}:{sender_port}"
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        publisher_chain_length = int(data.get("publisher_chain_length") or 0)
-        block = data.get("block") if isinstance(data.get("block"), dict) else {}
+        data = msg.get("data") or {}
+        publisher_chain_length = int(data.get("publisher_chain_length", 0))
+        block = data.get("block") or {}
         block_index = int(block.get("index", -1)) if block else -1
         my_len = len(self.chain)
         self.logger.info(f"[{self.node_id}] BROADCAST: verifying block index={block_index} from {peer_label} (their chain={publisher_chain_length}, ours={my_len})")
-        # Primary chain-gap check: publisher explicitly told us they are ahead
         if publisher_chain_length > my_len + 1:
             self.logger.warning(f"[{self.node_id}] BROADCAST: chain gap — {peer_label} is at len={publisher_chain_length}, we are at {my_len}; stopping mine to sync")
             self._mining_stop_peer = peer_label
             self._mining_stop_event.set()
-            self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, str(data.get("userpk") or ""))
+            self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, data.get("userpk", ""))
             return
-        # Fallback: block index alone shows we are lagging (catches missing/zero publisher_chain_length)
         if block and block_index > my_len:
             effective_len = publisher_chain_length if publisher_chain_length > 0 else block_index + 1
             self.logger.warning(f"[{self.node_id}] BROADCAST: block index={block_index} is ahead of our chain len={my_len} — stopping mine to sync with {peer_label}")
             self._mining_stop_peer = peer_label
             self._mining_stop_event.set()
-            self.ensure_local_state_or_fetch(sender_ip, sender_port, effective_len, str(data.get("userpk") or ""))
+            self.ensure_local_state_or_fetch(sender_ip, sender_port, effective_len, data.get("userpk", ""))
             return
         if block and block_index == my_len and str(block.get("prev_hash", "")) == self.last_hash():
-            # Double-buy protection: if we already have a BUY for this asset (our own mined block),
-            # the peer's BUY block is the canonical winner — sync from them to correct our chain.
             tx = block.get("tx") or {}
             tx_type = str(tx.get("type", "")).upper()
             if tx_type == "BUY":
-                asset_id = str(tx.get("asset_id") or "")
+                asset_id = tx.get("asset_id", "")
                 if asset_id and self._is_double_buy(asset_id):
                     self.logger.warning(f"[{self.node_id}] BROADCAST: competing BUY for {asset_id} from {peer_label} — syncing chain from winner to fix balances")
                     self._mining_stop_peer = peer_label
                     self._mining_stop_event.set()
-                    self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, str(data.get("userpk") or ""), force=True)
+                    self.ensure_local_state_or_fetch(sender_ip, sender_port, publisher_chain_length, data.get("userpk", ""), force=True)
                     return
-            # Valid block received: abort current mining task and accept new chain state
             self.logger.info(f"[{self.node_id}] BROADCAST: verification complete — accepted block index={block_index} from {peer_label}, abandoning mine")
             self._mining_stop_peer = peer_label
             self._mining_stop_event.set()
             self.add_block(block)
             self.register_blockchain_node()
         else:
-            # Stale block: index doesn't fit our chain or prev_hash doesn't match
             if block:
                 self.logger.warning(f"[{self.node_id}] BROADCAST: verification failed — block index={block_index} doesn't fit our chain len={my_len} (stale/diverged block from {peer_label})")
             else:
@@ -941,7 +813,6 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             return
         ledger_missing = (not self.ledger_path.exists()) or (self.ledger_path.stat().st_size == 0)
         balances_missing = (not self.balances_path.exists()) or (self.balances_path.stat().st_size == 0)
-        # > (not +1): a fresh node with 0 blocks vs publisher with 1 should always sync
         lagging = publisher_chain_length > len(self.chain)
         if force or ledger_missing or balances_missing or lagging:
             self.request_ledger_from_peer(publisher_ip, publisher_port)
@@ -949,14 +820,14 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 self.request_balance_from_peer(publisher_ip, publisher_port, userpk)
             self.register_blockchain_node()
 
-    def handle_get_ledger_sync(self, msg: dict[str, Any]):
-        publisher_ip = str(msg.get("publisher_ip") or "")
-        publisher_port = int(msg.get("publisher_port") or 0)
-        publisher_chain_length = int(msg.get("publisher_chain_length") or 0)
+    def handle_get_ledger_sync(self, msg):
+        publisher_ip = msg.get("publisher_ip", "")
+        publisher_port = int(msg.get("publisher_port", 0))
+        publisher_chain_length = int(msg.get("publisher_chain_length", 0))
         self.ensure_local_state_or_fetch(publisher_ip, publisher_port, publisher_chain_length, "")
 
-    def handle_get_minted_ids(self, msg: dict[str, Any]):
-        """Respond to gateway's GET_MINTED_IDS with all ASSET_MINT asset_ids from our chain."""
+    def handle_get_minted_ids(self, msg):
+        """Respond with all ASSET_MINT asset_ids from our chain."""
         _ = msg
         with self.lock:
             minted = [
@@ -972,10 +843,10 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         })
         self.logger.debug(f"[{self.node_id}] GET_MINTED_IDS: sent {len(minted)} minted id(s) to gateway")
 
-    def handle_get_balance_sync(self, msg: dict[str, Any]):
-        publisher_ip = str(msg.get("publisher_ip") or "")
-        publisher_port = int(msg.get("publisher_port") or 0)
-        userpk = str(msg.get("userpk") or "")
+    def handle_get_balance_sync(self, msg):
+        publisher_ip = msg.get("publisher_ip", "")
+        publisher_port = int(msg.get("publisher_port", 0))
+        userpk = msg.get("userpk", "")
         if publisher_ip and publisher_port and userpk:
             self.request_balance_from_peer(publisher_ip, publisher_port, userpk)
 
@@ -988,14 +859,12 @@ broadcasts the winner to all other nodes so they stop mining and move on.
             if msg_type == "GET_LEDGER":
                 self.send_ledger_snapshot(comm)
             elif msg_type == "GET_BALANCE":
-                userpk = str(msg.get("userpk") or "")
-                comm.send_one_message(
-                    {
-                        "type": "BALANCE_RESPONSE",
-                        "userpk": userpk,
-                        "balance": self.get_balance(userpk),
-                    }
-                )
+                userpk = msg.get("userpk", "")
+                comm.send_one_message({
+                    "type": "BALANCE_RESPONSE",
+                    "userpk": userpk,
+                    "balance": self.get_balance(userpk),
+                })
 
     def send_ledger_snapshot(self, comm):
         snapshot = {
@@ -1006,22 +875,18 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         raw = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
         chunks = [raw[i : i + self.CHUNK_SIZE] for i in range(0, len(raw), self.CHUNK_SIZE)]
 
-        comm.send_one_message(
-            {
-                "type": "LEDGER_SNAPSHOT_START",
-                "chunks": len(chunks),
-                "total_bytes": len(raw),
-            }
-        )
+        comm.send_one_message({
+            "type": "LEDGER_SNAPSHOT_START",
+            "chunks": len(chunks),
+            "total_bytes": len(raw),
+        })
 
         for idx, chunk in enumerate(chunks):
-            comm.send_one_message(
-                {
-                    "type": "LEDGER_SNAPSHOT_CHUNK",
-                    "index": idx,
-                    "data_b64": base64.b64encode(chunk).decode("ascii"),
-                }
-            )
+            comm.send_one_message({
+                "type": "LEDGER_SNAPSHOT_CHUNK",
+                "index": idx,
+                "data_b64": base64.b64encode(chunk).decode("ascii"),
+            })
 
         comm.send_one_message({"type": "LEDGER_SNAPSHOT_END"})
 
@@ -1054,8 +919,8 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                     break
 
             payload = json.loads(b"".join(parts).decode("utf-8"))
-            ledger = payload.get("ledger") if isinstance(payload.get("ledger"), list) else []
-            balances = payload.get("balances") if isinstance(payload.get("balances"), dict) else {}
+            ledger = payload.get("ledger") or []
+            balances = payload.get("balances") or {}
 
             with self.lock:
                 self.chain = ledger
