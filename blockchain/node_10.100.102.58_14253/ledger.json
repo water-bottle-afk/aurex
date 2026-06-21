@@ -1,3 +1,36 @@
 [
-  
+  {
+    "difficulty": 5,
+    "hash": "000009195332e581c7afe7b1891cbb3f2cdd71e276671125786ba3be2f0e150f",
+    "index": 0,
+    "nonce": 628692,
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "timestamp": "2026-06-21T10:10:32.142348",
+    "tx": {
+      "asset_id": "45b166468121cf7c",
+      "img_hash": "f703c96f99f228846c3b4fd8929a49954fd88907c49d45cee0ea4ae4b2ce5c3c",
+      "timestamp": "2026-06-21T10:10:32.138975",
+      "tx_id": "mint-45b166468121cf7c-1782025832138",
+      "type": "ASSET_MINT",
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "user_signature": "3045022100ec1324bce4360623a77d1cb813dddc6ad7ac29130d7ad05f880db875f91246520220368b0d13292d4edf87fec8ea2fc948f16b4bddae7b9ba15ef9cdb4c7c4436336"
+    }
+  },
+  {
+    "difficulty": 5,
+    "hash": "00000f9a6fbd961b54896039cbaa3c7b39ab8f5800e70d36d3a3c6620809a733",
+    "index": 1,
+    "nonce": 217052,
+    "prev_hash": "000009195332e581c7afe7b1891cbb3f2cdd71e276671125786ba3be2f0e150f",
+    "timestamp": "2026-06-21T10:11:08.609383",
+    "tx": {
+      "asset_id": "eeed9716dd26b1d4",
+      "img_hash": "e3d5af2e6e2eb50624c35ac7b53f2bf02048c6e3aa1a1429aae7431a794ff877",
+      "timestamp": "2026-06-21T10:11:08.608495",
+      "tx_id": "mint-eeed9716dd26b1d4-1782025868608",
+      "type": "ASSET_MINT",
+      "user_public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
+      "user_signature": "3045022100f552e48b272677d9ef2c9a83032c0572536bf0022f98ae5174325328229d4c5e02207a40bb698c813c07ac0f9d72d6968d5f7145f32647ecedc7e58b7b5c973eba40"
+    }
+  }
 ]

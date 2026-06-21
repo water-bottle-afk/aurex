@@ -1,44 +1,5 @@
 {
-  "balance": 91.0,
-  "23d8d7ec6f447ded": {
-    "asset_id": "23d8d7ec6f447ded",
-    "version": 2,
-    "owner": "Michael",
-    "asset_name": "Owl",
-    "description": "none",
-    "file_type": "jpg",
-    "cost": 15.0,
-    "created_at": "2026-06-20T11:56:44.347699",
-    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
-    "asset_status": "LISTED",
-    "path": "assets/23d8d7ec6f447ded.jpg"
-  },
-  "09fd30b56109f07d": {
-    "asset_id": "09fd30b56109f07d",
-    "version": 1,
-    "owner": "Yossi",
-    "asset_name": "Dog",
-    "description": "dog img",
-    "file_type": "jpg",
-    "cost": 14.0,
-    "created_at": "2026-06-20T14:19:46.042006",
-    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "asset_status": "MINTED",
-    "path": "assets/09fd30b56109f07d.jpg"
-  },
-  "59f7e5cb1bd1a7cc": {
-    "asset_id": "59f7e5cb1bd1a7cc",
-    "version": 1,
-    "owner": "Yossi",
-    "asset_name": "Elephant",
-    "description": "no",
-    "file_type": "jpg",
-    "cost": 15.0,
-    "created_at": "2026-06-20T14:21:52.841609",
-    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "asset_status": "MINTED",
-    "path": "assets/59f7e5cb1bd1a7cc.jpg"
-  },
+  "balance": 100.0,
   "fc5a16c88f483794": {
     "asset_id": "fc5a16c88f483794",
     "version": 1,
@@ -50,32 +11,6 @@
     "asset_status": "UPLOADED",
     "public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
     "path": "assets/fc5a16c88f483794.jpg"
-  },
-  "02a952dcc6f02fe7": {
-    "asset_id": "02a952dcc6f02fe7",
-    "version": 1,
-    "owner": "Yossi",
-    "asset_name": "Lutras",
-    "description": "lutraaaa",
-    "file_type": "jpg",
-    "cost": 8.0,
-    "created_at": "2026-06-20T14:22:58.118601",
-    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "asset_status": "MINTED",
-    "path": "assets/02a952dcc6f02fe7.jpg"
-  },
-  "e64f8e0aef77ff4e": {
-    "asset_id": "e64f8e0aef77ff4e",
-    "version": 1,
-    "owner": "Michael",
-    "asset_name": "RED PANDA",
-    "description": "its red.",
-    "file_type": "jpg",
-    "cost": 3.0,
-    "created_at": "2026-06-20T14:24:49.138304",
-    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
-    "asset_status": "MINTED",
-    "path": "assets/e64f8e0aef77ff4e.jpg"
   },
   "45b166468121cf7c": {
     "asset_id": "45b166468121cf7c",
@@ -103,19 +38,6 @@
     "asset_status": "MINTED",
     "path": "assets/eeed9716dd26b1d4.jpg"
   },
-  "3806e2b85e9bae17": {
-    "asset_id": "3806e2b85e9bae17",
-    "version": 1,
-    "owner": "Michael",
-    "asset_name": "KITTEN",
-    "description": "little cat",
-    "file_type": "jpg",
-    "cost": 17.0,
-    "created_at": "2026-06-20T14:27:49.260123",
-    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
-    "asset_status": "MINTED",
-    "path": "assets/3806e2b85e9bae17.jpg"
-  },
   "1f1a49bb50ea6a78": {
     "asset_id": "1f1a49bb50ea6a78",
     "version": 1,
@@ -127,57 +49,5 @@
     "asset_status": "UPLOADED",
     "public_key": "041e785a6ffeb1c74bee423eb21e2f96bc59866aa2862a4169369acbea5908464ee8fdc3e049ea0c9617566e61ae5d2066307ae1376d19c91292613f4e4660b172",
     "path": "assets/1f1a49bb50ea6a78.jpg"
-  },
-  "7f7141992f46f077": {
-    "asset_id": "7f7141992f46f077",
-    "version": 1,
-    "owner": "Yossi",
-    "asset_name": "SEA HORSE",
-    "description": "not a real horse..",
-    "file_type": "jpg",
-    "cost": 52.0,
-    "created_at": "2026-06-20T14:29:27.094374",
-    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "asset_status": "MINTED",
-    "path": "assets/7f7141992f46f077.jpg"
-  },
-  "fc6e1263bf2fa04f": {
-    "asset_id": "fc6e1263bf2fa04f",
-    "version": 1,
-    "owner": "Yossi",
-    "asset_name": "Rabbit",
-    "description": "none",
-    "file_type": "jpg",
-    "cost": 46.0,
-    "created_at": "2026-06-20T14:29:58.531719",
-    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "asset_status": "MINTED",
-    "path": "assets/fc6e1263bf2fa04f.jpg"
-  },
-  "639f82f50a587d0d": {
-    "asset_id": "639f82f50a587d0d",
-    "version": 2,
-    "owner": "Yossi",
-    "asset_name": "Fox",
-    "description": "fox",
-    "file_type": "jpg",
-    "cost": 12.0,
-    "created_at": "2026-06-20T14:18:20.829137",
-    "public_key": "04978fbe17bf11b932382f0fbcf1017d0caa1f458ff746297136061221d037cf9576096381e5c790e5130a5a2bf0b17faed708f9a8a037cf512fdc372624ec4449",
-    "asset_status": "LISTED",
-    "path": "assets/639f82f50a587d0d.jpg"
-  },
-  "fd626e7d5391e213": {
-    "asset_id": "fd626e7d5391e213",
-    "version": 2,
-    "owner": "Michael",
-    "asset_name": "dolphine",
-    "description": "sea creature",
-    "file_type": "jpg",
-    "cost": 10.0,
-    "created_at": "2026-06-20T14:28:46.155459",
-    "public_key": "04c8dcaece4467be5be3a327c5aacb65b48d6af0072ef26663367cef3fcd00ffa8fe3d2854e0138f4c9f46a794afd7e986fd98e102fcd3d8f49f83ec54bf1d9673",
-    "asset_status": "LISTED",
-    "path": "assets/fd626e7d5391e213.jpg"
   }
 }

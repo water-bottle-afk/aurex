@@ -203,12 +203,12 @@ class ImageCache:
         return None
 
     def get_if_current(self, asset_id: str, server_version: int) -> "tuple[dict, bytes] | None":
-        """Return (entry_dict, raw) if cached version >= server_version and entry is non-empty."""
+        """Return (entry_dict, raw) if cached version == server_version and entry is non-empty."""
         with self._lock:
             entry = self._metadata.get(asset_id)
             if not isinstance(entry, dict):
                 return None
-            if int(entry.get("version", 0)) < server_version:
+            if int(entry.get("version", 0)) != server_version:
                 return None
             if not entry.get("asset_name"):
                 return None
@@ -1059,15 +1059,23 @@ class ClientApp:
             entry if isinstance(entry, dict) else {"id": str(entry), "version": 1}
             for entry in resp.get("ids", [])
         ]
-        # Evict cached marketplace assets that are no longer in the server's marketplace list
-        server_ids = {e["id"] for e in entries if isinstance(e, dict)}
+        # Build a map of server asset_id → version for fast lookup
+        server_version_map = {e["id"]: e.get("version", 1) for e in entries if isinstance(e, dict)}
         cache = self._image_cache
         if cache:
             for aid, meta in list(cache._metadata.items()):
                 if aid == "balance":
                     continue
-                if isinstance(meta, dict) and meta.get("asset_status") in ("MINTED", "LISTED") and aid not in server_ids:
-                    cache.invalidate(aid)
+                if not isinstance(meta, dict):
+                    continue
+                if aid not in server_version_map:
+                    # Asset gone from marketplace — evict if it was listed
+                    if meta.get("asset_status") in ("MINTED", "LISTED"):
+                        cache.invalidate(aid)
+                else:
+                    # Asset still on server — evict if cached version doesn't match
+                    if int(meta.get("version", 0)) != server_version_map[aid]:
+                        cache.invalidate(aid)
         return entries
 
     def load_asset_by_id(self, asset_id: str, version: int = 1) -> "MarketplaceItem | None":
