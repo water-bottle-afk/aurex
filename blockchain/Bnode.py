@@ -49,6 +49,33 @@ def _mine_block(block_template: dict, difficulty: int,
     result_queue.put(("aborted", None))
 
 
+# Canonical key order for blocks and transactions persisted to the ledger.
+_BLOCK_KEYS = ("index", "prev_hash", "timestamp", "tx", "nonce", "difficulty", "hash")
+_TX_KEYS = (
+    "type", "tx_id", "asset_id",
+    "buyer", "price", "user_public_key", "seller_public_key", "user_signature",
+    "img_hash", "timestamp",
+)
+
+def _canon_block(block: dict) -> dict:
+    """Return block with keys in canonical order so the ledger file is always consistent."""
+    tx_raw = block.get("tx") or {}
+    tx_out = {k: tx_raw[k] for k in _TX_KEYS if k in tx_raw}
+    for k in tx_raw:
+        if k not in tx_out:
+            tx_out[k] = tx_raw[k]
+    out: dict = {}
+    for k in _BLOCK_KEYS:
+        if k == "tx":
+            out["tx"] = tx_out
+        elif k in block:
+            out[k] = block[k]
+    for k in block:
+        if k not in out:
+            out[k] = block[k]
+    return out
+
+
 class BlockchainNode:
     """
 Bnode.py — a single Aurex blockchain node.
@@ -242,12 +269,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         """Recompute the balance table from scratch by replaying BUY blocks in the chain."""
         balances: dict[str, float] = {}
         for block in chain:
-            tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
-            tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
-            if tx_type == "BUY":
-                buyer_pk = str(tx.get("user_public_key") or tx.get("sender") or "")
+            tx = block.get("tx") or {}
+            if str(tx.get("type", "")).upper() == "BUY":
+                buyer_pk = str(tx.get("user_public_key") or "")
                 seller_pk = str(tx.get("seller_public_key") or "")
-                price = float(tx.get("price") or tx.get("amount") or 0.0)
+                price = float(tx.get("price") or 0.0)
                 if buyer_pk and price > 0:
                     balances[buyer_pk] = round(balances.get(buyer_pk, 0.0) - price, 8)
                 if seller_pk and price > 0:
@@ -287,7 +313,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
     def persist_local_state(self):
         """Write the current in-memory chain and balances to disk atomically."""
         with self.lock:
-            self.save_json(self.ledger_path, self.chain)
+            self.save_json(self.ledger_path, [_canon_block(b) for b in self.chain])
             self.save_json(self.balances_path, self.balances)
 
     # -------- blockchain logic --------
@@ -329,8 +355,8 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         return hashlib.sha256(content).hexdigest()
 
     def validate_tx(self, tx: dict[str, Any]):
-        sender = str(tx.get("user_public_key") or tx.get("sender") or "")
-        amount = float(tx.get("price") or tx.get("amount") or 0.0)
+        sender = str(tx.get("user_public_key") or "")
+        amount = float(tx.get("price") or 0.0)
         if amount < 0:
             return False
         if sender and sender in self.balances and self.get_balance(sender) < amount:
@@ -361,11 +387,11 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         if not self.validate_tx(transaction):
             self.logger.warning(
                 f"[{self.node_id}] mine: tx validation failed for "
-                f"tx_type={transaction.get('tx_type', transaction.get('type', 'TX'))}"
+                f"tx_type={transaction.get('type', 'TX')}"
             )
             return None
 
-        tx_label = transaction.get("tx_type") or transaction.get("type") or "TX"
+        tx_label = transaction.get("type") or "TX"
         self.logger.info(f"[{self.node_id}] mine: starting PoW for {tx_label} difficulty={self.difficulty}...")
 
         block_template = {
@@ -427,11 +453,8 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
     def add_block(self, block: dict[str, Any]):
         """Append a validated block to the chain and update the balance table."""
-        tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
-        if not tx and isinstance(block.get("transaction"), dict):
-            tx = block.get("transaction")
-
-        tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
+        tx = block.get("tx") or {}
+        tx_type = str(tx.get("type", "")).upper()
 
         with self.lock:
             # Reject blocks that don't sit exactly at the end of our chain.
@@ -448,9 +471,9 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 return
 
             if tx_type == "BUY":
-                buyer_pk = str(tx.get("user_public_key") or tx.get("sender") or "")
+                buyer_pk = str(tx.get("user_public_key") or "")
                 seller_pk = str(tx.get("seller_public_key") or "")
-                price = float(tx.get("price") or tx.get("amount") or 0.0)
+                price = float(tx.get("price") or 0.0)
                 if buyer_pk and price > 0:
                     self.balances[buyer_pk] = round(float(self.balances.get(buyer_pk, 0.0)) - price, 8)
                 if seller_pk and price > 0:
@@ -579,18 +602,17 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         # Client payload may be one level deeper inside a "data" key
         payload = data.get("data") if isinstance(data.get("data"), dict) else data
-        signed = payload.get("signed_payload") if isinstance(payload.get("signed_payload"), dict) else {}
 
         return {
             "type": tx_type,
             "tx_id": str(payload.get("tx_id") or f"{tx_type}-{int(time.time() * 1000)}"),
-            "asset_id": str(payload.get("asset_id") or signed.get("asset_id") or ""),
-            "buyer": str(payload.get("buyer") or signed.get("buyer") or ""),
-            "price": float(payload.get("price") or signed.get("price") or payload.get("amount") or 0.0),
+            "asset_id": str(payload.get("asset_id") or ""),
+            "buyer": str(payload.get("buyer") or ""),
+            "price": float(payload.get("price") or 0.0),
             "user_public_key": str(payload.get("public_key") or ""),
             "seller_public_key": str(payload.get("seller_public_key") or ""),
             "user_signature": str(payload.get("signature") or ""),
-            "timestamp": payload.get("timestamp") or signed.get("timestamp") or datetime.now().isoformat(),
+            "timestamp": payload.get("timestamp") or datetime.now().isoformat(),
         }
 
     # ── Fail-fast guards ──────────────────────────────────────────────────────
@@ -615,7 +637,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         with self.lock:
             return any(
                 isinstance(b.get("tx"), dict)
-                and str(b["tx"].get("type") or b["tx"].get("tx_type") or "").upper() == "ASSET_MINT"
+                and str(b["tx"].get("type", "")).upper() == "ASSET_MINT"
                 and str(b["tx"].get("asset_id", "")) == asset_id
                 for b in self.chain
             )
@@ -778,16 +800,15 @@ broadcasts the winner to all other nodes so they stop mining and move on.
 
     def _validate_buy_tx(self, tx: dict):
         if not self.validate_tx(tx):
-            sender = tx.get("sender", "")
+            sender = str(tx.get("user_public_key") or tx.get("sender") or "")
+            price = float(tx.get("price") or tx.get("amount") or 0.0)
             raise ValidationError(
-                f"Insufficient balance: sender={sender[:12] if sender else '?'} "
-                f"balance={self.get_balance(sender)} amount={tx.get('amount')}"
+                f"Insufficient balance: have {self.get_balance(sender):.2f} AUR, need {price:.2f} AUR"
             )
 
     def handle_tx_request_buy(self, msg: dict[str, Any]):
         tx = self.tx_from_gateway_message(msg, "BUY")
-        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        asset_id = str(tx.get("asset_id") or data.get("asset_id") or "")
+        asset_id = str(tx.get("asset_id") or "")
         try:
             self._validate_buy_tx(tx)
             if asset_id and self._is_double_buy(asset_id):
@@ -812,10 +833,10 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 "type": "BUY_FAILED",
                 "data": {
                     "asset_id": asset_id,
-                    "buyer": str(tx.get("buyer") or data.get("buyer") or ""),
-                    "user_public_key": str(tx.get("user_public_key") or data.get("public_key") or ""),
+                    "buyer": str(tx.get("buyer") or ""),
+                    "user_public_key": str(tx.get("user_public_key") or ""),
                     "message": str(e),
-                    "tx_id": str(tx.get("tx_id") or data.get("tx_id") or ""),
+                    "tx_id": str(tx.get("tx_id") or ""),
                 },
             })
 
@@ -854,10 +875,10 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         last_relevant_type: str | None = None
         with self.lock:
             for b in self.chain:
-                tx = b.get("tx", {}) if isinstance(b.get("tx"), dict) else {}
+                tx = b.get("tx") or {}
                 if str(tx.get("asset_id") or "") != asset_id:
                     continue
-                tx_type = str(tx.get("tx_type") or tx.get("type") or "").upper()
+                tx_type = str(tx.get("type", "")).upper()
                 if tx_type in ("BUY", "LIST", "ASSET_MINT"):
                     last_relevant_type = tx_type
         return last_relevant_type == "BUY"
@@ -890,8 +911,8 @@ broadcasts the winner to all other nodes so they stop mining and move on.
         if block and block_index == my_len and str(block.get("prev_hash", "")) == self.last_hash():
             # Double-buy protection: if we already have a BUY for this asset (our own mined block),
             # the peer's BUY block is the canonical winner — sync from them to correct our chain.
-            tx = block.get("tx", {}) if isinstance(block.get("tx"), dict) else {}
-            tx_type = str(tx.get("tx_type") or tx.get("type") or "").upper()
+            tx = block.get("tx") or {}
+            tx_type = str(tx.get("type", "")).upper()
             if tx_type == "BUY":
                 asset_id = str(tx.get("asset_id") or "")
                 if asset_id and self._is_double_buy(asset_id):
@@ -942,7 +963,7 @@ broadcasts the winner to all other nodes so they stop mining and move on.
                 str(b["tx"].get("asset_id", ""))
                 for b in self.chain
                 if isinstance(b.get("tx"), dict)
-                and str(b["tx"].get("type") or b["tx"].get("tx_type") or "").upper() == "ASSET_MINT"
+                and str(b["tx"].get("type", "")).upper() == "ASSET_MINT"
             ]
         minted = [a for a in minted if a]
         self.send_gateway({

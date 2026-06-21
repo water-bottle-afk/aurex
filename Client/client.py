@@ -324,7 +324,7 @@ class Client:
         self.push_snackbar_queue.put((text, False))
 
     def _on_buy_failed(self, msg):
-        text = f"Transaction failed: {msg.get('message', 'Unknown reason')}"
+        text = str(msg.get('msg') or msg.get('message') or 'Transaction failed')
         self.notification_queue.put(text)
         self.push_snackbar_queue.put((text, True))
 

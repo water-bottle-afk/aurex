@@ -406,11 +406,11 @@ class Server:
 
     def _parse_buy_parties(self, data: dict):
         """Extract and resolve all parties involved in a BUY transaction."""
-        buyer_pk = str(data.get("user_public_key") or data.get("sender") or data.get("public_key") or "").strip()
-        seller_pk = str(data.get("seller_public_key") or data.get("receiver") or "").strip()
-        buyer_username = str(data.get("buyer_username") or data.get("buyer") or "").strip()
+        buyer_pk = str(data.get("user_public_key") or "").strip()
+        seller_pk = str(data.get("seller_public_key") or "").strip()
+        buyer_username = str(data.get("buyer") or "").strip()
         asset_id = str(data.get("asset_id") or "").strip()
-        price = data.get("price") if data.get("price") is not None else data.get("amount")
+        price = data.get("price")
         buyer_user = self.db.get_user_by_public_key(buyer_pk) if buyer_pk else None
         seller_user = self.db.get_user_by_public_key(seller_pk) if seller_pk else None
         buyer_name = (buyer_user.username if buyer_user else None) or buyer_username
@@ -849,8 +849,8 @@ class Server:
         _ = comm
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         buyer_name, seller_name, asset_id, price = self._parse_buy_parties(data)
-        buyer_pk = str(data.get("user_public_key") or data.get("sender") or data.get("public_key") or "").strip()
-        # Seller not resolved via PK (e.g. old client) — look it up from DB
+        buyer_pk = str(data.get("user_public_key") or "").strip()
+        # Seller not resolved via PK — look it up from DB
         if not seller_name and asset_id:
             asset = self.db.find_asset_by_id(asset_id)
             if asset and asset.owner:
@@ -867,10 +867,15 @@ class Server:
                 return self._success("BUY_ACKNOWLEDGED")
             # Real race: a different buyer won — notify loser and refresh their balance
             if buyer_name:
+                asset_label = asset_id
+                if asset_id:
+                    try:
+                        asset_label = self._find_asset(asset_id).asset_name
+                    except Exception:
+                        pass
                 self._push_event(buyer_name, {
                     "type": "BUY_FAILED", "asset_id": asset_id,
-                    "message": "This asset was just purchased by someone else",
-                    "msg": f"Purchase failed — asset was just bought by someone else",
+                    "msg": f"'{asset_label}' was just purchased by someone else",
                 }, persist=True)
             if buyer_pk:
                 self._notify_gateway({"type": "GET_BALANCE", "userpk": buyer_pk})
@@ -893,15 +898,24 @@ class Server:
         buyer = self._resolve_buyer(data)
         asset_id = str(data.get("asset_id") or "").strip()
         buyer_pk = str(data.get("user_public_key") or data.get("public_key") or "").strip()
-        message = str(data.get("message") or data.get("reason") or "Transaction rejected").strip()
+        message = str(data.get("message") or data.get("reason") or "").strip()
         with self._active_buys_lock:
             self._active_buys.pop(asset_id, None)
         if buyer:
+            asset_label = asset_id
+            if asset_id:
+                try:
+                    asset_label = self._find_asset(asset_id).asset_name
+                except Exception:
+                    pass
+            if "insufficient" in message.lower():
+                user_msg = f"Insufficient balance to buy '{asset_label}'"
+            else:
+                user_msg = f"Purchase of '{asset_label}' failed: {message}" if message else f"Purchase of '{asset_label}' failed"
             self._push_event(buyer, {
                 "type": "BUY_FAILED",
                 "asset_id": asset_id,
-                "message": message,
-                "msg": f"Purchase failed for asset {asset_id}: {message}",
+                "msg": user_msg,
             }, persist=True)
         if buyer_pk:
             self._notify_gateway({"type": "GET_BALANCE", "userpk": buyer_pk})

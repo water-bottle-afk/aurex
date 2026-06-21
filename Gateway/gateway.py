@@ -268,19 +268,17 @@ class GatewayServer:
         if not isinstance(block, dict):
             return False, f"[{label}] block is not a dict"
 
-        tx = block.get("tx")
-        if not isinstance(tx, dict):
-            tx = block.get("transaction") if isinstance(block.get("transaction"), dict) else {}
+        tx = block.get("tx") if isinstance(block.get("tx"), dict) else {}
 
         # Only BUY transactions need gateway-level user-signature verification.
         # MINT / LIST / UNLIST are server-initiated: the server already validated
         # the user's signature before forwarding to the node, so there is no
         # canonical payload for the gateway to reconstruct here.
         # PoW hash integrity (checked below) is sufficient for those tx types.
-        tx_type = str(tx.get("type") or tx.get("tx_type") or "").upper()
+        tx_type = str(tx.get("type", "")).upper()
         if tx_type == "BUY":
-            signature_hex  = str(tx.get("user_signature") or tx.get("signature") or "")
-            public_key_hex = str(tx.get("user_public_key") or tx.get("public_key") or "")
+            signature_hex  = str(tx.get("user_signature") or "")
+            public_key_hex = str(tx.get("user_public_key") or "")
             if signature_hex and public_key_hex:
                 signed_payload: dict = {
                     "asset_id":  tx.get("asset_id"),
@@ -719,7 +717,7 @@ class GatewayServer:
             self._verify_and_get_hash(block, "BROADCAST_TX")
             self.update_node_length(publisher_addr, publisher_chain_length)
             tx = block.get("tx") if isinstance(block.get("tx"), dict) else {}
-            userpk = str(tx.get("user_public_key") or tx.get("sender") or "")
+            userpk = str(tx.get("user_public_key") or "")
             self.maybe_sync_lagging_nodes(publisher_addr, publisher_chain_length, userpk)
             self.broadcast_to_nodes({
                 "type": "BROADCAST_TX_TO_VERIFY",
