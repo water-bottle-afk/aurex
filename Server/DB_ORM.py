@@ -47,8 +47,8 @@ def load_pepper() -> str:
 
 PEPPER = load_pepper()
 
-EMAIL_SENDER = "aurex.main.service@gmail.com"
-EMAIL_APP_PASSWORD = "sshb anri wzom zybg"
+EMAIL_SENDER = "@gmail.com"
+EMAIL_APP_PASSWORD = ""
 
 
 def send_reset_email(recipient: str, otp: str) -> bool:
